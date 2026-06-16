@@ -1,0 +1,6 @@
+# macOS System Files
+.DS_Store
+Thumbs.db
+._*
+.Spotlight-V100
+.TemporaryItems
