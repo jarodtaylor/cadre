@@ -54,7 +54,15 @@ class FleetConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "FleetConfig":
-        data = yaml.safe_load(Path(path).read_text())
+        # FileNotFoundError is intentionally NOT caught here — the CLI/skill handle
+        # a missing spec separately. Syntactic and decode errors become ConfigError
+        # so a broken file produces the same clean UX as a semantically bad one.
+        try:
+            data = yaml.safe_load(Path(path).read_text())
+        except yaml.YAMLError as err:
+            raise ConfigError([f"could not parse YAML: {err}"]) from err
+        except UnicodeDecodeError as err:
+            raise ConfigError([f"could not read fleet spec as UTF-8 text: {err}"]) from err
         if not isinstance(data, dict):
             raise ConfigError([f"top-level YAML must be a mapping, got {type(data).__name__}"])
         return cls.from_dict(data)

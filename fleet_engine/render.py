@@ -15,6 +15,12 @@ def render_result(result: FleetResult) -> str:
     out = [f"=== {result.fleet} — {header} ==="]
     if result.synthesis:
         out.append(result.synthesis)
+    elif result.successes:
+        # No synthesis (synthesizer failed) but lanes succeeded — surface their raw
+        # findings in labeled sections so the user still gets the work, not just
+        # provenance rows.
+        for r in result.successes:
+            out.append(f"\n--- {r.role} ({r.provider}/{r.model}) ---\n{r.text}")
     out.append("\n--- provenance ---")
     for r in result.specialists:
         tag = "ok  " if r.ok else "FAIL"

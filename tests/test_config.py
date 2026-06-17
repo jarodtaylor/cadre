@@ -166,6 +166,15 @@ class TestLoad(unittest.TestCase):
             FleetConfig.load(path)
         self.assertTrue(any("mapping" in e for e in ctx.exception.errors))
 
+    def test_load_syntactically_invalid_yaml(self):
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write("name: [unterminated\n")  # invalid YAML flow sequence
+        self.addCleanup(os.unlink, path)
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.load(path)
+        self.assertTrue(any("parse YAML" in e for e in ctx.exception.errors))
+
 
 if __name__ == "__main__":
     unittest.main()

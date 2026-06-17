@@ -41,6 +41,13 @@ class TestValidate(unittest.TestCase):
         self.assertIn("Invalid fleet config", out)
         self.assertIn("synthesis", out)
 
+    def test_validate_syntactically_invalid_yaml(self):
+        path = _tmp_yaml("name: [unterminated\n")
+        self.addCleanup(os.unlink, path)
+        code, out = validate_command(path)
+        self.assertEqual(code, 1)
+        self.assertIn("Invalid fleet config", out)
+
 
 class TestRun(unittest.TestCase):
     def test_run_renders_synthesis_and_provenance(self):
@@ -65,6 +72,16 @@ class TestRun(unittest.TestCase):
         code, out = run_command(EXAMPLE, "task", client=client)
         self.assertEqual(code, 1)
         self.assertIn("partial result (no synthesis)", out)
+
+    def test_run_synthesizer_failure_still_shows_specialist_text(self):
+        # specialists succeed (default), synthesizer fails -> surviving lane output
+        # must still reach the user, not just provenance rows.
+        client = FakeClient({"synthesizer": ("fail", "rate limited")})
+        code, out = run_command(EXAMPLE, "task", client=client)
+        self.assertEqual(code, 1)
+        self.assertIn("social-output", out)
+        self.assertIn("web-output", out)
+        self.assertIn("synthesizer failed", out)
 
 
 if __name__ == "__main__":
