@@ -72,8 +72,12 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 
 **Committed (the product):** `fleet_engine/`, `tests/`, `fleets/`, `skills/`,
 `spikes/`, `docs/reference/`, `docs/RUNBOOK.md`, `STRATEGY.md`, `README.md`,
-`requirements*.txt`, this file.
+`requirements*.txt`, this file. Also committed, as contributor knowledge:
+**`docs/solutions/`** — documented solutions to past problems (bugs, patterns,
+conventions), by category with YAML frontmatter (`module`, `tags`, `problem_type`),
+relevant when implementing or debugging in a documented area; and **`CONCEPTS.md`** —
+the shared domain vocabulary, relevant when orienting to the code.
 
-**Gitignored (local process, NOT in the tree you review):** `docs/brainstorms/`,
-`docs/plans/`, `docs/solutions/`, `docs/specs/`, `CLAUDE.md`, `.claude/`, `.venv/`.
+**Gitignored (internal process, NOT in the tree you review):** `docs/brainstorms/`,
+`docs/plans/`, `docs/specs/`, `CLAUDE.md`, `.claude/`, `.codex/`, `.venv/`.
 Don't expect planning/design docs in a review — the committed tree *is* the tool.

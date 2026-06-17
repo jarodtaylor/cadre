@@ -29,10 +29,7 @@ fleets/*.local.yaml
 # Planning and Agent Files
 docs/brainstorms
 docs/plans
-docs/solutions
 docs/specs
-# Agent-generated domain glossary (ce-compound) — kept local until explicitly published.
-CONCEPTS.md
 CLAUDE.md
 .claude/
 # Local Codex CLI config — machine-specific absolute PATH (points at this repo's
