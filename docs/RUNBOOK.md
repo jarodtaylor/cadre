@@ -9,7 +9,7 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
 1. **#2 timeout fix — done.** Every model call (each specialist *and* the synthesizer) is bounded by an outer wall-clock timeout on a daemon thread (`run_fleet(call_timeout=...)`, default 600s), so a hung provider can't stall the fan-out or block process exit (commits `7877ffa`; allowlist security follow-up `6ffe711`). It's a *backstop* over AIAgent's own request timeout — see the **timeout note** under Phase B before relying on it unattended.
 2. **Publish to GitHub** (no remote exists yet):
    ```bash
-   gh repo create agent-fleet-factory --public --source=. --remote=origin --push
+   gh repo create cadre --public --source=. --remote=origin --push
    # or create the repo in the UI, then:
    #   git remote add origin <url> && git push -u origin feat/fleet-engine-mvp
    ```
@@ -19,7 +19,7 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
 
 3. **Clone (or pull) the repo:**
    ```bash
-   git clone <url> agent-fleet-factory && cd agent-fleet-factory
+   git clone <url> cadre && cd cadre
    ```
 4. **Use the Hermes venv's Python** — it already has `hermes-agent` and a compatible Python. Add `pyyaml` to it; the engine needs nothing else:
    ```bash

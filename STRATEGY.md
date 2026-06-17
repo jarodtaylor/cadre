@@ -1,4 +1,4 @@
-# Strategy — Agent Fleet Factory
+# Strategy — Cadre
 
 > The product's north star. Stubbed from the 2026-06-16 brainstorm; re-run `/ce-strategy` to deepen.
 

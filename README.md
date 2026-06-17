@@ -1,4 +1,4 @@
-# Agent Fleet Factory
+# Cadre
 
 Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each as a specialist, then synthesize one grounded, attributed report. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 

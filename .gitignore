@@ -33,6 +33,9 @@ fleets/*.local.yaml
 docs/brainstorms
 docs/plans
 docs/specs
+# Origin research notes (early AI chats) — internal; the public reference is docs/reference/hermes/
+docs/reference/[0-9]*-*.md
+docs/reference/README.md
 CLAUDE.md
 .claude/
 # Local Codex CLI config — machine-specific absolute PATH (points at this repo's
