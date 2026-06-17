@@ -26,6 +26,11 @@ Guessing here already caused a real privilege bug (`enabled_toolsets=None` enabl
 source file/line or the vendored doc — or say it's unverified. Highest‑leverage facts
 are in the reference README; skim it before reviewing the adapter, the config gate, or the engine timeout.
 
+**Do not live-import `hermes-agent` / `run_agent`** to introspect the real API — it
+is not installed in dev or review sandboxes (the import fails), and installing it
+there is the wrong fix (it is host-only and needs auth). Read the vendored
+`python-library.md` instead; that is exactly what it is for.
+
 ## Dev vs runtime split
 
 - **This repo runs and tests fully WITHOUT `hermes-agent`.** The adapter

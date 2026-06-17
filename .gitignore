@@ -33,4 +33,7 @@ docs/solutions
 docs/specs
 CLAUDE.md
 .claude/
+# Local Codex CLI config — machine-specific absolute PATH (points at this repo's
+# .venv/bin); never commit to a public repo.
+.codex/
 
