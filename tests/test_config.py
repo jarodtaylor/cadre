@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 
 from fleet_engine.config import ConfigError, FleetConfig, SynthesisSpec
@@ -105,6 +107,64 @@ class TestDuplicateRole(unittest.TestCase):
                 {"role": "web", "provider": "p", "model": "m2"},
             ]))
         self.assertTrue(any("duplicate" in e for e in ctx.exception.errors))
+
+
+class TestMalformedEntries(unittest.TestCase):
+    def test_role_not_a_string_does_not_crash(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": ["web"], "provider": "p", "model": "m"},
+            ]))
+        self.assertTrue(any("role" in e for e in ctx.exception.errors))
+
+    def test_toolset_element_not_a_string_does_not_crash(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": "web", "provider": "p", "model": "m", "toolset": [{"x": "y"}]},
+            ]))
+        self.assertTrue(any("toolset" in e and "string" in e for e in ctx.exception.errors))
+
+    def test_toolset_not_a_list(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": "web", "provider": "p", "model": "m", "toolset": "web"},
+            ]))
+        self.assertTrue(any("toolset must be a list" in e for e in ctx.exception.errors))
+
+    def test_specialist_not_a_mapping_keeps_accumulating(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[42, {"role": "web"}]))
+        errs = ctx.exception.errors
+        self.assertTrue(any("must be a mapping" in e for e in errs))
+        self.assertTrue(any("provider" in e for e in errs))  # second entry still validated
+
+    def test_synthesis_missing_provider(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(synthesis={"model": "m"}))
+        self.assertTrue(any("synthesis.provider" in e for e in ctx.exception.errors))
+
+
+class TestPrivilegedGateTypeSafety(unittest.TestCase):
+    def test_quoted_false_is_rejected_not_truthy(self):
+        # allow_privileged_tools: "false" must not silently enable the gate.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                allow_privileged_tools="false",
+                specialists=[{"role": "coder", "provider": "p", "model": "m",
+                              "toolset": ["code_execution"]}],
+            ))
+        self.assertTrue(any("boolean" in e for e in ctx.exception.errors))
+
+
+class TestLoad(unittest.TestCase):
+    def test_load_non_mapping_yaml(self):
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write("- a\n- b\n")
+        self.addCleanup(os.unlink, path)
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.load(path)
+        self.assertTrue(any("mapping" in e for e in ctx.exception.errors))
 
 
 if __name__ == "__main__":

@@ -115,5 +115,13 @@ class TestDegradation(unittest.TestCase):
         self.assertTrue(any("single surviving" in n for n in result.notes))
 
 
+class TestSynthesisPromptFallback(unittest.TestCase):
+    def test_default_prompt_used_when_prompt_empty(self):
+        client = FakeClient({"synthesizer": ("ok", "x")})
+        cfg = _config(synthesis={"provider": "openrouter", "model": "synth/model", "prompt": ""})
+        run_fleet(cfg, "task", client)
+        self.assertIn("Synthesize the specialist findings", client.prompt_for("synthesizer"))
+
+
 if __name__ == "__main__":
     unittest.main()

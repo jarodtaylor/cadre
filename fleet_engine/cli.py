@@ -18,15 +18,13 @@ from fleet_engine.model_client import ModelClient
 from fleet_engine.render import render_result
 
 
-def _format_errors(err: ConfigError) -> str:
-    return "Invalid fleet config:\n" + "\n".join(f"  - {m}" for m in err.errors)
-
-
 def validate_command(path: str) -> tuple[int, str]:
     try:
         cfg = FleetConfig.load(path)
     except ConfigError as err:
-        return 1, _format_errors(err)
+        return 1, str(err)
+    except FileNotFoundError:
+        return 1, f"Fleet spec not found: {path}"
     lines = [f"OK: {cfg.name}", f"  specialists: {len(cfg.specialists)}"]
     for s in cfg.specialists:
         lines.append(f"    - {s.role}: {s.provider}/{s.model} tools={s.toolset}")
@@ -38,7 +36,9 @@ def run_command(path: str, task: str, client: ModelClient | None = None) -> tupl
     try:
         cfg = FleetConfig.load(path)
     except ConfigError as err:
-        return 1, _format_errors(err)
+        return 1, str(err)
+    except FileNotFoundError:
+        return 1, f"Fleet spec not found: {path}"
     result = run_fleet(cfg, task, client or ModelClient())
     return (0 if result.ok else 1), render_result(result)
 

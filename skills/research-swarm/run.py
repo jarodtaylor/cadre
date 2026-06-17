@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = FleetConfig.load(args.fleet)
     except ConfigError as err:
-        print("Invalid fleet config:\n" + "\n".join(f"  - {m}" for m in err.errors))
+        print(str(err))
         return 1
     except FileNotFoundError:
         print(f"Fleet spec not found: {args.fleet}\n"

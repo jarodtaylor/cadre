@@ -2,8 +2,9 @@
 
 A fleet is defined entirely by a YAML spec — specialists (each a role + provider
 + model + toolset) and a synthesis step. The engine reads these objects; no
-fleet-domain strings live in the engine. ``validate`` accumulates every error and
-raises once, so a single load surfaces all problems rather than the first.
+fleet-domain strings live in the engine. Loading accumulates every error and
+raises ``ConfigError`` once, so a single load surfaces all problems rather than
+the first — and malformed inputs become errors, never tracebacks.
 """
 
 from __future__ import annotations
@@ -66,7 +67,12 @@ class FleetConfig:
         if not name or not isinstance(name, str):
             errors.append("`name` is required and must be a non-empty string")
 
-        allow_priv = bool(data.get("allow_privileged_tools", False))
+        allow_priv_raw = data.get("allow_privileged_tools", False)
+        if not isinstance(allow_priv_raw, bool):
+            errors.append("`allow_privileged_tools` must be a boolean (true/false)")
+            allow_priv = False
+        else:
+            allow_priv = allow_priv_raw
 
         syn_raw = data.get("synthesis")
         synthesis: SynthesisSpec | None = None
@@ -94,14 +100,17 @@ class FleetConfig:
                 if not isinstance(raw, dict):
                     errors.append(f"{label} must be a mapping")
                     continue
+
                 role = raw.get("role")
-                if not role:
-                    errors.append(f"{label}.role is required")
+                if not role or not isinstance(role, str):
+                    errors.append(f"{label}.role is required and must be a string")
+                    role = None
                 else:
                     label = f"specialist '{role}'"
                     if role in seen_roles:
                         errors.append(f"duplicate specialist role '{role}'")
                     seen_roles.add(role)
+
                 if not raw.get("provider"):
                     errors.append(f"{label}.provider is required")
                 if not raw.get("model"):
@@ -111,6 +120,10 @@ class FleetConfig:
                 if not isinstance(toolset, list):
                     errors.append(f"{label}.toolset must be a list")
                     toolset = []
+                elif any(not isinstance(t, str) for t in toolset):
+                    errors.append(f"{label}.toolset entries must all be strings")
+                    toolset = [t for t in toolset if isinstance(t, str)]
+
                 privileged = sorted(set(toolset) & PRIVILEGED_TOOLSETS)
                 if privileged and not allow_priv:
                     errors.append(
