@@ -1,0 +1,12 @@
+# Runtime dependencies.
+
+# Fleet config loading — the only hard dependency for the engine and its tests.
+pyyaml>=6.0
+
+# hermes-agent: required ONLY on the machine that runs fleets live (the Hermes
+# host — e.g. the VPS / Mac Mini), not for building or testing the engine.
+# It is git-distributed (not on PyPI), so pin by tag or commit SHA before
+# deploying. The adapter imports it lazily (only when constructing a live
+# agent), so this package imports and the full test suite run WITHOUT it.
+# Uncomment and pin on the Hermes host:
+# hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@<tag-or-sha>

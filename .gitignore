@@ -4,3 +4,28 @@ Thumbs.db
 ._*
 .Spotlight-V100
 .TemporaryItems
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets / credentials — NEVER commit. Fleet YAML and the spike carry provider
+# names and model strings only; real keys/tokens live in Hermes auth or the env.
+.env
+.env.*
+auth.json
+*.auth.json
+*.key
+*.pem
+
+# Local-only fleet variants (machine-specific values)
+fleets/*.local.yaml

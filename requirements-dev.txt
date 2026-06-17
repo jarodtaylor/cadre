@@ -1,0 +1,4 @@
+# Local dev / test dependencies.
+# The engine is tested against a fake adapter, so hermes-agent is NOT needed
+# here. Tests use the stdlib unittest runner — no test framework to install.
+pyyaml>=6.0
