@@ -1,3 +1,5 @@
+import sys
+import types
 import unittest
 
 from fleet_engine.model_client import ModelClient
@@ -70,6 +72,50 @@ class TestImportIsolation(unittest.TestCase):
         # constructible even though hermes-agent is not installed on this machine.
         # The default factory would import run_agent only when .run is called live.
         self.assertIsNotNone(ModelClient())
+
+
+class TestDefaultFactoryToolsetIsFailClosed(unittest.TestCase):
+    """The real adapter factory must pass an explicit [] (zero tools), never None.
+
+    In Hermes, enabled_toolsets=None enables EVERY toolset (terminal, file, browser,
+    code_execution, ...); [] enables none. The old `list(toolset) or None` collapsed
+    []->None, silently handing the synthesizer and empty-toolset specialists the full
+    privileged surface over untrusted content. This guards the *real* factory — the
+    synthesizer has no config allowlist behind it, so this test is its only gate.
+    """
+
+    def _stub_run_agent(self):
+        captured = []
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+            def chat(self, prompt):
+                return "ok"
+
+        module = types.ModuleType("run_agent")
+        module.AIAgent = _StubAIAgent
+        sys.modules["run_agent"] = module
+        self.addCleanup(sys.modules.pop, "run_agent", None)
+        return captured
+
+    def test_no_toolset_sends_empty_list_not_none(self):
+        captured = self._stub_run_agent()
+        # synthesizer-style call: no toolset passed at all
+        ModelClient().run(role="synthesizer", provider="openrouter", model="m", prompt="go")
+        self.assertEqual(captured[0]["enabled_toolsets"], [])
+        self.assertIsNotNone(captured[0]["enabled_toolsets"])  # None would enable ALL toolsets
+
+    def test_empty_toolset_sends_empty_list_not_none(self):
+        captured = self._stub_run_agent()
+        ModelClient().run(role="web", provider="p", model="m", prompt="go", toolset=[])
+        self.assertEqual(captured[0]["enabled_toolsets"], [])
+
+    def test_toolset_passed_through_verbatim(self):
+        captured = self._stub_run_agent()
+        ModelClient().run(role="web", provider="p", model="m", prompt="go", toolset=["web"])
+        self.assertEqual(captured[0]["enabled_toolsets"], ["web"])
 
 
 if __name__ == "__main__":

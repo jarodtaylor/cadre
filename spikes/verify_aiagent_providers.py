@@ -41,7 +41,8 @@ def _agent(provider: str, model: str, toolset: list[str] | None = None):
     return AIAgent(
         provider=provider,
         model=model,
-        enabled_toolsets=list(toolset) if toolset else None,
+        # [] not None: in Hermes, enabled_toolsets=None enables EVERY toolset.
+        enabled_toolsets=list(toolset) if toolset else [],
         skip_memory=True,
         skip_context_files=True,
         quiet_mode=True,

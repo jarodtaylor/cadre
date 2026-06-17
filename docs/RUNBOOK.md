@@ -42,6 +42,8 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
    # set confirmed provider/model strings; never commit real keys/tokens
    ```
    Wire the search-tool credentials each lane needs — `web` → a search key (Tavily/Serper/Brave); `x_search` → SuperGrok OAuth or an xAI key. A specialist with a working model but an unauthed tool returns ungrounded prose.
+
+   > **Tool-gate note.** The adapter passes each lane's toolset to AIAgent as an explicit allowlist (`enabled_toolsets=[...]`); an empty/omitted toolset — including the synthesizer — gets **zero** tools, never AIAgent's `None`-means-every-toolset default. One host caveat: if `HERMES_KANBAN_TASK` is set in the fleet's runtime environment, Hermes appends the (non-privileged) `kanban` toolset even to an empty list — unset it for a strict zero-tools guarantee.
 9. **Confirm the suite is green on the host:**
    ```bash
    ~/.hermes/hermes-agent/venv/bin/python -m unittest discover -s tests

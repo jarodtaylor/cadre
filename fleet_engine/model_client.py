@@ -41,7 +41,13 @@ def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any
     return AIAgent(
         provider=provider,
         model=model,
-        enabled_toolsets=list(toolset) or None,
+        # Pass the toolset verbatim — NEVER collapse [] to None. In Hermes,
+        # enabled_toolsets=None means "enable EVERY toolset" (terminal, file,
+        # browser, code_execution, ...); [] means "no tools". An empty toolset (the
+        # synthesizer, or a specialist configured with none) must get zero tools, not
+        # the full privileged surface — [] is the fail-closed allowlist-of-nothing
+        # that mirrors the config gate. Verified vs hermes-agent model_tools.py.
+        enabled_toolsets=list(toolset),
         skip_memory=True,
         skip_context_files=True,
         quiet_mode=True,
