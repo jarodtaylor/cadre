@@ -15,10 +15,26 @@ from typing import Any
 
 import yaml
 
-# Toolsets that can act beyond reading/searching. A specialist that ingests
-# untrusted web content must not silently gain these from a config typo, so they
-# require an explicit ``allow_privileged_tools`` opt-in on the fleet.
-PRIVILEGED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "computer_use"})
+# Toolsets SAFE for a specialist that ingests untrusted web content: they read,
+# search, analyze, reason, or generate output content and take no action on
+# external systems or the local machine. The gate is an ALLOWLIST (fail-closed):
+# anything not listed here requires an explicit ``allow_privileged_tools: true``
+# opt-in on the fleet — shell/file/code/browser/computer control, composites that
+# bundle them (e.g. ``debugging`` = web+file+terminal), outbound-action or
+# external-account tools (``messaging``, ``cronjob``, ``discord``, ...), subagent
+# spawning (``delegation``), AND any unrecognized name. A denylist would silently
+# wave through the next renamed/added/composite toolset; fail-closed makes a config
+# typo or a new Hermes capability error loudly instead of leaking privilege into a
+# lane processing untrusted content. Names verified against hermes-agent's
+# toolsets.py; err small — the opt-in covers anything under-included here.
+SAFE_TOOLSETS = frozenset({
+    "web", "search", "x_search",      # web + X search/scrape (read-only)
+    "vision", "video",                # image / video analysis (read-only)
+    "image_gen", "video_gen", "tts",  # content generation (output only, no system access)
+    "moa",                            # mixture-of-agents reasoning (no system access)
+    "todo", "clarify",                # internal task planning / user clarification (no system access)
+    "safe",                           # Hermes's own safe composite (web + vision + image_gen)
+})
 
 
 class ConfigError(Exception):
@@ -132,11 +148,13 @@ class FleetConfig:
                     errors.append(f"{label}.toolset entries must all be strings")
                     toolset = [t for t in toolset if isinstance(t, str)]
 
-                privileged = sorted(set(toolset) & PRIVILEGED_TOOLSETS)
-                if privileged and not allow_priv:
+                unsafe = sorted(set(toolset) - SAFE_TOOLSETS)
+                if unsafe and not allow_priv:
                     errors.append(
-                        f"{label} requests privileged toolset(s) {privileged} but "
-                        "`allow_privileged_tools: true` is not set on the fleet"
+                        f"{label} requests non-safe toolset(s) {unsafe}: they can act "
+                        "beyond reading/searching (code/file/shell/browser/computer or "
+                        "outbound actions), bundle such tools, or are unrecognized. Set "
+                        "`allow_privileged_tools: true` on the fleet to permit them."
                     )
 
                 specialists.append(

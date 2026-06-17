@@ -98,6 +98,52 @@ class TestPrivilegedToolsetGate(unittest.TestCase):
         self.assertTrue(cfg.allow_privileged_tools)
         self.assertIn("code_execution", cfg.specialists[0].toolset)
 
+    def test_browser_rejected_without_optin(self):
+        # `browser` is a real Hermes toolset granting full browser automation
+        # (navigate/click/type/CDP) — the untrusted-content -> action injection path.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": "surf", "provider": "p", "model": "m", "toolset": ["web", "browser"]},
+            ]))
+        self.assertTrue(any("browser" in e for e in ctx.exception.errors))
+
+    def test_browser_allowed_with_optin(self):
+        cfg = FleetConfig.from_dict(make_data(
+            allow_privileged_tools=True,
+            specialists=[{"role": "surf", "provider": "p", "model": "m", "toolset": ["browser"]}],
+        ))
+        self.assertIn("browser", cfg.specialists[0].toolset)
+
+    def test_debugging_composite_rejected_without_optin(self):
+        # `debugging` is a composite that expands to web+file+terminal: a denylist
+        # of literal names would wave it through. Fail-closed must reject it.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": "dbg", "provider": "p", "model": "m", "toolset": ["debugging"]},
+            ]))
+        self.assertTrue(any("debugging" in e for e in ctx.exception.errors))
+
+    def test_unknown_toolset_rejected_without_optin(self):
+        # `code` is NOT a real Hermes toolset (it silently grants nothing there);
+        # fail-closed turns that typo into a loud error instead of a no-op lane.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(specialists=[
+                {"role": "x", "provider": "p", "model": "m", "toolset": ["code"]},
+            ]))
+        self.assertTrue(any("code" in e for e in ctx.exception.errors))
+
+    def test_safe_content_toolsets_need_no_optin(self):
+        # Lock the allowlist: representative read/search/generate toolsets pass
+        # without the privileged opt-in.
+        cfg = FleetConfig.from_dict(make_data(
+            specialists=[
+                {"role": "a", "provider": "p", "model": "m", "toolset": ["web", "search", "x_search"]},
+                {"role": "b", "provider": "p", "model": "m", "toolset": ["vision", "image_gen", "tts"]},
+            ],
+        ))
+        self.assertFalse(cfg.allow_privileged_tools)
+        self.assertEqual(len(cfg.specialists), 2)
+
 
 class TestDuplicateRole(unittest.TestCase):
     def test_duplicate_role_errors(self):
