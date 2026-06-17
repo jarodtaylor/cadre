@@ -26,6 +26,9 @@ auth.json
 # Local-only fleet variants (machine-specific values)
 fleets/*.local.yaml
 
+# Personal local scratch (checklists, notes) — never committed
+*.local.md
+
 # Planning and Agent Files
 docs/brainstorms
 docs/plans
