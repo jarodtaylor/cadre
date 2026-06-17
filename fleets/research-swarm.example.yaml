@@ -1,0 +1,41 @@
+# Research swarm — EXAMPLE fleet. U7 produces the real one with your confirmed
+# Hermes strings (verified by the U1 spike on the Hermes host).
+#
+# Replace provider/model values with the exact strings your Hermes resolves.
+# Per-provider model-string format:
+#   - OpenRouter providers: model is the full "vendor/model" slug
+#   - OAuth providers (xai, openai-codex, nous): set provider explicitly + bare model id
+#
+# NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
+
+name: research-swarm
+
+synthesis:
+  provider: openrouter
+  # Strong synthesizer. Note: Claude bills at API rates inside Hermes — swap for a
+  # strong non-Anthropic model (e.g. a GPT/Gemini slug) to cut cost if preferred.
+  model: anthropic/claude-opus-4.8
+  prompt: |
+    Synthesize the specialist findings below into one grounded report on the task.
+    Attribute each claim to the specialist that surfaced it (role + model), and
+    preserve every source / citation. Call out conflicts between specialists.
+    Prioritize primary sources over secondary commentary.
+
+specialists:
+  - role: social
+    provider: xai            # OAuth provider -> bare model id
+    model: grok-4.3
+    toolset: [x_search]
+    focus: Search X / social for the latest real-time discussion and sentiment.
+
+  - role: web
+    provider: openrouter     # aggregator -> full vendor/model slug
+    model: google/gemini-3-flash
+    toolset: [web]
+    focus: Find primary sources, papers, docs, and recent web data; cheap and fast.
+
+  - role: analysis
+    provider: openrouter
+    model: anthropic/claude-sonnet-4.6
+    toolset: [web]
+    focus: Deep structured analysis and extraction; cross-check the other lanes.
