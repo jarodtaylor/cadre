@@ -1,4 +1,9 @@
+import subprocess
+import sys
+import threading
+import time
 import unittest
+from pathlib import Path
 
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
@@ -121,6 +126,120 @@ class TestSynthesisPromptFallback(unittest.TestCase):
         cfg = _config(synthesis={"provider": "openrouter", "model": "synth/model", "prompt": ""})
         run_fleet(cfg, "task", client)
         self.assertIn("Synthesize the specialist findings", client.prompt_for("synthesizer"))
+
+
+class HangingClient:
+    """Fake client where chosen roles hang forever — models a stuck provider.
+
+    A hung call blocks on an Event that is never set; its daemon thread is
+    abandoned at process exit. Non-hung roles return instantly.
+    """
+
+    def __init__(self, hang_roles=(), behavior=None):
+        self.hang = set(hang_roles)
+        self.behavior = behavior or {}
+        self._never = threading.Event()
+
+    def run(self, *, role, provider, model, prompt, toolset=()):
+        if role in self.hang:
+            self._never.wait()  # blocks until the process exits
+        kind, payload = self.behavior.get(role, ("ok", f"{role}-output"))
+        ok = kind == "ok"
+        return AgentResult(
+            role=role, provider=provider, model=model, ok=ok,
+            text=payload if ok else None, error=None if ok else payload,
+        )
+
+
+class TestSpecialistTimeout(unittest.TestCase):
+    def test_hung_specialist_times_out_and_survivors_synthesize(self):
+        client = HangingClient(hang_roles={"social"}, behavior={"synthesizer": ("ok", "DONE")})
+        start = time.monotonic()
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 2.0)  # returned despite the hang, ~call_timeout not forever
+        social = next(r for r in result.specialists if r.role == "social")
+        self.assertFalse(social.ok)
+        self.assertIn("timed out", social.error)
+        self.assertTrue(any("social" in n and "timed out" in n for n in result.notes))
+        # Degraded: synthesized over the two survivors.
+        self.assertTrue(result.ok)
+        self.assertEqual(result.synthesis, "DONE")
+        self.assertEqual(len(result.successes), 2)
+
+
+class TestSynthesizerTimeout(unittest.TestCase):
+    def test_hung_synthesizer_degrades_to_labeled_outputs(self):
+        client = HangingClient(hang_roles={"synthesizer"})
+        start = time.monotonic()
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 2.0)
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.synthesis)
+        self.assertEqual(len(result.successes), 3)  # specialist outputs preserved
+        self.assertTrue(any("synthesizer failed" in n and "timed out" in n for n in result.notes))
+
+
+# Child program for the clean-exit test: run a fleet with one call hung forever,
+# then print a sentinel. If run_fleet leaves a non-daemon thread (e.g. a revert to
+# ThreadPoolExecutor), the interpreter joins it at shutdown and never exits — the
+# parent's subprocess timeout then fires and the test fails. argv[1] picks what hangs.
+_CLEAN_EXIT_CHILD = """
+import sys, threading
+from fleet_engine.config import FleetConfig
+from fleet_engine.engine import run_fleet
+from fleet_engine.model_client import AgentResult
+
+hang = sys.argv[1]
+never = threading.Event()
+
+
+class HangingClient:
+    def run(self, *, role, provider, model, prompt, toolset=()):
+        if (hang == "synthesizer" and role == "synthesizer") or (hang == "specialist" and role == "social"):
+            never.wait()
+        return AgentResult(role=role, provider=provider, model=model, ok=True, text=role + "-out")
+
+
+cfg = FleetConfig.from_dict({
+    "name": "t",
+    "synthesis": {"provider": "openrouter", "model": "s/m", "prompt": "S:"},
+    "specialists": [
+        {"role": "web", "provider": "openrouter", "model": "w/m"},
+        {"role": "social", "provider": "xai", "model": "grok"},
+    ],
+})
+run_fleet(cfg, "task", HangingClient(), call_timeout=0.3)
+print("EXITED_CLEANLY")
+"""
+
+
+class TestCleanExitOnHang(unittest.TestCase):
+    """The property that justified daemon threads: the process EXITS on a hang.
+
+    An in-process test can't observe interpreter shutdown, so this runs run_fleet
+    in a child and asserts it exits promptly even with a provider hung forever.
+    """
+
+    def _assert_exits(self, hang):
+        repo_root = Path(__file__).resolve().parents[1]
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _CLEAN_EXIT_CHILD, hang],
+                cwd=repo_root, capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(f"run_fleet did not exit with a hung {hang} — a non-daemon thread was joined at shutdown")
+        self.assertIn("EXITED_CLEANLY", proc.stdout, msg=proc.stderr)
+
+    def test_exits_with_hung_specialist(self):
+        self._assert_exits("specialist")
+
+    def test_exits_with_hung_synthesizer(self):
+        self._assert_exits("synthesizer")
 
 
 if __name__ == "__main__":
