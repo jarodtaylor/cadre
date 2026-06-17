@@ -6,7 +6,7 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
 
 ## Phase A — on the dev machine
 
-1. **(Recommended) Land the #2 timeout fix first** so you publish a resilient version. A hung provider currently has no per-specialist deadline and can stall the fan-out (Codex finding #2, deferred). Add a per-specialist timeout + a test, then `unittest` green.
+1. **#2 timeout fix — done.** Every model call (each specialist *and* the synthesizer) is bounded by an outer wall-clock timeout on a daemon thread (`run_fleet(call_timeout=...)`, default 600s), so a hung provider can't stall the fan-out or block process exit (commits `7877ffa`; allowlist security follow-up `6ffe711`). It's a *backstop* over AIAgent's own request timeout — see the **timeout note** under Phase B before relying on it unattended.
 2. **Publish to GitHub** (no remote exists yet):
    ```bash
    gh repo create agent-fleet-factory --public --source=. --remote=origin --push
@@ -27,6 +27,8 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
    ```
    Run everything below with `~/.hermes/hermes-agent/venv/bin/python` from the repo root (so `fleet_engine` imports).
 5. **Confirm providers + collect model strings.** Verify ≥2 providers are authenticated (≥1 non-Anthropic). Note the exact `(provider, model)` per lane — OpenRouter takes the full `vendor/model` slug; OAuth providers (xai, openai-codex, nous) take `provider=` + a bare model id.
+
+   > **Timeout note.** Two layers guard against a hung provider. **Inner (primary):** AIAgent's own per-request timeout — a stale-response detector (~90–120s) + a client timeout (~1800s default) — raises into `chat()` and surfaces as a typed lane failure; this is what actually aborts the network call and stops provider spend. Tune it on the host via `HERMES_API_TIMEOUT` (env) or `providers.<id>.request_timeout_seconds` in `cli-config.yaml` **(confirm)**. **Outer (backstop):** the engine's `call_timeout` (600s default) only bounds `run_fleet` if the inner layer wedges, and is non-canceling (Python can't kill a thread) — keep it above the inner timeout and above a legitimately slow multi-iteration lane (`max_iterations` defaults to ~90). U1 (step 6) verifies the load-bearing assumption that AIAgent raises a **catchable** exception on a hung/failed call.
 6. **Run the U1 verification spike** (this gates everything):
    ```bash
    # edit spikes/verify_aiagent_providers.py: set PROVIDERS (and TOOL_CHECK) to your real strings

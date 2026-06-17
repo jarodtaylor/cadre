@@ -7,11 +7,17 @@ failures rather than crashing — and only fails outright when nothing usable
 remains.
 
 Every model call (each specialist and the synthesizer) runs in a daemon thread
-under a wall-clock timeout, so a hung or pathologically slow provider can neither
-stall the run nor block interpreter exit. Python cannot kill a thread: a
-``ThreadPoolExecutor`` worker is joined at shutdown and would re-hang the process,
-whereas a daemon thread is abandoned. ``AIAgent``'s ``max_iterations`` bounds the
-agent loop, not wall-clock on a stuck network call — this timeout is that bound.
+under an outer wall-clock timeout, so a hung or pathologically slow provider can
+neither stall the run nor block interpreter exit. This is a *backstop*, not the
+primary cancel: AIAgent has its own per-request timeout (a stale-response detector
+~90-120s plus a ~1800s client timeout) that raises into ``chat()`` and surfaces
+here as a typed failure — that inner layer is what actually aborts the network call
+and stops provider spend. The daemon timeout only bounds the run if that inner
+layer wedges, and it is non-canceling: Python cannot kill a thread (a
+``ThreadPoolExecutor`` worker is joined at shutdown and would re-hang the process; a
+daemon thread is abandoned), so a timed-out lane's call may keep running briefly
+until AIAgent's own timeout frees it — hence we never retry on a timeout.
+``max_iterations`` bounds the agent loop and is a separate limit again.
 
 The engine holds no fleet-domain strings and no AIAgent knowledge: it depends on
 ``FleetConfig`` (data) and ``ModelClient`` (behavior), both injectable, so every
@@ -28,11 +34,15 @@ from typing import Callable
 from fleet_engine.config import FleetConfig, SpecialistSpec
 from fleet_engine.model_client import AgentResult, ModelClient
 
-# Wall-clock ceiling for any single model call. A safety net against a hung or
-# pathologically slow provider — generous on purpose, so it fires only on a
-# genuine hang, never on a healthy-but-slow lane. Override via
+# Outer wall-clock backstop for any single model call. NOT the primary cancel:
+# AIAgent's own per-request timeout (a stale-response detector ~90-120s plus a
+# ~1800s client timeout) is what aborts a hung call and stops provider spend; this
+# only bounds run_fleet if that inner layer wedges. Generous on purpose — well above
+# the inner detector and above a typical multi-iteration lane, so it fires on a true
+# wedge, not on healthy-but-slow work. Tune against live host numbers (a maximally
+# deep lane, max_iterations~90, can approach this). Override via
 # run_fleet(call_timeout=...); None disables it (block until every call returns).
-DEFAULT_CALL_TIMEOUT = 300.0
+DEFAULT_CALL_TIMEOUT = 600.0
 
 
 @dataclass
