@@ -1,9 +1,5 @@
 # macOS System Files
 .DS_Store
-Thumbs.db
-._*
-.Spotlight-V100
-.TemporaryItems
 
 # Python
 __pycache__/
@@ -29,3 +25,12 @@ auth.json
 
 # Local-only fleet variants (machine-specific values)
 fleets/*.local.yaml
+
+# Planning and Agent Files
+docs/brainstorms
+docs/plans
+docs/solutions
+docs/specs
+CLAUDE.md
+.claude/
+
