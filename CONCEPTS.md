@@ -20,3 +20,11 @@ The engine's one orchestration primitive: run every specialist concurrently (fan
 
 ### Privileged toolset
 A toolset that lets an agent act beyond reading or searching — running shell commands, writing files, executing code, or driving a browser or computer. Because a specialist may process untrusted content, privileged toolsets are denied by default and require an explicit per-fleet opt-in; anything outside the known-safe set is treated as privileged.
+
+## Run capture
+
+### Run capture
+Persisting a fleet run's artifacts to disk so the run is auditable after the fact — each specialist's raw output and the synthesis as markdown, plus a run manifest — instead of only printing the synthesized result. On by default; a run that partially fails or times out still produces a folder holding whatever completed.
+
+### Run manifest
+The structured, machine-readable record of one run's health: per specialist, its outcome (success or failure, elapsed time, the toolset it was asked for, whether it timed out, and the file holding its output), plus run-level facts (the synthesizer model, whether synthesis succeeded, the active Hermes profile). It is the seam a later auditing or agent-handoff layer reads; the markdown files are for reading by hand.
