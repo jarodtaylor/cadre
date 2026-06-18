@@ -9,7 +9,7 @@ installed. The real AIAgent import is lazy — only when a live agent is built.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 # A factory builds a live agent: given (provider, model, toolset) it returns an
@@ -28,6 +28,13 @@ class AgentResult:
     ok: bool
     text: str | None = None
     error: str | None = None
+    # Capture signals — set by the engine at collection, never by ModelClient.run.
+    # elapsed_s: wall-clock seconds from daemon launch to result collection.
+    # toolset: the specialist's validated config toolset ([] means no tools).
+    # timed_out: True only on the fabricated timeout result; False everywhere else.
+    elapsed_s: float | None = None
+    toolset: list[str] = field(default_factory=list)
+    timed_out: bool = False
 
 
 def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any:

@@ -53,6 +53,7 @@ class FleetResult:
     synthesis: str | None = None                     # synthesized text, or None if synthesis didn't happen
     notes: list[str] = field(default_factory=list)   # failure / degradation notes
     ok: bool = False                                 # True only when a synthesis was produced
+    synth_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
 
     @property
     def successes(self) -> list[AgentResult]:
@@ -77,39 +78,52 @@ def _synthesis_prompt(config: FleetConfig, task: str, successes: list[AgentResul
     return f"{base}\n\nTask: {task}\n\nSpecialist findings:\n{findings}"
 
 
-def _start_daemon(fn: Callable[[], AgentResult], name: str) -> tuple[threading.Thread, list[AgentResult]]:
-    """Run ``fn`` in a daemon thread; return (thread, holder).
+def _start_daemon(fn: Callable[[], AgentResult], name: str) -> tuple[threading.Thread, list[AgentResult], float]:
+    """Run ``fn`` in a daemon thread; return (thread, holder, launched_at).
 
     Daemon so a hung provider can never block interpreter exit. ``fn`` (a
     ``ModelClient.run`` call) does not raise by contract, so its result lands in
     ``holder`` when the call returns; the caller joins with a deadline and reads
-    an empty holder as a timeout.
+    an empty holder as a timeout. ``launched_at`` is ``time.monotonic()`` captured
+    at thread start — used by ``_collect`` to compute ``elapsed_s`` for every lane.
     """
     holder: list[AgentResult] = []
     thread = threading.Thread(target=lambda: holder.append(fn()), name=name, daemon=True)
     thread.start()
-    return thread, holder
+    launched_at = time.monotonic()
+    return thread, holder, launched_at
 
 
 def _collect(
-    started: tuple[threading.Thread, list[AgentResult]],
+    started: tuple[threading.Thread, list[AgentResult], float],
     deadline: float | None,
     role: str,
     provider: str,
     model: str,
     timeout: float | None,
+    toolset: list[str],
 ) -> AgentResult:
     """Join until ``deadline``; return the call's result, or a typed timeout failure.
 
     The timeout failure is built lazily — only on a real timeout, which cannot
     happen when ``deadline`` is None — so ``timeout`` is always a number here.
+
+    Enriches the returned result uniformly across all paths: ``elapsed_s`` is set
+    from the daemon's launch time, ``toolset`` is the validated config toolset (passed
+    verbatim — never coerced through a truthiness check; [] means no tools), and
+    ``timed_out`` is True only on the fabricated timeout result.
     """
-    thread, holder = started
+    thread, holder, launched_at = started
     thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+    now = time.monotonic()
     if holder:
-        return holder[0]
-    return AgentResult(role=role, provider=provider, model=model, ok=False,
-                       error=f"timed out after {timeout:g}s")
+        result = holder[0]
+    else:
+        result = AgentResult(role=role, provider=provider, model=model, ok=False,
+                             error=f"timed out after {timeout:g}s", timed_out=True)
+    result.elapsed_s = now - launched_at
+    result.toolset = list(toolset)
+    return result
 
 
 def _specialist_call(client: ModelClient, spec: SpecialistSpec, task: str) -> Callable[[], AgentResult]:
@@ -145,7 +159,7 @@ def run_fleet(
     ]
     deadline = None if call_timeout is None else time.monotonic() + call_timeout
     specialist_results = [
-        _collect(handle, deadline, spec.role, spec.provider, spec.model, call_timeout)
+        _collect(handle, deadline, spec.role, spec.provider, spec.model, call_timeout, spec.toolset)
         for spec, handle in started
     ]
 
@@ -177,7 +191,9 @@ def run_fleet(
     synth = _collect(
         synth_started, synth_deadline,
         "synthesizer", config.synthesis.provider, config.synthesis.model, call_timeout,
+        toolset=[],  # synthesizer has no configured toolset; [] = fail-closed zero tools
     )
+    result.synth_ok = synth.ok
     if synth.ok:
         result.synthesis = synth.text
         result.ok = True
