@@ -12,11 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
-from fleet_engine.capture import resolve_run_dir, save_run
+from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import ModelClient
@@ -66,13 +65,8 @@ def run_command(
         return 1, f"Fleet spec not found: {path}"
 
     if capture:
-        run_dir = run_dir or resolve_run_dir(task)
         try:
-            old_umask = os.umask(0o077)
-            try:
-                run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            finally:
-                os.umask(old_umask)
+            run_dir = prepare_run_dir(task, run_dir=run_dir)
         except OSError as exc:
             return (
                 1,

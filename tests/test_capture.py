@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.capture import _safe_role, resolve_run_dir, save_run
+from fleet_engine.capture import _safe_role, prepare_run_dir, resolve_run_dir, save_run
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
@@ -543,30 +543,26 @@ class TestSaveRunCreatesRunDir0o700(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# FIX 3: resolve_run_dir collision avoidance (default path only)
+# resolve_run_dir is now a pure resolver — no FS access, no collision logic
 # ---------------------------------------------------------------------------
 
 
-class TestResolveRunDirCollision(unittest.TestCase):
-    """resolve_run_dir appends -2, -3, … when the default leaf already exists."""
+class TestResolveRunDirPure(unittest.TestCase):
+    """resolve_run_dir is a pure Path resolver: no FS access, no collision avoidance."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
 
-    def test_collision_returns_dash_2(self):
+    def test_resolve_run_dir_does_not_create_directory(self):
+        """resolve_run_dir must NOT create the directory it returns."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
         with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
-                # First call — get the would-be leaf, pre-create it to force collision
-                first = resolve_run_dir("collision test")
-                first.mkdir(parents=True, exist_ok=True)
-                # Second call in same second — must return a distinct path
-                second = resolve_run_dir("collision test")
-        self.assertNotEqual(first, second)
-        self.assertTrue(second.name.endswith("-2"), f"expected -2 suffix, got {second.name!r}")
+                result = resolve_run_dir("pure resolver test")
+        self.assertFalse(result.exists(), "resolve_run_dir must not create the directory")
 
-    def test_cadre_run_dir_not_affected_by_collision_logic(self):
+    def test_cadre_run_dir_returned_verbatim(self):
         """CADRE_RUN_DIR is returned verbatim even if it already exists."""
         existing = self.tmp / "fixed-dir"
         existing.mkdir()
@@ -574,6 +570,250 @@ class TestResolveRunDirCollision(unittest.TestCase):
             result = resolve_run_dir("collision test")
         self.assertEqual(result, existing)
 
+    def test_same_second_returns_same_base(self):
+        """Two calls in the same second return the same base path (no collision logic)."""
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+            with patch.dict(os.environ, env_without, clear=True):
+                first = resolve_run_dir("collision test")
+                second = resolve_run_dir("collision test")
+        # Same second → same base leaf (collision handling is prepare_run_dir's job)
+        self.assertEqual(first, second)
+
+
+# ---------------------------------------------------------------------------
+# prepare_run_dir: atomic reservation, explicit path, writability probe
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareRunDirAtomicReservation(unittest.TestCase):
+    """prepare_run_dir atomically reserves default-path dirs (no TOCTOU)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_two_calls_same_task_return_distinct_created_dirs(self):
+        """Two same-second default-path calls get two distinct, already-created dirs."""
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+            with patch.dict(os.environ, env_without, clear=True):
+                first = prepare_run_dir("collision test")
+                second = prepare_run_dir("collision test")
+        # Both must exist (reserved on creation, not just checked)
+        self.assertTrue(first.exists(), "first dir must be created")
+        self.assertTrue(second.exists(), "second dir must be created")
+        # They must be distinct
+        self.assertNotEqual(first, second)
+        # The second gets the -2 suffix
+        self.assertTrue(second.name.endswith("-2"), f"expected -2 suffix, got {second.name!r}")
+
+    def test_first_call_creates_dir(self):
+        """prepare_run_dir creates the directory it returns."""
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+            with patch.dict(os.environ, env_without, clear=True):
+                result = prepare_run_dir("basic creation test")
+        self.assertTrue(result.exists())
+
+    def test_default_path_missing_parents_created(self):
+        """First-ever run: missing runs-root parent is created (not a FileNotFoundError)."""
+        nested_root = self.tmp / "cadre" / "runs"
+        # Don't pre-create nested_root — simulate a fresh host
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(nested_root)):
+            with patch.dict(os.environ, env_without, clear=True):
+                result = prepare_run_dir("first ever run")
+        self.assertTrue(result.exists(), "run_dir must be created even when parents are missing")
+
+    def test_explicit_run_dir_is_reused(self):
+        """An injected run_dir is reused (exist_ok=True — user controls the path)."""
+        explicit = self.tmp / "my-run"
+        explicit.mkdir()
+        # Pre-existing explicit dir must not raise
+        result = prepare_run_dir("task", run_dir=explicit)
+        self.assertEqual(result, explicit)
+
+    def test_cadre_run_dir_reused_if_exists(self):
+        """CADRE_RUN_DIR already existing is not an error."""
+        existing = self.tmp / "fixed"
+        existing.mkdir()
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(existing)}):
+            result = prepare_run_dir("task")
+        self.assertEqual(result, existing)
+
+    def test_dir_permissions_are_0o700(self):
+        """prepare_run_dir creates directories owner-only."""
+        import stat as stat_mod
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+            with patch.dict(os.environ, env_without, clear=True):
+                result = prepare_run_dir("perm test")
+        mode = stat_mod.S_IMODE(result.stat().st_mode)
+        self.assertEqual(mode, 0o700, f"expected 0o700, got 0o{mode:03o}")
+
+
+@unittest.skipIf(os.geteuid() == 0, "root bypasses filesystem permissions")
+class TestPrepareRunDirWritabilityProbe(unittest.TestCase):
+    """prepare_run_dir raises OSError for an existing but unwritable explicit dir."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        # addCleanup runs LIFO: shutil.rmtree added first, chmod added second —
+        # so chmod(0o700) runs BEFORE rmtree to ensure rmtree can remove the dir.
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _make_readonly(self, name: str) -> Path:
+        """Create a subdirectory, make it read-only, and register cleanup."""
+        ro_dir = self.tmp / name
+        ro_dir.mkdir(mode=0o700)
+        os.chmod(ro_dir, 0o500)
+        # addCleanup is LIFO: chmod (restore) is registered AFTER rmtree is already
+        # registered, so it will run BEFORE rmtree.
+        self.addCleanup(os.chmod, ro_dir, 0o700)
+        return ro_dir
+
+    def test_read_only_explicit_dir_raises_os_error(self):
+        """An injected run_dir that exists but is read-only causes OSError."""
+        ro_dir = self._make_readonly("readonly")
+        with self.assertRaises(OSError):
+            prepare_run_dir("task", run_dir=ro_dir)
+
+    def test_read_only_cadre_run_dir_raises_os_error(self):
+        """CADRE_RUN_DIR that exists but is read-only causes OSError."""
+        ro_dir = self._make_readonly("readonly-env")
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(ro_dir)}):
+            with self.assertRaises(OSError):
+                prepare_run_dir("task")
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Unique specialist filenames after _safe_role sanitization
+# ---------------------------------------------------------------------------
+
+
+class TestSpecialistFilenameDeduplication(unittest.TestCase):
+    """save_run deduplicates specialist filenames when _safe_role produces a collision."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_two_roles_sanitizing_to_same_name_get_distinct_files(self):
+        """'a/b' and 'a:b' both sanitize to 'a-b' → files must be specialist-a-b.md and specialist-a-b-2.md."""
+        specialists = [
+            _lane("a/b", toolset=[]),
+            _lane("a:b", toolset=[]),
+        ]
+        r = _result(specialists=specialists)
+        save_run(_cfg(specialists=[
+            {"role": "a/b", "provider": "openrouter", "model": "m"},
+            {"role": "a:b", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+
+        file1 = self.run_dir / "specialist-a-b.md"
+        file2 = self.run_dir / "specialist-a-b-2.md"
+        self.assertTrue(file1.exists(), "first file specialist-a-b.md must exist")
+        self.assertTrue(file2.exists(), "second file specialist-a-b-2.md must exist")
+
+    def test_both_deduped_files_are_non_empty(self):
+        """Both deduplicated files must be non-empty (not overwritten)."""
+        specialists = [
+            _lane("a/b", toolset=[], text="output-ab-slash"),
+            _lane("a:b", toolset=[], text="output-ab-colon"),
+        ]
+        r = _result(specialists=specialists)
+        save_run(_cfg(specialists=[
+            {"role": "a/b", "provider": "openrouter", "model": "m"},
+            {"role": "a:b", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+
+        content1 = (self.run_dir / "specialist-a-b.md").read_text(encoding="utf-8")
+        content2 = (self.run_dir / "specialist-a-b-2.md").read_text(encoding="utf-8")
+        self.assertIn("output-ab-slash", content1)
+        self.assertIn("output-ab-colon", content2)
+
+    def test_manifest_lanes_carry_correct_file_values(self):
+        """Each manifest lane's 'file' key must match the actual on-disk filename."""
+        specialists = [
+            _lane("a/b", toolset=[]),
+            _lane("a:b", toolset=[]),
+        ]
+        r = _result(specialists=specialists)
+        save_run(_cfg(specialists=[
+            {"role": "a/b", "provider": "openrouter", "model": "m"},
+            {"role": "a:b", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        lane_ab_slash = next(l for l in manifest["lanes"] if l["role"] == "a/b")
+        lane_ab_colon = next(l for l in manifest["lanes"] if l["role"] == "a:b")
+
+        self.assertIn("file", lane_ab_slash)
+        self.assertIn("file", lane_ab_colon)
+        self.assertEqual(lane_ab_slash["file"], "specialist-a-b.md")
+        self.assertEqual(lane_ab_colon["file"], "specialist-a-b-2.md")
+        # And the files actually exist
+        self.assertTrue((self.run_dir / lane_ab_slash["file"]).exists())
+        self.assertTrue((self.run_dir / lane_ab_colon["file"]).exists())
+
+    def test_non_colliding_roles_have_file_key_in_manifest(self):
+        """Normal (non-colliding) lanes also have the 'file' key in the manifest."""
+        r = _result()
+        save_run(_cfg(), r, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        for lane in manifest["lanes"]:
+            self.assertIn("file", lane, f"lane {lane['role']!r} missing 'file' key")
+            self.assertTrue(lane["file"].endswith(".md"))
+            self.assertTrue((self.run_dir / lane["file"]).exists())
+
+
+# ---------------------------------------------------------------------------
+# cli.py: unwritable dir fails fast before model calls (writability probe)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipIf(os.geteuid() == 0, "root bypasses filesystem permissions")
+class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
+    """run_command with an existing-but-unwritable run_dir exits non-zero, makes ZERO model calls."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        # addCleanup is LIFO: rmtree registered first, chmod second → chmod runs before rmtree.
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _make_readonly(self, name: str) -> Path:
+        ro_dir = self.tmp / name
+        ro_dir.mkdir(mode=0o700)
+        os.chmod(ro_dir, 0o500)
+        self.addCleanup(os.chmod, ro_dir, 0o700)
+        return ro_dir
+
+    def test_read_only_injected_dir_returns_nonzero(self):
+        from fleet_engine.cli import run_command
+        ro_dir = self._make_readonly("readonly")
+
+        from tests.test_cli import FakeClient
+        client = FakeClient({"synthesizer": ("ok", "SYNTH")})
+        code, _out = run_command(EXAMPLE, "task", client=client, run_dir=ro_dir)
+
+        self.assertNotEqual(code, 0, "should return non-zero for unwritable dir")
+
+    def test_read_only_injected_dir_makes_zero_model_calls(self):
+        from fleet_engine.cli import run_command
+        ro_dir = self._make_readonly("readonly2")
+
+        from tests.test_cli import FakeClient
+        client = FakeClient({"synthesizer": ("ok", "SYNTH")})
+        run_command(EXAMPLE, "task", client=client, run_dir=ro_dir)
+
+        self.assertEqual(len(client.calls), 0, "no model calls should be made (fail-fast)")
+
+
+EXAMPLE = "fleets/research-swarm.example.yaml"
 
 if __name__ == "__main__":
     unittest.main()

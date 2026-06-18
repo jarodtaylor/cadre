@@ -9,7 +9,6 @@ Hermes host, where hermes-agent and the user's providers are available.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from fleet_engine.capture import resolve_run_dir, save_run  # noqa: E402
+from fleet_engine.capture import prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.engine import run_fleet  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
@@ -52,16 +51,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if capture:
-        run_dir = resolve_run_dir(args.task)
         try:
-            old_umask = os.umask(0o077)
-            try:
-                run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            finally:
-                os.umask(old_umask)
+            run_dir = prepare_run_dir(args.task)
         except OSError as exc:
             print(
-                f"Cannot create run directory {run_dir}: {exc}\n"
+                f"Cannot create run directory: {exc}\n"
                 "Use --no-capture to bypass run capture."
             )
             return 1

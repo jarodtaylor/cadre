@@ -7,8 +7,13 @@ This is a caller-layer module: imported only by cli.py and skills/research-swarm
 fail-fast writability check and env-var resolution). Tests drive ``save_run`` with a
 ``tempfile.mkdtemp()`` dir and never touch ``~/.cadre``.
 
-``resolve_run_dir(task)`` is the caller-layer resolver: returns ``CADRE_RUN_DIR``
+``resolve_run_dir(task)`` is a PURE path resolver: returns ``CADRE_RUN_DIR``
 (expanduser) when that env var is set, else ``~/.cadre/runs/<YYYY-MM-DD-HHMMSS>-<slug>``.
+No filesystem access — just computes a Path.
+
+``prepare_run_dir(task, run_dir=None)`` resolves, atomically reserves/creates, and probes
+writability — raising OSError on any unrecoverable failure. Callers use this instead of
+inline mkdir, then fail-fast on the OSError before calling run_fleet.
 """
 
 from __future__ import annotations
@@ -62,13 +67,14 @@ def _slugify(task: str) -> str:
 
 
 def resolve_run_dir(task: str) -> Path:
-    """Return the run directory for this task.
+    """Return the run directory Path for this task — PURE resolver, no FS access.
 
     If ``CADRE_RUN_DIR`` is set, use it verbatim (expanduser only — no stamp or
     slug leaf is appended; the caller controls the full path).
 
     Otherwise, build ``~/.cadre/runs/<YYYY-MM-DD-HHMMSS>-<slug>`` from the
-    current time and a sanitized slug of the task.
+    current time and a sanitized slug of the task.  The returned Path is NOT
+    created — call ``prepare_run_dir`` to atomically reserve and create it.
     """
     cadre_run_dir = os.getenv("CADRE_RUN_DIR")
     if cadre_run_dir:
@@ -76,18 +82,79 @@ def resolve_run_dir(task: str) -> Path:
 
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     slug = _slugify(task)
-    leaf = f"{stamp}-{slug}"
     runs_root = Path(_DEFAULT_RUNS_ROOT).expanduser()
-    candidate = runs_root / leaf
-    if not candidate.exists():
-        return candidate
-    # Collision: two runs in the same second — append -2, -3, … until unused.
-    counter = 2
-    while True:
-        candidate = runs_root / f"{leaf}-{counter}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
+    return runs_root / f"{stamp}-{slug}"
+
+
+def prepare_run_dir(task: str, run_dir: Path | None = None) -> Path:
+    """Resolve, atomically create, and probe the run directory; return its Path.
+
+    This is the single place that touches the filesystem for directory creation.
+    Callers should call this BEFORE ``run_fleet`` so a bad path fails fast with
+    no model calls wasted.
+
+    Two modes:
+
+    **Default path** (``run_dir`` is None AND ``CADRE_RUN_DIR`` is unset):
+        Atomically reserves the directory by attempting ``mkdir(exist_ok=False)``.
+        On ``FileExistsError`` (same-second collision), appends ``-2``, ``-3``, …
+        until a unique leaf is created. The process that creates the directory is
+        the sole owner — no TOCTOU race.
+
+    **Explicit path** (``run_dir`` injected, OR ``CADRE_RUN_DIR`` is set):
+        Creates with ``mkdir(parents=True, exist_ok=True)`` — reuse-by-design;
+        the caller controls the full path.
+
+    In both modes:
+    - All mkdir calls run under a tightened ``umask(0o077)`` so every created
+      directory component (including parents) is owner-only (0o700).
+    - After creation, a writability probe creates and deletes a sentinel file.
+      If that raises OSError, it is re-raised so the caller fails fast BEFORE
+      any model calls are made.
+
+    Args:
+        task: The task string; used to derive the default leaf name.
+        run_dir: Optional explicit path; overrides the default resolution.
+
+    Returns:
+        The Path of the created (or pre-existing explicit) run directory.
+
+    Raises:
+        OSError: If the directory cannot be created or is not writable.
+    """
+    # Decide which mode: explicit means the caller injected run_dir, OR
+    # CADRE_RUN_DIR is set (resolve_run_dir will return it verbatim).
+    cadre_run_dir = os.getenv("CADRE_RUN_DIR")
+    explicit = (run_dir is not None) or bool(cadre_run_dir)
+
+    if run_dir is None:
+        run_dir = resolve_run_dir(task)
+
+    old_umask = os.umask(0o077)
+    try:
+        if explicit:
+            # Reuse-by-design: user controls the path.
+            run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            # Atomic reservation: loop until we own a fresh leaf.
+            base = run_dir
+            counter = 2
+            while True:
+                try:
+                    run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+                    break
+                except FileExistsError:
+                    run_dir = base.parent / f"{base.name}-{counter}"
+                    counter += 1
+
+        # Writability probe — fail fast before wasting model calls.
+        probe = run_dir / ".cadre-write-test"
+        probe.write_text("")
+        probe.unlink()
+    finally:
+        os.umask(old_umask)
+
+    return run_dir
 
 
 def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
@@ -100,6 +167,11 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
     ``manifest.json`` is written LAST intentionally — it serves as a
     run-completion marker.  A reader can treat its absence as a partial or
     failed write.
+
+    Specialist filenames are deduplicated after ``_safe_role`` sanitization:
+    if two distinct roles reduce to the same safe name (e.g. 'a/b' and 'a:b'
+    both → 'a-b'), the second gets '-2', the third '-3', etc.  The actual
+    written filename is recorded in the manifest lane under the ``"file"`` key.
 
     Args:
         cfg: The validated fleet configuration for this run.
@@ -114,15 +186,32 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
     # One markdown file per specialist (success and failure alike).
     # _safe_role sanitizes the role for the FILENAME ONLY; the markdown content
     # and manifest always use the true (un-sanitized) lane.role.
+    # Track used filenames (stem only) to disambiguate sanitization collisions.
+    used_stems: set[str] = set()
+    lane_filenames: list[str] = []
     for lane in result.specialists:
-        filename = f"specialist-{_safe_role(lane.role)}.md"
+        stem = f"specialist-{_safe_role(lane.role)}"
+        if stem not in used_stems:
+            used_stems.add(stem)
+            filename = f"{stem}.md"
+        else:
+            counter = 2
+            while f"{stem}-{counter}" in used_stems:
+                counter += 1
+            stem = f"{stem}-{counter}"
+            used_stems.add(stem)
+            filename = f"{stem}.md"
+        lane_filenames.append(filename)
         _write(run_dir / filename, _specialist_md(lane))
 
     # synthesis.md — the synthesized output, or a failure note.
     _write(run_dir / "synthesis.md", _synthesis_md(result))
 
     # manifest.json — structured run-health record.
-    _write(run_dir / "manifest.json", json.dumps(_build_manifest(cfg, result), indent=2))
+    _write(
+        run_dir / "manifest.json",
+        json.dumps(_build_manifest(cfg, result, lane_filenames), indent=2),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,15 +266,21 @@ def _synthesis_md(result: FleetResult) -> str:
     return f"No synthesis — {synth_note}."
 
 
-def _build_manifest(cfg: FleetConfig, result: FleetResult) -> dict:
-    """Build the plain-dict manifest; serialized by the caller with json.dumps."""
+def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[str]) -> dict:
+    """Build the plain-dict manifest; serialized by the caller with json.dumps.
+
+    ``lane_filenames`` is the list of actual on-disk filenames (one per specialist,
+    in the same order as ``result.specialists``) so the manifest is an accurate
+    index to the files — even when sanitization caused two roles to share a base
+    name and one was renamed to ``...-2.md``.
+    """
     participating_models = [
         {"provider": s.provider, "model": s.model}
         for s in result.specialists
     ]
 
     lanes = []
-    for lane in result.specialists:
+    for lane, filename in zip(result.specialists, lane_filenames):
         lanes.append({
             "role": lane.role,
             "provider": lane.provider,
@@ -195,6 +290,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult) -> dict:
             "elapsed_s": lane.elapsed_s,
             "toolset": list(lane.toolset),  # explicit list — never coerce [] to None
             "timed_out": lane.timed_out,
+            "file": filename,
         })
 
     return {
