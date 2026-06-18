@@ -320,6 +320,16 @@ class TestSlugify(unittest.TestCase):
         slug = _slugify(long_task)
         self.assertLessEqual(len(slug), 40)
 
+    def test_long_task_cuts_on_word_boundary(self):
+        # A long multi-word task truncates at a word boundary, never mid-word
+        # (regression: a hard [:40] cut sliced "inspired" -> "inspi").
+        task = "research the advisor agent pattern inspired by claude code steps"
+        slug = _slugify(task)
+        self.assertLessEqual(len(slug), 40)
+        words = set(task.split())
+        for token in slug.split("-"):
+            self.assertIn(token, words, f"{token!r} is a sliced-off partial word")
+
     def test_no_leading_trailing_dashes(self):
         slug = _slugify("  --hello world--  ")
         self.assertFalse(slug.startswith("-"))
