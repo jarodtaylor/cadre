@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.capture import save_run
+from fleet_engine.capture import _safe_role, resolve_run_dir, save_run
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
@@ -428,6 +428,151 @@ class TestRunDirInjection(unittest.TestCase):
         save_run(_cfg(), _result(), nested)
         self.assertTrue(nested.exists())
         self.assertTrue((nested / "manifest.json").exists())
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: _safe_role and slash-in-role filename safety
+# ---------------------------------------------------------------------------
+
+
+class TestSafeRole(unittest.TestCase):
+    """_safe_role sanitizes roles for filenames while preserving case."""
+
+    def test_plain_role_unchanged(self):
+        self.assertEqual(_safe_role("web"), "web")
+
+    def test_slash_replaced(self):
+        self.assertEqual(_safe_role("web/scraper"), "web-scraper")
+
+    def test_dotdot_replaced(self):
+        # "../escape": '.', '.', '/' all become '-' → "---escape"
+        self.assertEqual(_safe_role("../escape"), "---escape")
+
+    def test_case_preserved(self):
+        # 'Web' and 'web' must NOT collide
+        self.assertEqual(_safe_role("Web"), "Web")
+        self.assertNotEqual(_safe_role("Web"), _safe_role("web"))
+
+    def test_empty_role_falls_back_to_unknown(self):
+        self.assertEqual(_safe_role(""), "unknown")
+
+    def test_only_special_chars_falls_back_to_unknown(self):
+        # "/" alone sanitizes to "-", not empty — so result is "-", not "unknown"
+        self.assertEqual(_safe_role("/"), "-")
+
+    def test_underscore_and_dash_preserved(self):
+        self.assertEqual(_safe_role("my_role-v2"), "my_role-v2")
+
+
+class TestSlashInRoleWritesSafeFile(unittest.TestCase):
+    """A role containing '/' writes a safe filename inside run_dir; manifest keeps true role."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_slash_role_file_inside_run_dir(self):
+        """specialist with role='web/evil' writes inside run_dir, not as a subpath escape."""
+        r = _result(specialists=[_lane("web/evil", toolset=[])])
+        save_run(_cfg(specialists=[
+            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+        # The sanitized filename must be inside run_dir
+        expected_file = self.run_dir / "specialist-web-evil.md"
+        self.assertTrue(expected_file.exists(), "sanitized file should exist inside run_dir")
+        # No subdir 'web' should have been created
+        self.assertFalse((self.run_dir / "web").is_dir(), "'web' subdir must not be created")
+
+    def test_dotdot_role_file_inside_run_dir(self):
+        """specialist with role='../escape' writes inside run_dir."""
+        r = _result(specialists=[_lane("../escape", toolset=[])])
+        save_run(_cfg(specialists=[
+            {"role": "../escape", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+        # No escape outside run_dir
+        escaped_path = self.run_dir.parent / "escape.md"
+        self.assertFalse(escaped_path.exists(), "file must not escape run_dir via ..")
+
+    def test_slash_role_true_role_in_manifest(self):
+        """The manifest's lane.role must be the TRUE role, not the sanitized filename."""
+        r = _result(specialists=[_lane("web/evil", toolset=[])])
+        save_run(_cfg(specialists=[
+            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["lanes"][0]["role"], "web/evil")
+
+    def test_slash_role_true_role_in_markdown_header(self):
+        """The markdown header must use the TRUE role."""
+        r = _result(specialists=[_lane("web/evil", toolset=[])])
+        save_run(_cfg(specialists=[
+            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+        content = (self.run_dir / "specialist-web-evil.md").read_text(encoding="utf-8")
+        self.assertIn("# Specialist: web/evil", content)
+
+    def test_folder_complete_with_slash_role(self):
+        """manifest.json is present after a run with a slash-in-role specialist."""
+        r = _result(specialists=[_lane("web/evil", toolset=[])])
+        save_run(_cfg(specialists=[
+            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+        ]), r, self.run_dir)
+        self.assertTrue((self.run_dir / "manifest.json").exists())
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: save_run creates run_dir with 0o700
+# ---------------------------------------------------------------------------
+
+
+class TestSaveRunCreatesRunDir0o700(unittest.TestCase):
+    """save_run creates a not-yet-existing run_dir with mode 0o700."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_save_run_new_dir_is_0o700(self):
+        run_dir = self.tmp / "newleaf"
+        self.assertFalse(run_dir.exists())
+        save_run(_cfg(), _result(), run_dir)
+        self.assertTrue(run_dir.exists())
+        mode = stat.S_IMODE(run_dir.stat().st_mode)
+        self.assertEqual(mode, 0o700, f"expected 0o700, got 0o{mode:03o}")
+
+
+# ---------------------------------------------------------------------------
+# FIX 3: resolve_run_dir collision avoidance (default path only)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRunDirCollision(unittest.TestCase):
+    """resolve_run_dir appends -2, -3, … when the default leaf already exists."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_collision_returns_dash_2(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+            with patch.dict(os.environ, env_without, clear=True):
+                # First call — get the would-be leaf, pre-create it to force collision
+                first = resolve_run_dir("collision test")
+                first.mkdir(parents=True, exist_ok=True)
+                # Second call in same second — must return a distinct path
+                second = resolve_run_dir("collision test")
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.name.endswith("-2"), f"expected -2 suffix, got {second.name!r}")
+
+    def test_cadre_run_dir_not_affected_by_collision_logic(self):
+        """CADRE_RUN_DIR is returned verbatim even if it already exists."""
+        existing = self.tmp / "fixed-dir"
+        existing.mkdir()
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(existing)}):
+            result = resolve_run_dir("collision test")
+        self.assertEqual(result, existing)
 
 
 if __name__ == "__main__":

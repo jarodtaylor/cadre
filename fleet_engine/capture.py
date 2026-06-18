@@ -29,6 +29,20 @@ _DEFAULT_HERMES_HOME = "~/.hermes"
 _DEFAULT_RUNS_ROOT = "~/.cadre/runs"
 
 
+def _safe_role(role: str) -> str:
+    """Return a filesystem-safe version of ``role`` for use in filenames ONLY.
+
+    Replaces every character outside ``[A-Za-z0-9_-]`` with '-'.  Case is
+    preserved (role-uniqueness is case-sensitive; lowercasing would collide
+    'Web' and 'web').  Falls back to 'unknown' if the sanitized name is empty.
+
+    The manifest's ``role`` field and the markdown header always use the TRUE
+    (un-sanitized) role — this helper is called only where a filename is built.
+    """
+    sanitized = re.sub(r"[^A-Za-z0-9_-]", "-", role)
+    return sanitized or "unknown"
+
+
 def _slugify(task: str) -> str:
     """Return a filesystem-safe slug derived from ``task``.
 
@@ -63,29 +77,45 @@ def resolve_run_dir(task: str) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     slug = _slugify(task)
     leaf = f"{stamp}-{slug}"
-    return Path(_DEFAULT_RUNS_ROOT).expanduser() / leaf
+    runs_root = Path(_DEFAULT_RUNS_ROOT).expanduser()
+    candidate = runs_root / leaf
+    if not candidate.exists():
+        return candidate
+    # Collision: two runs in the same second — append -2, -3, … until unused.
+    counter = 2
+    while True:
+        candidate = runs_root / f"{leaf}-{counter}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
     """Write a complete run folder into ``run_dir``.
 
-    Creates the ``run_dir`` leaf if missing. All artifact files are written
-    owner-only (0o600). The synthesizer is represented at run level only
-    (synth_ok + synthesis.md), never as a per-lane entry.
+    Creates the ``run_dir`` leaf if missing, owner-only (0o700). All artifact
+    files are written owner-only (0o600). The synthesizer is represented at run
+    level only (synth_ok + synthesis.md), never as a per-lane entry.
+
+    ``manifest.json`` is written LAST intentionally — it serves as a
+    run-completion marker.  A reader can treat its absence as a partial or
+    failed write.
 
     Args:
         cfg: The validated fleet configuration for this run.
         result: The FleetResult returned by run_fleet.
         run_dir: The directory to write artifacts into (injected — caller resolves).
     """
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     # prompt.txt — the task that drove this run.
     _write(run_dir / "prompt.txt", result.task)
 
     # One markdown file per specialist (success and failure alike).
+    # _safe_role sanitizes the role for the FILENAME ONLY; the markdown content
+    # and manifest always use the true (un-sanitized) lane.role.
     for lane in result.specialists:
-        filename = f"specialist-{lane.role}.md"
+        filename = f"specialist-{_safe_role(lane.role)}.md"
         _write(run_dir / filename, _specialist_md(lane))
 
     # synthesis.md — the synthesized output, or a failure note.

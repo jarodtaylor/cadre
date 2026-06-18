@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -67,7 +68,11 @@ def run_command(
     if capture:
         run_dir = run_dir or resolve_run_dir(task)
         try:
-            run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            old_umask = os.umask(0o077)
+            try:
+                run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            finally:
+                os.umask(old_umask)
         except OSError as exc:
             return (
                 1,

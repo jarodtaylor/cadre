@@ -9,6 +9,7 @@ Hermes host, where hermes-agent and the user's providers are available.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -53,7 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     if capture:
         run_dir = resolve_run_dir(args.task)
         try:
-            run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            old_umask = os.umask(0o077)
+            try:
+                run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            finally:
+                os.umask(old_umask)
         except OSError as exc:
             print(
                 f"Cannot create run directory {run_dir}: {exc}\n"

@@ -230,6 +230,27 @@ class TestRunCaptureRunDirPermissions(unittest.TestCase):
         self.assertEqual(mode, 0o700)
 
 
+class TestRunCaptureUmaskParentDirs(unittest.TestCase):
+    """FIX 4: newly-created parent directories (default path) are 0o700, not 0o755."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_default_path_parent_dirs_are_0o700(self):
+        """When CADRE_RUN_DIR is unset, the auto-created default root is 0o700."""
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp / "cadre" / "runs")):
+            with patch.dict(os.environ, env_without, clear=True):
+                client = FakeClient({"synthesizer": ("ok", "SYNTH")})
+                run_command(EXAMPLE, "find tools", client=client)
+                # Check that the newly created cadre/runs parent dir is 0o700
+                cadre_dir = self.tmp / "cadre"
+                if cadre_dir.exists():
+                    mode = stat.S_IMODE(cadre_dir.stat().st_mode)
+                    self.assertEqual(mode, 0o700, f"cadre parent dir should be 0o700, got 0o{mode:03o}")
+
+
 # ---------------------------------------------------------------------------
 # resolve_run_dir and _slugify tests
 # ---------------------------------------------------------------------------
