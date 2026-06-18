@@ -217,6 +217,101 @@ print("EXITED_CLEANLY")
 """
 
 
+class TestCaptureFields(unittest.TestCase):
+    """U1 capture signals: elapsed_s, toolset, timed_out on every lane; synth_ok on FleetResult."""
+
+    def test_elapsed_s_is_non_negative_on_success(self):
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        for lane in result.specialists:
+            self.assertIsNotNone(lane.elapsed_s, f"{lane.role}: elapsed_s should not be None")
+            self.assertGreaterEqual(lane.elapsed_s, 0.0, f"{lane.role}: elapsed_s must be >= 0")
+
+    def test_elapsed_s_is_non_negative_on_error(self):
+        client = FakeClient({"social": ("fail", "auth error"), "synthesizer": ("ok", "PARTIAL")})
+        result = run_fleet(_config(), "task", client)
+        for lane in result.specialists:
+            self.assertIsNotNone(lane.elapsed_s, f"{lane.role}: elapsed_s should not be None")
+            self.assertGreaterEqual(lane.elapsed_s, 0.0, f"{lane.role}: elapsed_s must be >= 0")
+
+    def test_elapsed_s_is_non_negative_on_timeout(self):
+        client = HangingClient(hang_roles={"social"}, behavior={"synthesizer": ("ok", "DONE")})
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        for lane in result.specialists:
+            self.assertIsNotNone(lane.elapsed_s, f"{lane.role}: elapsed_s should not be None")
+            self.assertGreaterEqual(lane.elapsed_s, 0.0, f"{lane.role}: elapsed_s must be >= 0")
+
+    def test_toolset_matches_spec_toolset(self):
+        client = FakeClient({"synthesizer": ("ok", "x")})
+        result = run_fleet(_config(), "task", client)
+        by_role = {r.role: r for r in result.specialists}
+        # spec toolsets from _config(): web=["web"], social=["x_search"], analysis=["web"]
+        self.assertEqual(by_role["web"].toolset, ["web"])
+        self.assertEqual(by_role["social"].toolset, ["x_search"])
+        self.assertEqual(by_role["analysis"].toolset, ["web"])
+
+    def test_no_toolset_specialist_yields_empty_list_not_none(self):
+        cfg_data = {
+            "name": "t",
+            "synthesis": {"provider": "openrouter", "model": "synth/model", "prompt": "S:"},
+            "specialists": [
+                {"role": "notool", "provider": "openrouter", "model": "m/m"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(cfg_data)
+        client = FakeClient({"synthesizer": ("ok", "x")})
+        result = run_fleet(cfg, "task", client)
+        lane = result.specialists[0]
+        self.assertEqual(lane.toolset, [])
+        self.assertIsNotNone(lane.toolset)  # must be [], never None
+
+    def test_timed_out_true_only_for_hung_lane(self):
+        client = HangingClient(hang_roles={"social"}, behavior={"synthesizer": ("ok", "DONE")})
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        by_role = {r.role: r for r in result.specialists}
+        self.assertTrue(by_role["social"].timed_out, "hung lane must have timed_out=True")
+        self.assertFalse(by_role["web"].timed_out, "non-hung lane must have timed_out=False")
+        self.assertFalse(by_role["analysis"].timed_out, "non-hung lane must have timed_out=False")
+
+    def test_timed_out_false_on_all_success(self):
+        client = FakeClient({"synthesizer": ("ok", "x")})
+        result = run_fleet(_config(), "task", client)
+        for lane in result.specialists:
+            self.assertFalse(lane.timed_out, f"{lane.role}: no timeout should have timed_out=False")
+
+    def test_timed_out_false_on_typed_failure(self):
+        client = FakeClient({"social": ("fail", "auth error"), "synthesizer": ("ok", "x")})
+        result = run_fleet(_config(), "task", client)
+        social = next(r for r in result.specialists if r.role == "social")
+        self.assertFalse(social.timed_out, "typed failure (not timeout) must have timed_out=False")
+
+    def test_synth_ok_true_on_synthesis_success(self):
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertTrue(result.ok)
+        self.assertIs(result.synth_ok, True)
+
+    def test_synth_ok_false_when_synthesizer_fails(self):
+        client = FakeClient({"synthesizer": ("fail", "rate limited")})
+        result = run_fleet(_config(), "task", client)
+        self.assertFalse(result.ok)
+        self.assertIs(result.synth_ok, False)
+
+    def test_synth_ok_none_when_synthesis_not_attempted(self):
+        # All specialists fail — synthesizer is never called
+        behavior = {r: ("fail", "down") for r in ("web", "social", "analysis")}
+        client = FakeClient(behavior)
+        result = run_fleet(_config(), "task", client)
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.synth_ok)
+
+    def test_synth_ok_false_on_synthesizer_timeout(self):
+        client = HangingClient(hang_roles={"synthesizer"})
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        self.assertFalse(result.ok)
+        self.assertIs(result.synth_ok, False)
+
+
 class TestCleanExitOnHang(unittest.TestCase):
     """The property that justified daemon threads: the process EXITS on a hang.
 

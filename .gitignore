@@ -30,6 +30,9 @@ fleets/*.local.yaml
 # Personal local scratch (checklists, notes) — never committed
 *.local.md
 
+# Local demo / run transcripts — capture live Hermes host, operator, and provider/credential state; never commit (Codex adversarial-review, 2026-06-18)
+cadre-demo-*
+
 # Planning and Agent Files
 docs/brainstorms
 docs/plans

@@ -74,6 +74,41 @@ class TestImportIsolation(unittest.TestCase):
         self.assertIsNotNone(ModelClient())
 
 
+class TestAgentResultCaptureFieldDefaults(unittest.TestCase):
+    """Guards the boundary: ModelClient.run() must NOT populate the capture fields.
+
+    elapsed_s, toolset, and timed_out are set by the engine at collection, never
+    by ModelClient.run. This test documents and enforces that boundary — if a future
+    edit 'helpfully' echoes the passed toolset into the result, the engine's uniform
+    enrichment logic breaks (the spec toolset, not the runtime call's toolset, is
+    what goes into the manifest).
+    """
+
+    def test_run_does_not_set_elapsed_s(self):
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(reply="text")))
+        r = client.run(role="web", provider="p", model="m", prompt="go", toolset=["web"])
+        self.assertIsNone(r.elapsed_s)
+
+    def test_run_does_not_set_toolset_from_argument(self):
+        # toolset defaults to [] and run() must leave it there, even when a toolset is passed
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(reply="text")))
+        r = client.run(role="web", provider="p", model="m", prompt="go", toolset=["web"])
+        self.assertEqual(r.toolset, [])
+
+    def test_run_does_not_set_timed_out(self):
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(reply="text")))
+        r = client.run(role="web", provider="p", model="m", prompt="go")
+        self.assertFalse(r.timed_out)
+
+    def test_error_path_also_leaves_capture_fields_at_defaults(self):
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(raises=RuntimeError("boom"))))
+        r = client.run(role="web", provider="p", model="m", prompt="go")
+        self.assertFalse(r.ok)
+        self.assertIsNone(r.elapsed_s)
+        self.assertEqual(r.toolset, [])
+        self.assertFalse(r.timed_out)
+
+
 class TestDefaultFactoryToolsetIsFailClosed(unittest.TestCase):
     """The real adapter factory must pass an explicit [] (zero tools), never None.
 
