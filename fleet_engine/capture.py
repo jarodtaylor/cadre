@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -147,10 +148,13 @@ def prepare_run_dir(task: str, run_dir: Path | None = None) -> Path:
                     run_dir = base.parent / f"{base.name}-{counter}"
                     counter += 1
 
-        # Writability probe — fail fast before wasting model calls.
-        probe = run_dir / ".cadre-write-test"
-        probe.write_text("")
-        probe.unlink()
+        # Writability probe — fail fast before wasting model calls. Uses a
+        # unique temp name (not a fixed sentinel) so two processes sharing an
+        # explicit run_dir can't race on the probe's create/unlink.
+        with tempfile.NamedTemporaryFile(
+            dir=run_dir, prefix=".cadre-write-test-", delete=True
+        ):
+            pass
     finally:
         os.umask(old_umask)
 
@@ -220,8 +224,18 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
 
 
 def _write(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` as UTF-8, owner-only (0o600)."""
-    path.write_text(content, encoding="utf-8")
+    """Write ``content`` to ``path`` as UTF-8, owner-only (0o600).
+
+    Opens with mode 0o600 so the file is owner-only *at creation* — never the
+    momentary 0o644 a write-then-chmod leaves under a default umask. This bites
+    in the explicit-dir case (e.g. ``CADRE_RUN_DIR`` pointing at a pre-existing
+    world-traversable directory); the default ``~/.cadre`` chain is already
+    0o700. The trailing chmod still tightens a pre-existing file, since O_CREAT
+    does not alter the mode of a file that already exists (re-run into a dir).
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
     path.chmod(0o600)
 
 
