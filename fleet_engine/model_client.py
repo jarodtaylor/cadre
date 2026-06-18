@@ -73,18 +73,22 @@ class ModelClient:
             agent = self._factory(provider, model, list(toolset))
             text = agent.chat(prompt)
         except Exception as exc:  # noqa: BLE001
-            # Deliberate catch-all resilience boundary: any agent failure becomes a
-            # typed failure so the fleet degrades rather than crashes. U1 (live, on
-            # the Hermes host) records AIAgent's exact exception type to confirm
-            # this is sufficient; the catch-all already contains whatever it raises.
+            # Catch-all resilience boundary: any agent failure becomes a typed
+            # failure so the fleet degrades rather than crashes. U1 (live, Hermes
+            # host, 2026-06-17) found AIAgent does NOT raise on a non-retryable API
+            # error — it logs and returns None — so the None/empty check below is the
+            # PRIMARY dead-lane detector; this except covers the cases where chat()
+            # does raise (e.g. agent construction). Both land on a typed failure.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error=f"{type(exc).__name__}: {exc}",
             )
 
         if text is None or not str(text).strip():
-            # Empty/whitespace output is a failure, not a labeled success — it must
-            # never reach the synthesizer as silent ungrounded provenance.
+            # Empty/None/whitespace output is a failure, not a labeled success — it
+            # must never reach the synthesizer as silent ungrounded provenance. This
+            # is the PRIMARY failure path: U1 confirmed AIAgent returns None on a
+            # failed/non-retryable provider call rather than raising.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error="empty response from model",
