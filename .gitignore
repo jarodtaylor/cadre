@@ -1,6 +1,7 @@
 # macOS System Files
 .DS_Store
 jarods-thoughts.md
+test-runs
 
 # Python
 __pycache__/
