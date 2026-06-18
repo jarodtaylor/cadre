@@ -34,6 +34,10 @@ _DEFAULT_HERMES_HOME = "~/.hermes"
 # Default root for run folders when CADRE_RUN_DIR is not set.
 _DEFAULT_RUNS_ROOT = "~/.cadre/runs"
 
+# Max length of the task-derived slug in a default run-dir leaf. Truncation
+# cuts on a word boundary (see _slugify), so a long task never ends mid-word.
+_SLUG_MAX = 40
+
 
 def _safe_role(role: str) -> str:
     """Return a filesystem-safe version of ``role`` for use in filenames ONLY.
@@ -54,16 +58,25 @@ def _slugify(task: str) -> str:
 
     Whitelist: ``[a-z0-9-]``.  All other characters (including path separators,
     '..', spaces, and control characters) are replaced with '-'.  The result is
-    lowercase, has no leading/trailing dashes, and is bounded to 40 characters.
-    A task that reduces to an empty string falls back to ``"run"``.
+    lowercase, has no leading/trailing dashes, and is bounded to ``_SLUG_MAX``
+    characters.  A task that reduces to an empty string falls back to ``"run"``.
+
+    Truncation cuts on a **word boundary**: an over-long slug is trimmed back to
+    the last whole hyphen-separated word within the limit, so a long task yields
+    ``...-agent-pattern`` rather than a sliced ``...-inspi``.  A single word
+    longer than the limit (no boundary to cut on) is hard-cut.
 
     Security: the explicit ASCII whitelist ``[^a-z0-9]+`` (not ``\\W``) ensures
     no non-ASCII letters pass through, and the result can never contain '/' or
     '.' — so it cannot escape the runs directory when used as a path component.
     """
-    slug = re.sub(r"[^a-z0-9]+", "-", task.lower())
-    slug = slug.strip("-")
-    slug = slug[:40].rstrip("-")  # truncation can leave a trailing dash
+    slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")
+    if len(slug) > _SLUG_MAX:
+        head = slug[:_SLUG_MAX]
+        boundary = head.rfind("-")
+        # Cut at the last whole word; hard-cut only if the first word alone
+        # already exceeds the limit (no usable boundary in range).
+        slug = head[:boundary] if boundary > 0 else head
     return slug or "run"
 
 
