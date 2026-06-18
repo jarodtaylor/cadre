@@ -179,7 +179,7 @@ class TestManifestSchema(unittest.TestCase):
         self.assertEqual(len(self.manifest["lanes"]), 2)
 
     def test_lane_u1_fields_present(self):
-        lane = next(l for l in self.manifest["lanes"] if l["role"] == "web")
+        lane = next(lane for lane in self.manifest["lanes"] if lane["role"] == "web")
         self.assertIn("role", lane)
         self.assertIn("provider", lane)
         self.assertIn("model", lane)
@@ -190,16 +190,16 @@ class TestManifestSchema(unittest.TestCase):
         self.assertIn("timed_out", lane)
 
     def test_lane_elapsed_s_value(self):
-        lane = next(l for l in self.manifest["lanes"] if l["role"] == "web")
+        lane = next(lane for lane in self.manifest["lanes"] if lane["role"] == "web")
         self.assertAlmostEqual(lane["elapsed_s"], 2.5, places=5)
 
     def test_lane_toolset_list(self):
-        lane = next(l for l in self.manifest["lanes"] if l["role"] == "web")
+        lane = next(lane for lane in self.manifest["lanes"] if lane["role"] == "web")
         self.assertEqual(lane["toolset"], ["web"])
 
     def test_synthesizer_not_a_lane_entry(self):
         """Synthesizer appears at run-level only (synth_ok), not in lanes."""
-        roles = [l["role"] for l in self.manifest["lanes"]]
+        roles = [lane["role"] for lane in self.manifest["lanes"]]
         self.assertNotIn("synthesizer", roles)
 
 
@@ -245,7 +245,7 @@ class TestFailedSpecialist(unittest.TestCase):
         save_run(_cfg(), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
-        lane = next(l for l in manifest["lanes"] if l["role"] == "social")
+        lane = next(lane for lane in manifest["lanes"] if lane["role"] == "social")
         self.assertFalse(lane["ok"])
         self.assertEqual(lane["error"], "auth error")
 
@@ -274,7 +274,7 @@ class TestTimedOutSpecialist(unittest.TestCase):
         save_run(_cfg(), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
-        lane = next(l for l in manifest["lanes"] if l["role"] == "social")
+        lane = next(lane for lane in manifest["lanes"] if lane["role"] == "social")
         self.assertTrue(lane["timed_out"])
         self.assertIsNotNone(lane["elapsed_s"])
         self.assertGreater(lane["elapsed_s"], 0)
@@ -653,7 +653,7 @@ class TestPrepareRunDirAtomicReservation(unittest.TestCase):
         self.assertEqual(mode, 0o700, f"expected 0o700, got 0o{mode:03o}")
 
 
-@unittest.skipIf(os.geteuid() == 0, "root bypasses filesystem permissions")
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
 class TestPrepareRunDirWritabilityProbe(unittest.TestCase):
     """prepare_run_dir raises OSError for an existing but unwritable explicit dir."""
 
@@ -748,8 +748,8 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
 
-        lane_ab_slash = next(l for l in manifest["lanes"] if l["role"] == "a/b")
-        lane_ab_colon = next(l for l in manifest["lanes"] if l["role"] == "a:b")
+        lane_ab_slash = next(lane for lane in manifest["lanes"] if lane["role"] == "a/b")
+        lane_ab_colon = next(lane for lane in manifest["lanes"] if lane["role"] == "a:b")
 
         self.assertIn("file", lane_ab_slash)
         self.assertIn("file", lane_ab_colon)
@@ -776,7 +776,7 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(os.geteuid() == 0, "root bypasses filesystem permissions")
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
 class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
     """run_command with an existing-but-unwritable run_dir exits non-zero, makes ZERO model calls."""
 

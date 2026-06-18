@@ -246,9 +246,9 @@ class TestRunCaptureUmaskParentDirs(unittest.TestCase):
                 run_command(EXAMPLE, "find tools", client=client)
                 # Check that the newly created cadre/runs parent dir is 0o700
                 cadre_dir = self.tmp / "cadre"
-                if cadre_dir.exists():
-                    mode = stat.S_IMODE(cadre_dir.stat().st_mode)
-                    self.assertEqual(mode, 0o700, f"cadre parent dir should be 0o700, got 0o{mode:03o}")
+                self.assertTrue(cadre_dir.exists(), "cadre parent dir should have been created")
+                mode = stat.S_IMODE(cadre_dir.stat().st_mode)
+                self.assertEqual(mode, 0o700, f"cadre parent dir should be 0o700, got 0o{mode:03o}")
 
 
 # ---------------------------------------------------------------------------
