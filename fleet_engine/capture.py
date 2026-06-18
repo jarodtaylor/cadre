@@ -6,12 +6,16 @@ This is a caller-layer module: imported only by cli.py and skills/research-swarm
 ``save_run`` takes a resolved ``run_dir: Path`` injected by the caller (U3 owns the
 fail-fast writability check and env-var resolution). Tests drive ``save_run`` with a
 ``tempfile.mkdtemp()`` dir and never touch ``~/.cadre``.
+
+``resolve_run_dir(task)`` is the caller-layer resolver: returns ``CADRE_RUN_DIR``
+(expanduser) when that env var is set, else ``~/.cadre/runs/<YYYY-MM-DD-HHMMSS>-<slug>``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +24,46 @@ from fleet_engine.engine import FleetResult
 
 # Default Hermes profile location — recorded in the manifest when HERMES_HOME is unset.
 _DEFAULT_HERMES_HOME = "~/.hermes"
+
+# Default root for run folders when CADRE_RUN_DIR is not set.
+_DEFAULT_RUNS_ROOT = "~/.cadre/runs"
+
+
+def _slugify(task: str) -> str:
+    """Return a filesystem-safe slug derived from ``task``.
+
+    Whitelist: ``[a-z0-9-]``.  All other characters (including path separators,
+    '..', spaces, and control characters) are replaced with '-'.  The result is
+    lowercase, has no leading/trailing dashes, and is bounded to 40 characters.
+    A task that reduces to an empty string falls back to ``"run"``.
+
+    Security: the explicit ASCII whitelist ``[^a-z0-9]+`` (not ``\\W``) ensures
+    no non-ASCII letters pass through, and the result can never contain '/' or
+    '.' — so it cannot escape the runs directory when used as a path component.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", task.lower())
+    slug = slug.strip("-")
+    slug = slug[:40].rstrip("-")  # truncation can leave a trailing dash
+    return slug or "run"
+
+
+def resolve_run_dir(task: str) -> Path:
+    """Return the run directory for this task.
+
+    If ``CADRE_RUN_DIR`` is set, use it verbatim (expanduser only — no stamp or
+    slug leaf is appended; the caller controls the full path).
+
+    Otherwise, build ``~/.cadre/runs/<YYYY-MM-DD-HHMMSS>-<slug>`` from the
+    current time and a sanitized slug of the task.
+    """
+    cadre_run_dir = os.getenv("CADRE_RUN_DIR")
+    if cadre_run_dir:
+        return Path(cadre_run_dir).expanduser()
+
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    slug = _slugify(task)
+    leaf = f"{stamp}-{slug}"
+    return Path(_DEFAULT_RUNS_ROOT).expanduser() / leaf
 
 
 def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
