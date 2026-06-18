@@ -68,9 +68,12 @@ def run_command(
         try:
             run_dir = prepare_run_dir(task, run_dir=run_dir)
         except OSError as exc:
+            # run_dir is still None here on the default path (prepare_run_dir
+            # raised before reassigning it); the OSError carries the attempted
+            # path, so don't interpolate run_dir and risk printing "None".
             return (
                 1,
-                f"Cannot create run directory {run_dir}: {exc}\n"
+                f"Cannot create run directory: {exc}\n"
                 "Use --no-capture to bypass run capture.",
             )
 

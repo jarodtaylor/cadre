@@ -118,6 +118,9 @@ def _collect(
     now = time.monotonic()
     if holder:
         result = holder[0]
+        # The engine is the single source of truth for timed_out: a returned
+        # call did not time out, regardless of what the client left on the field.
+        result.timed_out = False
     else:
         result = AgentResult(role=role, provider=provider, model=model, ok=False,
                              error=f"timed out after {timeout:g}s", timed_out=True)
