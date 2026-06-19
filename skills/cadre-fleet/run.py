@@ -50,18 +50,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Load + validate the fleet. FileNotFoundError and ConfigError both produce a
-    # clean message and exit 1 — the same handling the original runner used.
+    # Load + validate the fleet. ConfigError and any OSError (missing file, a
+    # directory path, bad perms) both produce a clean message and exit 1.
     try:
         cfg = FleetConfig.load(args.fleet)
     except ConfigError as err:
         print(str(err))
         return 1
-    except FileNotFoundError:
+    except OSError as exc:
         print(
-            f"Fleet spec not found: {args.fleet}\n"
-            "Copy a fleet from the repo's fleets/ directory into ~/.cadre/fleets/,\n"
-            "or compose one from ~/.cadre/palette.yaml and save it there."
+            f"Could not read fleet spec '{args.fleet}': {exc}\n"
+            "Pass a specific .yaml file (not a directory). Copy one from the repo's "
+            "fleets/ into ~/.cadre/fleets/, or compose one from ~/.cadre/palette.yaml."
         )
         return 1
 

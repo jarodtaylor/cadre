@@ -6,13 +6,16 @@ Loads the module via importlib (scripts/ is not a Python package),
 mirroring the by-path import pattern in test_cli.py:_load_skill_module.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import shutil
 import stat
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -302,6 +305,51 @@ class TestEnsureCadreDirs(unittest.TestCase):
         rv.ensure_cadre_dirs(str(home))
         self.assertTrue(home.exists())
         self.assertTrue((home / "fleets").exists())
+
+
+# ---------------------------------------------------------------------------
+# New test: resolve_venv.main() stdout/stderr contract (FIX 6 / install.sh PYBIN)
+# ---------------------------------------------------------------------------
+
+
+class TestMainStdoutContract(unittest.TestCase):
+    """main() prints ONLY the resolved python path to stdout; diagnostics to stderr.
+
+    This locks the `PYBIN="$(python3 scripts/resolve_venv.py "$@")"` contract in
+    install.sh: command substitution captures stdout, so any stray text there would
+    corrupt PYBIN.
+    """
+
+    def test_explicit_venv_python_stdout_is_only_path(self):
+        """main(["--venv-python", "/some/python"]) stdout == "/some/python\\n" exactly."""
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+
+        with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
+            with unittest.mock.patch.object(rv, "write_config"):
+                with contextlib.redirect_stdout(stdout_buf):
+                    with contextlib.redirect_stderr(stderr_buf):
+                        code = rv.main(["--venv-python", "/some/python"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout_buf.getvalue(), "/some/python\n",
+                         "stdout must be EXACTLY the path + newline (nothing else)")
+
+    def test_diagnostics_go_to_stderr_not_stdout(self):
+        """Scaffold confirmations appear on stderr, not stdout."""
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+
+        with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
+            with unittest.mock.patch.object(rv, "write_config"):
+                with contextlib.redirect_stdout(stdout_buf):
+                    with contextlib.redirect_stderr(stderr_buf):
+                        rv.main(["--venv-python", "/some/python"])
+
+        # stdout has only the path; stderr has the diagnostic messages
+        self.assertEqual(stdout_buf.getvalue().strip(), "/some/python")
+        # Diagnostics (scaffold/config lines) go to stderr
+        self.assertIn("cadre", stderr_buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -61,12 +61,6 @@ PROVIDERS: list[tuple[str, str]] = [
     # ("openrouter", "google/gemini-3-flash"),
 ]
 
-# One tool-enabled check: (provider, model, toolset, prompt-that-needs-the-tool).
-TOOL_CHECK: tuple[str, str, list[str], str] | None = None
-# e.g. ("openrouter", "google/gemini-3-flash", ["web"], "Search the web for today's top AI story.")
-
-# Deliberate failure: a bad (provider, model) to capture the raised exception type.
-FAILURE_CASE: tuple[str, str] = ("openrouter", "this/model-does-not-exist-xyz")
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +231,17 @@ def _load_candidates(candidates_path: Path) -> tuple[list[tuple[str, str]], list
     """
     if candidates_path.exists():
         data = yaml.safe_load(candidates_path.read_text(encoding="utf-8")) or {}
-        raw_candidates = data.get("candidates", [])
-        candidates = [(c["provider"], c["model"]) for c in raw_candidates if c]
-        toolsets = data.get("toolsets", [])
+        raw_candidates = data.get("candidates") or []
+        candidates = [
+            (c["provider"], c["model"])
+            for c in raw_candidates
+            if isinstance(c, dict) and c.get("provider") and c.get("model")
+        ]
+        raw_toolsets = data.get("toolsets") or []
+        # Guard scalar toolsets: a bare string (e.g. `toolsets: web`) must NOT be
+        # iterated char-by-char. Only accept a list; a scalar string is treated as
+        # invalid and discarded.
+        toolsets = [t for t in raw_toolsets if isinstance(t, str)] if isinstance(raw_toolsets, list) else []
         return candidates, toolsets
     # Fallback: module-level PROVIDERS (edit before running).
     return PROVIDERS, []
@@ -262,23 +264,6 @@ def main() -> int:
 
     print(f"=== verifying {len(candidates)} candidate(s) ===")
     records = verify_candidates(candidates)
-
-    if TOOL_CHECK:
-        provider, model, toolset, prompt = TOOL_CHECK
-        print("\n=== tool invocation ===")
-        try:
-            text = _agent(provider, model, toolset).chat(prompt)
-            print(f"[tool {toolset}] {provider} / {model}: {str(text)[:120]!r}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[FAIL tool] {type(exc).__name__}: {exc}")
-
-    print(f"\n=== deliberate failure (records exception type for U2's catch) ===")
-    fp, fm = FAILURE_CASE
-    try:
-        _agent(fp, fm).chat("hello")
-        print("UNEXPECTED: bad model did not raise")
-    except Exception as exc:  # noqa: BLE001
-        print(f"AIAgent raised: {type(exc).__module__}.{type(exc).__name__}: {exc}")
 
     print(f"\n=== writing palette to {palette_path} ===")
     try:

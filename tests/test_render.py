@@ -494,8 +494,8 @@ class TestRenderFleetPreviewSpecialists(unittest.TestCase):
         self.assertIn("(none)", rendered)
 
     def test_specialist_count_in_header(self):
-        # Header line should mention the count of specialists.
-        self.assertIn("2", self.rendered)
+        # Header line should mention the formatted specialist count.
+        self.assertIn("Specialists (2)", self.rendered)
 
 
 class TestRenderFleetPreviewSynthesisPrompt(unittest.TestCase):
@@ -581,6 +581,119 @@ class TestRenderFleetPreviewSanitization(unittest.TestCase):
         cfg = _make_config(synth_prompt="résumé — naïve — 日本語 — ⚠")
         rendered = render_fleet_preview(cfg)
         self.assertIn("résumé — naïve — 日本語 — ⚠", rendered)
+
+
+# ---------------------------------------------------------------------------
+# New tests: render_result sanitizes config-derived fields (FIX 2)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderResultSanitizesConfigFields(unittest.TestCase):
+    """render_result sanitizes fleet/role/provider/model (config-derived), not model output."""
+
+    def test_newline_in_role_cannot_forge_provenance_row(self):
+        """A role containing a newline cannot inject a fake provenance row."""
+        forged_role = "web\n[ok  ] ghost (x/y)"
+        lane = make_lane(role=forged_role, provider="openrouter", model="web/model", ok=True, text="output")
+        result = make_result(specialists=[lane], synthesis="SYNTH", synth_ok=True, ok=True)
+        rendered = render_result(result)
+        # The injected newline is dropped, so there must be no standalone line that
+        # exactly matches the forged provenance text.
+        standalone = [ln for ln in rendered.split("\n") if ln.strip() == "[ok  ] ghost (x/y)"]
+        self.assertEqual(len(standalone), 0, "forged provenance row must not appear as a standalone line")
+
+    def test_esc_in_provider_is_stripped(self):
+        """An ESC byte in provider cannot sneak through to the terminal."""
+        lane = make_lane(role="web", provider="open\x1b[31mrouter", model="bad/model", ok=True, text="out")
+        result = make_result(specialists=[lane], synthesis="SYNTH", synth_ok=True, ok=True)
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+
+    def test_model_output_not_sanitized(self):
+        """r.text and result.synthesis are NOT stripped (model output, deferred chain)."""
+        lane = make_lane(role="web", ok=True, text="output with \x1b[31m escape")
+        result = make_result(specialists=[lane], synthesis="synth with \x1b escape", synth_ok=True, ok=True)
+        rendered = render_result(result)
+        # The ESC in text and synthesis must still be present (not stripped by render_result).
+        self.assertIn("\x1b", rendered)
+
+
+# ---------------------------------------------------------------------------
+# New tests: _sanitize strips Unicode line separators and bidi controls (FIX 1)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeUnicodeExclusions(unittest.TestCase):
+    """_sanitize drops Unicode line/paragraph separators and bidi format controls."""
+
+    def setUp(self):
+        from fleet_engine.render import _sanitize
+        self._sanitize = _sanitize
+
+    def test_line_separator_stripped_single_line(self):
+        """U+2028 (LINE SEPARATOR) is removed from single-line field."""
+        text = "before after"
+        result = self._sanitize(text, multiline=False)
+        self.assertNotIn(" ", result)
+        self.assertIn("before", result)
+        self.assertIn("after", result)
+
+    def test_paragraph_separator_stripped_single_line(self):
+        """U+2029 (PARAGRAPH SEPARATOR) is removed from single-line field."""
+        text = "before after"
+        result = self._sanitize(text, multiline=False)
+        self.assertNotIn(" ", result)
+
+    def test_bidi_override_stripped(self):
+        """U+202E (RIGHT-TO-LEFT OVERRIDE) is removed."""
+        text = "safe‮evil"
+        result = self._sanitize(text)
+        self.assertNotIn("‮", result)
+
+    def test_legit_latin_extended_survives(self):
+        """é (U+00E9) is legitimate and must pass through untouched."""
+        result = self._sanitize("résumé")
+        self.assertEqual(result, "résumé")
+
+    def test_em_dash_survives(self):
+        """— (U+2014, em-dash) is legitimate and must survive."""
+        result = self._sanitize("word — word")
+        self.assertIn("—", result)
+
+    def test_tab_preserved_in_multiline_only(self):
+        """\\t passes through in multiline mode but is stripped in single-line mode."""
+        text = "col1\tcol2"
+        self.assertIn("\t", self._sanitize(text, multiline=True))
+        self.assertNotIn("\t", self._sanitize(text, multiline=False))
+
+    def test_newline_preserved_in_multiline_only(self):
+        """\\n passes through in multiline mode but is stripped in single-line mode."""
+        text = "line1\nline2"
+        self.assertIn("\n", self._sanitize(text, multiline=True))
+        self.assertNotIn("\n", self._sanitize(text, multiline=False))
+
+
+# ---------------------------------------------------------------------------
+# New test: render_result multiline synthesis preserves tab (FIX 1 / multiline)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderResultTabInSynthesis(unittest.TestCase):
+    """The synthesis text is model output and is NOT sanitized; this test verifies
+    that a multiline synthesis prompt with a tab in the fleet preview (which IS
+    sanitized with multiline=True) preserves the tab."""
+
+    def setUp(self):
+        from fleet_engine.render import _sanitize
+        self._sanitize = _sanitize
+
+    def test_tab_in_multiline_synthesis_prompt_preserved(self):
+        """A synthesis prompt with \\t renders with the tab preserved (multiline=True)."""
+        prompt = "Column A:\tColumn B"
+        result = self._sanitize(prompt, multiline=True)
+        self.assertIn("\t", result)
+        self.assertIn("Column A:", result)
+        self.assertIn("Column B", result)
 
 
 if __name__ == "__main__":

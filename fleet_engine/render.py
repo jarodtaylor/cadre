@@ -22,6 +22,16 @@ def _looks_api_billed(provider: str, model: str) -> bool:
     return any(kw in combined for kw in _BILLED_KEYWORDS)
 
 
+# Unicode line/paragraph separators and bidi format controls are never legitimate
+# in a fleet field; >=0xA0 would otherwise pass them through and re-enable the
+# fake-line / display-spoof the C0/C1 strip closes.
+_UNSAFE_UNICODE = frozenset(
+    "  "                      # line / paragraph separators
+    "‪‫‬‭‮"    # bidi embeddings / overrides
+    "⁦⁧⁨⁩"          # bidi isolates
+)
+
+
 def _sanitize(text: str, *, multiline: bool = False) -> str:
     """Strip terminal-control characters from fleet-controlled text before display.
 
@@ -31,15 +41,25 @@ def _sanitize(text: str, *, multiline: bool = False) -> str:
     otherwise overwrite or hide a printed warning (e.g. the privileged-tools line),
     spoofing the very output the human approves. Drop C0 controls (0x00–0x1F),
     DEL (0x7F), and C1 (0x80–0x9F): removing the ESC/CR/BS bytes defangs any
-    sequence (a residual ``[2J`` then renders as inert text). Newlines survive only
-    for the multi-line synthesis prompt; elsewhere they are dropped so a single-line
-    field cannot inject a fake line. Printable Unicode (>= 0xA0) passes through
-    untouched, so a legitimate prompt renders byte-identically.
+    sequence (a residual ``[2J`` then renders as inert text). Also drops Unicode
+    line/paragraph separators (U+2028, U+2029) and bidi format controls
+    (U+202A–U+202E, U+2066–U+2069), which >=0xA0 would otherwise pass through and
+    re-enable the fake-line / display-spoof the C0/C1 strip closes. Newlines survive
+    only for the multi-line synthesis prompt; TAB is also preserved in multiline mode
+    only; elsewhere both are dropped so a single-line field cannot inject a fake line.
+    Printable Unicode (>= 0xA0) other than the excluded set passes through untouched,
+    so a legitimate prompt renders byte-identically.
     """
     return "".join(
         ch
         for ch in text
-        if (ch == "\n" and multiline) or (0x20 <= ord(ch) <= 0x7E) or ord(ch) >= 0xA0
+        if (
+            (ch == "\n" and multiline)
+            or (ch == "\t" and multiline)
+            or (0x20 <= ord(ch) <= 0x7E)
+            or ord(ch) >= 0xA0
+        )
+        and ch not in _UNSAFE_UNICODE
     )
 
 
@@ -87,7 +107,7 @@ def render_fleet_preview(config: FleetConfig) -> str:
 
 def render_result(result: FleetResult) -> str:
     header = "synthesized result" if result.ok else "partial result (no synthesis)"
-    out = [f"=== {result.fleet} — {header} ==="]
+    out = [f"=== {_sanitize(result.fleet)} — {header} ==="]
     if result.synth_ok is None:
         # All specialists failed — synthesis was never attempted. Surface a
         # prominent line so the caller never mistakes this for a valid result.
@@ -101,8 +121,12 @@ def render_result(result: FleetResult) -> str:
         # findings in labeled sections so the user still gets the work, not just
         # provenance rows.
         for r in result.successes:
-            out.append(f"\n--- {r.role} ({r.provider}/{r.model}) ---\n{r.text}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text}")
     out.append("\n--- provenance ---")
+    # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
+    # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,
+    # result.synthesis) is deliberately NOT stripped here — that's the deferred
+    # injection->terminal chain (GH #5), not this surface's job.
     for r in result.specialists:
         if r.ok:
             tag = "ok  "
@@ -111,7 +135,7 @@ def render_result(result: FleetResult) -> str:
         else:
             tag = "FAIL"
         suffix = "" if r.ok else f": {r.error}"
-        out.append(f"[{tag}] {r.role} ({r.provider}/{r.model}){suffix}")
+        out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")
         out.extend(f"  - {n}" for n in result.notes)

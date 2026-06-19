@@ -346,6 +346,7 @@ def _load_skill_module():
     skill_path = Path(__file__).resolve().parents[1] / "skills" / "cadre-fleet" / "run.py"
     spec = importlib.util.spec_from_file_location("cadre_fleet_run", skill_path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules["cadre_fleet_run"] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -570,6 +571,63 @@ class TestSkillTaskRequiredForRealRun(unittest.TestCase):
                 with contextlib.redirect_stdout(stdout_buf):
                     self.run_mod.main(["--fleet", _EXAMPLE_FLEET])
         mock_prepare.assert_not_called()
+
+
+class TestSkillFleetErrorPaths(unittest.TestCase):
+    """Error-path tests for skills/cadre-fleet/run.py main(): nonexistent file,
+    invalid YAML, and directory path all return 1 cleanly."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_mod = _load_skill_module()
+
+    def _run_fleet(self, fleet_arg, extra_env=None):
+        """Run skill main() with --no-capture, capturing stdout."""
+        buf = io.StringIO()
+        env = {"CADRE_RUN_DIR": str(self.tmp)}
+        if extra_env:
+            env.update(extra_env)
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", fleet_arg, "--task", "test", "--no-capture"]
+                    )
+        return code, buf.getvalue()
+
+    def test_nonexistent_fleet_returns_1(self):
+        """A --fleet path pointing to a nonexistent file returns exit code 1."""
+        code, out = self._run_fleet(str(self.tmp / "does_not_exist.yaml"))
+        self.assertEqual(code, 1)
+
+    def test_invalid_yaml_fleet_returns_1(self):
+        """A --fleet path pointing to invalid YAML (ConfigError path) returns exit code 1."""
+        bad = self.tmp / "bad.yaml"
+        bad.write_text("name: [unterminated\n")
+        code, out = self._run_fleet(str(bad))
+        self.assertEqual(code, 1)
+
+    def test_directory_fleet_returns_1(self):
+        """A --fleet path pointing at a directory (IsADirectoryError) returns exit code 1."""
+        fleet_dir = self.tmp / "myfleets"
+        fleet_dir.mkdir()
+        code, out = self._run_fleet(str(fleet_dir))
+        self.assertEqual(code, 1)
+
+    def test_directory_fleet_message_mentions_path(self):
+        """The OSError message mentions the directory path that was passed."""
+        fleet_dir = self.tmp / "myfleets2"
+        fleet_dir.mkdir()
+        code, out = self._run_fleet(str(fleet_dir))
+        self.assertIn(str(fleet_dir), out)
+
+    def test_directory_fleet_no_traceback(self):
+        """No Python traceback appears in the output — only a clean message."""
+        fleet_dir = self.tmp / "myfleets3"
+        fleet_dir.mkdir()
+        code, out = self._run_fleet(str(fleet_dir))
+        self.assertNotIn("Traceback", out)
 
 
 class TestSkillArbitraryFleet(unittest.TestCase):

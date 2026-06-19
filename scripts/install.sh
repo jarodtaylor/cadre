@@ -29,6 +29,12 @@ cd "$REPO_ROOT"
 # Passes through any --venv-python arg the operator supplied.
 PYBIN="$(python3 scripts/resolve_venv.py "$@")"
 
+if [ ! -x "$PYBIN" ]; then
+    echo "Resolved Hermes Python is not executable: $PYBIN" >&2
+    echo "Check --venv-python / CADRE_HERMES_PYTHON, or your Hermes install." >&2
+    exit 1
+fi
+
 # ── 3. Two-phase palette seed ────────────────────────────────────────────────
 CANDIDATES="$HOME/.cadre/palette-candidates.yaml"
 

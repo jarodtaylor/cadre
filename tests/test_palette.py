@@ -397,5 +397,124 @@ class TestWritePaletteHonestyHeader(unittest.TestCase):
         self.assertEqual(data["toolsets"], ["web"])
 
 
+# ---------------------------------------------------------------------------
+# New tests: TestLoadCandidates (FIX 3)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadCandidates(unittest.TestCase):
+    """_load_candidates robustly handles malformed or absent seed files."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _candidates_path(self, name="palette-candidates.yaml"):
+        return self.tmp / name
+
+    def test_file_absent_returns_providers_empty_toolsets(self):
+        """If the seed file doesn't exist, returns (PROVIDERS, [])."""
+        path = self._candidates_path("nonexistent.yaml")
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(candidates, _spike.PROVIDERS)
+        self.assertEqual(toolsets, [])
+
+    def test_valid_yaml_parsed(self):
+        """A well-formed file returns the candidate tuples and toolsets."""
+        path = self._candidates_path()
+        path.write_text(
+            "candidates:\n"
+            "  - provider: xai\n"
+            "    model: grok-4.3\n"
+            "  - provider: openrouter\n"
+            "    model: google/gemini-3-flash\n"
+            "toolsets:\n"
+            "  - web\n"
+            "  - search\n",
+            encoding="utf-8",
+        )
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(candidates, [("xai", "grok-4.3"), ("openrouter", "google/gemini-3-flash")])
+        self.assertEqual(toolsets, ["web", "search"])
+
+    def test_empty_file_returns_providers_empty_toolsets(self):
+        """An empty file (yaml.safe_load → None) returns (PROVIDERS, [])."""
+        path = self._candidates_path()
+        path.write_text("", encoding="utf-8")
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(candidates, _spike.PROVIDERS)
+        self.assertEqual(toolsets, [])
+
+    def test_candidate_missing_model_is_skipped(self):
+        """A dict missing 'model' is skipped; other entries are returned normally."""
+        path = self._candidates_path()
+        path.write_text(
+            "candidates:\n"
+            "  - provider: xai\n"
+            "    model: grok-4.3\n"
+            "  - provider: openrouter\n"
+            "toolsets: []\n",
+            encoding="utf-8",
+        )
+        candidates, toolsets = _spike._load_candidates(path)
+        # The second entry (missing model) must be skipped — no KeyError
+        self.assertEqual(candidates, [("xai", "grok-4.3")])
+
+    def test_scalar_toolsets_returns_empty_list(self):
+        """A scalar string `toolsets: web` must return [] (not ['w','e','b'])."""
+        path = self._candidates_path()
+        path.write_text(
+            "candidates:\n"
+            "  - provider: xai\n"
+            "    model: grok-4.3\n"
+            "toolsets: web\n",
+            encoding="utf-8",
+        )
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(toolsets, [], "scalar toolsets must not be iterated char-by-char")
+
+    def test_candidates_null_no_crash(self):
+        """candidates: null → no crash; falls back to PROVIDERS."""
+        path = self._candidates_path()
+        path.write_text("candidates: null\ntoolsets: [web]\n", encoding="utf-8")
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(candidates, _spike.PROVIDERS)
+        self.assertEqual(toolsets, ["web"])
+
+    def test_toolsets_null_no_crash(self):
+        """toolsets: null → no crash; returns []."""
+        path = self._candidates_path()
+        path.write_text(
+            "candidates:\n"
+            "  - provider: xai\n"
+            "    model: grok-4.3\n"
+            "toolsets: null\n",
+            encoding="utf-8",
+        )
+        candidates, toolsets = _spike._load_candidates(path)
+        self.assertEqual(toolsets, [])
+
+
+# ---------------------------------------------------------------------------
+# New test: verify_candidates blank-response (FIX 3)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyCandidatesBlankResponse(unittest.TestCase):
+    """verify_candidates treats blank/empty response as ok=False."""
+
+    def test_empty_response_yields_ok_false_with_detail(self):
+        """_agent.chat() returning '' → VerifyRecord(ok=False, detail='empty response')."""
+        import unittest.mock as mock
+
+        with mock.patch.object(_spike, "_agent") as fake_agent:
+            fake_agent.return_value.chat.return_value = ""
+            result = _spike.verify_candidates([("xai", "grok-4.3")])
+
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0].ok)
+        self.assertEqual(result[0].detail, "empty response")
+
+
 if __name__ == "__main__":
     unittest.main()
