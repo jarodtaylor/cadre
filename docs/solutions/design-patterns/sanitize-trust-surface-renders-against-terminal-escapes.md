@@ -1,6 +1,7 @@
 ---
 title: "Sanitize attacker-controlled fields in a render that IS a human-approval control"
 date: 2026-06-19
+last_updated: 2026-06-19
 category: design-patterns
 module: fleet_engine
 problem_type: design_pattern
@@ -36,6 +37,15 @@ def _sanitize(text: str, *, multiline: bool = False) -> str:
 ```
 
 Apply it to *each* attacker-controlled field; keep your own labels and warnings as separate, un-tainted strings so they can't be hidden. Drop newlines in single-line fields so a field can't inject a fake line; preserve them only where multi-line text is expected. You do **not** need a full ANSI parser — dropping the ESC byte alone neutralizes the sequence.
+
+### Two completeness traps (both bit Cadre — caught by an adversarial review pass)
+
+1. **Sibling surfaces.** Cover *every* surface that renders the same attacker-controlled data, not just the one where the bug was first found. Cadre hardened the *preview* (`render_fleet_preview`) but left the symmetric post-run output (`render_result`) — which renders the same config-derived `role`/`provider`/`model` and is what the agent weaves back as its honesty signal — unsanitized, so a tampered fleet could forge a `[ok  ] ghost (x/y)` provenance row. When you add sanitization, grep for *every* reader of those fields and treat them as one unit.
+2. **Beyond C0/C1.** Stripping ASCII control bytes (C0 `0x00–0x1F`, DEL, C1 `0x80–0x9F`) is necessary but not sufficient: Unicode line/paragraph separators (U+2028, U+2029) and bidi format controls (U+202A–U+202E, U+2066–U+2069) sit at code points `>= 0xA0` and sail through a naive "keep `>= 0xA0`" allowance, re-enabling the fake-line / display-spoof. Exclude them explicitly.
+
+### Draw the boundary at config-vs-content
+
+Sanitize the *identity/structural* fields the control vouches for (here: fleet name, role, provider, model — the provenance signal). Leave *model-generated content* (the report body, a lane's `text`/`error`) to the separate, harder injection-handling layer: stripping its control bytes is display-hardening, but its *semantic* injection (instructions a downstream agent might obey) is a distinct, deferred problem (Cadre tracks it as the injection->terminal chain). Conflating the two either under-protects the trust signal or over-promises on untrusted content.
 
 ## Why This Matters
 
