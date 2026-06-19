@@ -372,5 +372,30 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         self.assertIn("RuntimeError", result[0].detail)
 
 
+class TestWritePaletteHonestyHeader(unittest.TestCase):
+    """The generated palette carries a point-of-use note that toolsets are declared,
+    not tool-probed (Codex adversarial review, finding 3) — and stays valid YAML."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_header_warns_toolsets_not_probed(self):
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        out = self.tmp / "palette.yaml"
+        _spike.write_palette(records, ["web"], out)
+        text = out.read_text()
+        self.assertIn("NOT tool-probed", text)
+        self.assertIn("ungrounded", text)
+
+    def test_header_does_not_break_yaml_parse(self):
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        out = self.tmp / "palette.yaml"
+        _spike.write_palette(records, ["web"], out)
+        data = yaml.safe_load(out.read_text())  # comments are ignored by the loader
+        self.assertEqual(len(data["models"]), 2)
+        self.assertEqual(data["toolsets"], ["web"])
+
+
 if __name__ == "__main__":
     unittest.main()

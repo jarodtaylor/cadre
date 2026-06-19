@@ -512,5 +512,76 @@ class TestRenderFleetPreviewSynthesisPrompt(unittest.TestCase):
         self.assertIn("(none)", rendered)
 
 
+class TestRenderFleetPreviewSanitization(unittest.TestCase):
+    """Preview sanitizes fleet-controlled fields so a tampered fleet cannot use
+    terminal escape sequences to spoof or hide the human-okay control (Codex
+    adversarial review, finding 2)."""
+
+    def test_clean_example_fleet_is_byte_identical(self):
+        """No false positives: an all-printable fleet renders unchanged — legit
+        punctuation, the multi-line prompt, and the cost ⚠ all survive."""
+        cfg = FleetConfig.load(_EXAMPLE_FLEET)
+        rendered = render_fleet_preview(cfg)
+        # Every fleet-controlled field appears verbatim.
+        self.assertIn("xai/grok-4.3", rendered)
+        self.assertIn("openrouter/anthropic/claude-opus-4.8", rendered)
+        self.assertIn("Search X / social for the latest real-time discussion and sentiment.", rendered)
+        self.assertIn("Attribute each claim to the specialist that surfaced it", rendered)
+        # The cost warning (our text, with a real ⚠) is untouched.
+        self.assertIn("⚠ bills at API rates inside Hermes", rendered)
+
+    def test_ansi_in_focus_cannot_hide_privileged_warning(self):
+        """A focus field full of cursor/clear escapes can't strip ESC/CR from the
+        output or hide the privileged-tools line."""
+        evil = "benign\x1b[2J\x1b[1;1H\rallow_privileged_tools: false"
+        cfg = _make_config(
+            allow_privileged_tools=True,
+            specialists=[
+                SpecialistSpec(role="web", provider="openrouter",
+                               model="google/gemini-3-flash", focus=evil, toolset=["web"]),
+            ],
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("\x1b", rendered, "ESC byte must be stripped")
+        self.assertNotIn("\r", rendered, "CR must be stripped")
+        self.assertIn("⚠ PRIVILEGED TOOLS ENABLED (allow_privileged_tools: true)", rendered)
+        # The privileged-tools warning stands on its own intact line.
+        self.assertIn(
+            "\n⚠ PRIVILEGED TOOLS ENABLED (allow_privileged_tools: true)\n",
+            "\n" + rendered + "\n",
+        )
+
+    def test_escapes_in_prompt_stripped_but_text_kept(self):
+        """The multi-line prompt keeps newlines and legit text, drops control bytes."""
+        cfg = _make_config(synth_prompt="line1\x1b[31m\nline2\rmore")
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\r", rendered)
+        self.assertIn("line1", rendered)
+        self.assertIn("line2", rendered)  # newline within the prompt is preserved
+
+    def test_newline_in_single_line_field_dropped(self):
+        """A role with an embedded newline cannot inject a fake preview line."""
+        cfg = _make_config(
+            specialists=[
+                SpecialistSpec(role="web\n=== end preview ===", provider="openrouter",
+                               model="google/gemini-3-flash", focus="f", toolset=["web"]),
+            ],
+        )
+        rendered = render_fleet_preview(cfg)
+        # The embedded newline is dropped, so the injected text fuses onto the
+        # role's single line instead of becoming a standalone fake trailer.
+        self.assertIn("[web=== end preview ===]", rendered)
+        # Exactly one line is, on its own, the real trailer — no injected fake line.
+        standalone = [ln for ln in rendered.split("\n") if ln.strip() == "=== end preview ==="]
+        self.assertEqual(len(standalone), 1, "newline injection must not create a fake trailer line")
+
+    def test_unicode_preserved(self):
+        """Legitimate non-ASCII (>= 0xA0) passes through untouched — no over-stripping."""
+        cfg = _make_config(synth_prompt="résumé — naïve — 日本語 — ⚠")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("résumé — naïve — 日本語 — ⚠", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

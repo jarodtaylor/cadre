@@ -22,40 +22,64 @@ def _looks_api_billed(provider: str, model: str) -> bool:
     return any(kw in combined for kw in _BILLED_KEYWORDS)
 
 
+def _sanitize(text: str, *, multiline: bool = False) -> str:
+    """Strip terminal-control characters from fleet-controlled text before display.
+
+    A fleet YAML is attacker-controllable (library tampering — see the cadre-fleet
+    SKILL.md Safety section), and its strings flow into this preview, which is the
+    operative human-okay control. An embedded ANSI/cursor escape sequence could
+    otherwise overwrite or hide a printed warning (e.g. the privileged-tools line),
+    spoofing the very output the human approves. Drop C0 controls (0x00–0x1F),
+    DEL (0x7F), and C1 (0x80–0x9F): removing the ESC/CR/BS bytes defangs any
+    sequence (a residual ``[2J`` then renders as inert text). Newlines survive only
+    for the multi-line synthesis prompt; elsewhere they are dropped so a single-line
+    field cannot inject a fake line. Printable Unicode (>= 0xA0) passes through
+    untouched, so a legitimate prompt renders byte-identically.
+    """
+    return "".join(
+        ch
+        for ch in text
+        if (ch == "\n" and multiline) or (0x20 <= ord(ch) <= 0x7E) or ord(ch) >= 0xA0
+    )
+
+
 def render_fleet_preview(config: FleetConfig) -> str:
     """Render a human-readable preview of a FleetConfig.
 
     Derived MECHANICALLY from the validated ``FleetConfig`` object — never from
     prose or agent paraphrase. The human approves this output, not the agent's
-    summary of it, which is why it must be complete and exact.
+    summary of it, which is why it must be complete and exact. Every
+    fleet-controlled string is passed through ``_sanitize`` so a tampered fleet
+    cannot use terminal escapes to spoof or hide any part of the preview.
 
     Returns a multi-line string suitable for terminal display.
     """
-    out = [f"=== fleet preview: {config.name} ==="]
+    out = [f"=== fleet preview: {_sanitize(config.name)} ==="]
 
-    # --- synthesizer ---
-    synth_str = f"{config.synthesis.provider}/{config.synthesis.model}"
+    # --- synthesizer (cost predicate runs on the RAW strings; only display is sanitized) ---
+    synth_str = f"{_sanitize(config.synthesis.provider)}/{_sanitize(config.synthesis.model)}"
     out.append(f"\nSynthesizer: {synth_str}")
     if _looks_api_billed(config.synthesis.provider, config.synthesis.model):
         out.append("  ⚠ bills at API rates inside Hermes")
 
-    # --- privileged tools flag ---
+    # --- privileged tools flag (our text, not fleet-controlled — cannot be spoofed) ---
     if config.allow_privileged_tools:
         out.append("\n⚠ PRIVILEGED TOOLS ENABLED (allow_privileged_tools: true)")
     else:
         out.append("\nallow_privileged_tools: false")
 
-    # --- synthesis prompt ---
-    prompt_text = config.synthesis.prompt.strip() if config.synthesis.prompt else "(none)"
+    # --- synthesis prompt (multi-line: newlines preserved, other controls stripped) ---
+    raw_prompt = config.synthesis.prompt.strip() if config.synthesis.prompt else ""
+    prompt_text = _sanitize(raw_prompt, multiline=True) if raw_prompt else "(none)"
     out.append(f"\nSynthesis prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
 
     # --- specialists ---
     out.append(f"\nSpecialists ({len(config.specialists)}):")
     for s in config.specialists:
-        toolset_str = ", ".join(s.toolset) if s.toolset else "(none)"
-        out.append(f"  [{s.role}]  {s.provider}/{s.model}  toolset={toolset_str}")
+        toolset_str = ", ".join(_sanitize(t) for t in s.toolset) if s.toolset else "(none)"
+        out.append(f"  [{_sanitize(s.role)}]  {_sanitize(s.provider)}/{_sanitize(s.model)}  toolset={toolset_str}")
         if s.focus:
-            out.append(f"    focus: {s.focus}")
+            out.append(f"    focus: {_sanitize(s.focus)}")
 
     out.append("\n=== end preview ===")
     return "\n".join(out)
