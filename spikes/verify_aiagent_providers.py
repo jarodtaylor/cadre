@@ -231,6 +231,10 @@ def _load_candidates(candidates_path: Path) -> tuple[list[tuple[str, str]], list
     """
     if candidates_path.exists():
         data = yaml.safe_load(candidates_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            # A non-mapping root (top-level list/scalar) has no candidates block;
+            # `or {}` only catches None, so guard the type before calling .get().
+            return PROVIDERS, []
         raw_candidates = data.get("candidates") or []
         candidates = [
             (c["provider"], c["model"])

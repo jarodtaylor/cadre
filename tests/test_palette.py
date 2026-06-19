@@ -445,6 +445,15 @@ class TestLoadCandidates(unittest.TestCase):
         self.assertEqual(candidates, _spike.PROVIDERS)
         self.assertEqual(toolsets, [])
 
+    def test_non_mapping_root_returns_providers(self):
+        """A top-level YAML list or scalar (not a mapping) returns (PROVIDERS, []) — no AttributeError."""
+        for content in ("- a\n- b\n", "justascalar\n"):
+            path = self._candidates_path()
+            path.write_text(content, encoding="utf-8")
+            candidates, toolsets = _spike._load_candidates(path)
+            self.assertEqual(candidates, _spike.PROVIDERS)
+            self.assertEqual(toolsets, [])
+
     def test_candidate_missing_model_is_skipped(self):
         """A dict missing 'model' is skipped; other entries are returned normally."""
         path = self._candidates_path()
