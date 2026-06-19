@@ -22,7 +22,7 @@ Cadre's engine (`fleet_engine/engine.py`, `model_client.py`) is deliberately fre
 
 Add the capability at the **edge**, not the core:
 
-- The side effect (file I/O) lives in a **caller-layer module** (`fleet_engine/capture.py`) imported **only** by the entry points (`cli.py`, `skills/research-swarm/run.py`) — never by the engine. The engine *core* stays pure, not the whole package: `config.py` already reads files and `cli.py` already calls `print()` at the edge.
+- The side effect (file I/O) lives in a **caller-layer module** (`fleet_engine/capture.py`) imported **only** by the entry points (`cli.py`, `skills/cadre-fleet/run.py`) — never by the engine. The engine *core* stays pure, not the whole package: `config.py` already reads files and `cli.py` already calls `print()` at the edge.
 - The core emits only cheap **data signals**, never I/O. The engine gained `elapsed_s`, `toolset`, `timed_out` on `AgentResult` and `synth_ok` on `FleetResult`, all set at the per-lane collection site — plain fields, no file handling.
 - The caller reads those signals plus the in-memory result and writes the artifacts. **The engine never sees a path.**
 

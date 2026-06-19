@@ -1,7 +1,7 @@
 """Capture module — write a run folder with per-specialist markdown and a JSON manifest.
 
-This is a caller-layer module: imported only by cli.py and skills/research-swarm/run.py
-(in U3). NEVER imported by engine.py or model_client.py — the engine holds no file I/O.
+This is a caller-layer module: imported only by cli.py and skills/cadre-fleet/run.py.
+NEVER imported by engine.py or model_client.py — the engine holds no file I/O.
 
 ``save_run`` takes a resolved ``run_dir: Path`` injected by the caller (U3 owns the
 fail-fast writability check and env-var resolution). Tests drive ``save_run`` with a

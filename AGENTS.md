@@ -47,6 +47,7 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 ```bash
 .venv/bin/python -m unittest discover -s tests                       # full suite (stdlib unittest)
 .venv/bin/python -m fleet_engine.cli validate fleets/research-swarm.example.yaml
+.venv/bin/python skills/cadre-fleet/run.py --fleet fleets/research-swarm.example.yaml --preview  # render parsed fleet, no model calls (dev-safe)
 .venv/bin/python -m fleet_engine.cli run <spec.yaml> --task "…"       # needs hermes-agent (host)
 ```
 
@@ -65,6 +66,15 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   - The engine bounds every model call with a daemon‑thread wall‑clock backstop
     (`call_timeout`); see the module docstring for why it's daemon threads, not
     `ThreadPoolExecutor`, and why it's a backstop over AIAgent's own request timeout.
+  - **Agent-run handoff:** `skills/cadre-fleet/` is the runtime surface a Hermes agent
+    invokes (select a curated fleet from `~/.cadre/fleets/`, or compose one only from
+    the verified `~/.cadre/palette.yaml`). The runner's `--preview` (`render_fleet_preview`)
+    renders the **parsed** `FleetConfig` and is the load-bearing human-okay control — the
+    human approves what runs, not the agent's paraphrase. **Do not relax preview-always**
+    without the deferred security pass: safe toolsets still read untrusted web content,
+    and the synthesis is consumed by a terminal-capable agent, so an SSRF/injection in a
+    lane reaches beyond a tainted report. Owner-only `~/.cadre` perms guard other OS users,
+    not the agent itself.
 - **Schema:** minimal — one primitive (fan‑out → synthesize). Don't add abstraction
   for hypothetical second primitives.
 

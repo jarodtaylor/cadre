@@ -28,3 +28,14 @@ Persisting a fleet run's artifacts to disk so the run is auditable after the fac
 
 ### Run manifest
 The structured, machine-readable record of one run's health: per specialist, its outcome (success or failure, elapsed time, the toolset it was asked for, whether it timed out, and the file holding its output), plus run-level facts (the synthesizer model, whether synthesis succeeded, the active Hermes profile). It is the seam a later auditing or agent-handoff layer reads; the markdown files are for reading by hand.
+
+## Agent-run handoff
+
+### Fleet library
+The host-local directory of runnable fleets a Hermes agent selects from — `~/.cadre/fleets/<name>.yaml`, created owner-only (`0o700`) at install. Distinct from the repo's `fleets/`, which holds examples only; copy one into the library to make it runnable. Selected by name: the agent lists the directory and passes the chosen file's path to the runner. There is no registry, fuzzy-matching, or CLI subcommand — a flat directory of named YAML files is the whole convention.
+
+### Verified palette
+The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette.yaml`, written by the install's verify step. It records the `(provider, model)` pairs that actually resolved and responded on this host (**models verified by a live call**) plus the profile's safe toolsets (**declared and filtered to the safe set, not per-tool verified** — an unprovisioned tool still appears, so its lane can run silently ungrounded). Composing only from the palette prevents two silent failure modes: a guessed model string (a dead lane) and an unverified provider. It carries a `generated_at` stamp because verified strings drift.
+
+### Fleet preview
+The mechanically rendered view of a *parsed* fleet config — synthesizer (with a cost flag for API-billed models), `allow_privileged_tools`, the verbatim synthesis prompt, and every lane's role/provider/model/toolset — printed by the runner's `--preview` mode without making any model call. It is the operative control of the agent-run handoff: a human approves this rendered fleet, not the agent's paraphrase of it, so a tampered or privileged fleet cannot slip through unseen.

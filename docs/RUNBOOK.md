@@ -57,10 +57,10 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
    ```
 10. **Live demo (the v0 acceptance):**
     ```bash
-    HERMES_HOME=~/.hermes/profiles/<name> /usr/local/lib/hermes-agent/venv/bin/python skills/research-swarm/run.py --task "<a real research question>"
+    HERMES_HOME=~/.hermes/profiles/<name> /usr/local/lib/hermes-agent/venv/bin/python skills/cadre-fleet/run.py --fleet fleets/research-swarm.yaml --task "<a real research question>"
     ```
     Expect a synthesized, provenance-tagged result across ≥2 providers (≥1 non-Anthropic), with the tool-bearing lanes actually **grounded** (b).
-11. **Install as a Hermes skill (confirm)** so an agent can invoke it — place/symlink `skills/research-swarm/` into your Hermes skills directory and verify the `SKILL.md` frontmatter. An invoking agent's profile is inherited, so give it to an agent that already has the providers + tools.
+11. **Install as a Hermes skill (confirm)** so an agent can invoke it — place/symlink `skills/cadre-fleet/` into your Hermes skills directory and verify the `SKILL.md` frontmatter (or use `scripts/install.sh` with `HERMES_SKILLS_DIR` set — see "Install & provisioning" below). An invoking agent's profile is inherited, so give it to an agent that already has the providers + tools.
 12. **Baseline gut-check.** Run the swarm vs a single strong model on a few real tasks; confirm the synthesized output visibly wins. Efficacy signal — calibration, not CI.
 
 ## Host conventions — the fleet library (`~/.cadre/fleets/`)
@@ -117,3 +117,23 @@ HERMES_HOME=~/.hermes/profiles/<name> "$PYBIN" spikes/verify_aiagent_providers.p
 2. **Re-run to verify:** `./scripts/install.sh` — verifies live and writes `~/.cadre/palette.yaml`.
 3. **Copy a fleet:** `cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml` and set provider/model strings from the palette.
 4. **Dogfood:** test the skill end-to-end with a real Hermes agent invocation (the v0 "agent-run done" bar — fakes passing ≠ live working).
+
+## Agent-run usage (the `cadre-fleet` skill)
+
+Once installed and provisioned, a Hermes agent runs a fleet conversationally through the `cadre-fleet` skill (`skills/cadre-fleet/SKILL.md` is authoritative). The loop:
+
+1. **Select or compose.** `ls ~/.cadre/fleets/` for a curated fleet, or compose one drawing **only** from `~/.cadre/palette.yaml` (host-verified strings — never guess a model string) and save it to `~/.cadre/fleets/<name>.yaml`.
+2. **Preview (mandatory).** Render the *parsed* fleet — synthesizer (with a cost flag), `allow_privileged_tools`, the verbatim synthesis prompt, and every lane:
+   ```bash
+   PYBIN="${CADRE_HERMES_PYTHON:-$(grep -E '^CADRE_HERMES_PYTHON=' ~/.cadre/config | cut -d= -f2-)}"
+   "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --preview
+   ```
+   The human okays **this rendered fleet**, not the agent's paraphrase — the preview is the operative control.
+3. **Run on the okay** (it can take minutes — signal that a fleet is running):
+   ```bash
+   "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --task "<task>"
+   ```
+   The run fans out, synthesizes, captures to `~/.cadre/runs/`, and prints the result plus a `Run folder:` pointer.
+4. **Read back honestly.** Relay the synthesis, or the rendered degraded shape — a `[TIMEOUT]` lane, an all-specialists-failed line, or the surviving labeled lane outputs when the synthesizer failed. Never present a partial as the whole; attribute claims to the specialist/model that surfaced them.
+
+> **Safety (carry this through).** Even the safe toolsets read **untrusted** web content; an SSRF'd or prompt-injected lane output flows into the synthesis, which a **terminal-capable** agent then consumes — so the blast radius is beyond a tainted report. Preview-always is the operative control; the owner-only `~/.cadre/fleets/` perms guard other OS users, not the agent itself. Treat synthesized output as untrusted data, not instructions. Do not relax preview-always or allow privileged toolsets in composed fleets without the deferred security pass.

@@ -34,7 +34,9 @@ python3.11 -m venv .venv          # Python >=3.11,<3.14
 .venv/bin/python -m fleet_engine.cli validate fleets/research-swarm.example.yaml
 ```
 
-Running a fleet *live* needs a Hermes host with `hermes-agent` installed and providers authenticated — see `skills/research-swarm/SKILL.md`. Copy `fleets/research-swarm.example.yaml` to `fleets/research-swarm.yaml` and set your real provider + model strings. Never commit API keys or tokens.
+Running a fleet *live* needs a Hermes host with `hermes-agent` installed and providers authenticated — see `docs/RUNBOOK.md`. Copy `fleets/research-swarm.example.yaml` to `fleets/research-swarm.yaml` (or, for the agent-run path, into `~/.cadre/fleets/`) and set your real provider + model strings. Never commit API keys or tokens.
+
+A Hermes agent can also run fleets conversationally via the **`cadre-fleet` skill** (`skills/cadre-fleet/SKILL.md`): select a curated fleet or compose one from the host-verified palette, **preview the parsed fleet for a human okay**, run, then weave back the grounded, attributed result.
 
 ## License
 

@@ -1,5 +1,7 @@
-# Research swarm — EXAMPLE fleet. U7 produces the real one with your confirmed
-# Hermes strings (verified by the U1 spike on the Hermes host).
+# Research swarm — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
 #
 # Replace provider/model values with the exact strings your Hermes resolves.
 # Per-provider model-string format:
