@@ -62,3 +62,12 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
     Expect a synthesized, provenance-tagged result across ≥2 providers (≥1 non-Anthropic), with the tool-bearing lanes actually **grounded** (b).
 11. **Install as a Hermes skill (confirm)** so an agent can invoke it — place/symlink `skills/research-swarm/` into your Hermes skills directory and verify the `SKILL.md` frontmatter. An invoking agent's profile is inherited, so give it to an agent that already has the providers + tools.
 12. **Baseline gut-check.** Run the swarm vs a single strong model on a few real tasks; confirm the synthesized output visibly wins. Efficacy signal — calibration, not CI.
+
+## Host conventions — the fleet library (`~/.cadre/fleets/`)
+
+A Hermes agent selects a fleet to run from a **host-local fleet library**, separate from the repo:
+
+- **`~/.cadre/fleets/<name>.yaml` is the runnable library.** It is created **owner-only (`0o700`)** at install (see install + provisioning), mirroring how `~/.cadre/runs/` is created (`capture.py` `prepare_run_dir`, under `umask(0o077)`). Owner-only matters because a fleet spec can set `allow_privileged_tools: true` — restricting writers to the owner keeps *other OS users* from dropping a privileged fleet (the agent itself runs as the owner, so the preview is the operative control — see the agent-run usage section).
+- **Selected by name.** The agent `ls`es `~/.cadre/fleets/`, picks `<name>.yaml`, and passes its full path to the runner. There is **no registry, no fuzzy-matching, and no `cadre fleets` CLI subcommand** in v0 — those are deferred. A flat directory of named YAML files is the whole convention.
+- **The repo `fleets/` directory is examples-only.** `fleets/research-swarm.example.yaml` (a flagship curated fleet) and `fleets/palette.example.yaml` (the candidate-seed/palette template) are templates, not runnable fleets. To make one runnable, copy it into `~/.cadre/fleets/` and set your host-confirmed strings (from `~/.cadre/palette.yaml`).
+- **One profile throughout.** A fleet runs ephemerally under one Hermes profile (b); install and runtime must use the **same** profile, or the palette's recorded toolsets won't match what the lanes can actually reach.
