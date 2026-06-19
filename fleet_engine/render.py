@@ -89,8 +89,13 @@ def render_fleet_preview(config: FleetConfig) -> str:
         out.append("\nallow_privileged_tools: false")
 
     # --- synthesis prompt (multi-line: newlines preserved, other controls stripped) ---
-    raw_prompt = config.synthesis.prompt.strip() if config.synthesis.prompt else ""
-    prompt_text = _sanitize(raw_prompt, multiline=True) if raw_prompt else "(none)"
+    # Render the prompt byte-faithful to the parsed config (no .strip()): the
+    # preview is the approval surface, so it must match what actually runs. Only
+    # fall back to "(none)" when the sanitized prompt is truly empty.
+    raw_prompt = config.synthesis.prompt or ""
+    prompt_text = _sanitize(raw_prompt, multiline=True)
+    if prompt_text == "":
+        prompt_text = "(none)"
     out.append(f"\nSynthesis prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
 
     # --- specialists ---

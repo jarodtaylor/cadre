@@ -19,7 +19,7 @@ tags: [testing, importlib, dataclass, sys-modules, by-path-import, python, from-
 
 Cadre keeps runnable, non-importable scripts outside the package tree — `spikes/` and `scripts/` are **not** packages — and the test suite loads them by path to unit-test their pure functions (`tests/test_palette.py` loads `spikes/verify_aiagent_providers.py`; `tests/test_install.py` loads `scripts/resolve_venv.py`; `tests/test_cli.py` loads the skill `run.py`). When such a module defines a `@dataclass` **and** has `from __future__ import annotations` (the repo-wide convention), a naïve by-path load crashes on the decorator:
 
-```
+```text
 AttributeError: 'NoneType' object has no attribute '__dict__'
   ... in dataclasses._is_type: ns = sys.modules.get(cls.__module__).__dict__
 ```

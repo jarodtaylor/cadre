@@ -203,7 +203,7 @@ class TestWriteConfig(unittest.TestCase):
         rv.write_config("/my/python", path)
         content = Path(path).read_text()
         # Find the line and inspect it raw
-        line = next(l for l in content.splitlines() if l.startswith("CADRE_HERMES_PYTHON="))
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
         value = line.split("=", 1)[1]
         self.assertFalse(value.startswith('"'), "value must not be quoted")
         self.assertFalse(value.startswith("'"), "value must not be quoted")
@@ -215,7 +215,7 @@ class TestWriteConfig(unittest.TestCase):
         python_path = "/path/with=sign/python"
         rv.write_config(python_path, path)
         content = Path(path).read_text()
-        line = next(l for l in content.splitlines() if l.startswith("CADRE_HERMES_PYTHON="))
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
         value = line.split("=", 1)[1]
         self.assertEqual(value, python_path)
 
@@ -242,7 +242,7 @@ class TestWriteConfig(unittest.TestCase):
         rv.write_config("/first/python", path)
         rv.write_config("/second/python", path)
         content = Path(path).read_text()
-        line = next(l for l in content.splitlines() if l.startswith("CADRE_HERMES_PYTHON="))
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
         value = line.split("=", 1)[1]
         self.assertEqual(value, "/second/python")
 

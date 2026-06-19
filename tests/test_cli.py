@@ -379,6 +379,7 @@ class TestSkillEntryCapture(unittest.TestCase):
     def test_skill_no_capture_writes_no_folder(self):
         # Clear tmp and check nothing is written
         code, fake = self._run_skill(extra_argv=["--no-capture"])
+        self.assertEqual(code, 0)
         # When --no-capture is set, manifest.json should not be written
         self.assertFalse((self.tmp / "manifest.json").exists())
 
@@ -598,35 +599,35 @@ class TestSkillFleetErrorPaths(unittest.TestCase):
 
     def test_nonexistent_fleet_returns_1(self):
         """A --fleet path pointing to a nonexistent file returns exit code 1."""
-        code, out = self._run_fleet(str(self.tmp / "does_not_exist.yaml"))
+        code, _out = self._run_fleet(str(self.tmp / "does_not_exist.yaml"))
         self.assertEqual(code, 1)
 
     def test_invalid_yaml_fleet_returns_1(self):
         """A --fleet path pointing to invalid YAML (ConfigError path) returns exit code 1."""
         bad = self.tmp / "bad.yaml"
         bad.write_text("name: [unterminated\n")
-        code, out = self._run_fleet(str(bad))
+        code, _out = self._run_fleet(str(bad))
         self.assertEqual(code, 1)
 
     def test_directory_fleet_returns_1(self):
         """A --fleet path pointing at a directory (IsADirectoryError) returns exit code 1."""
         fleet_dir = self.tmp / "myfleets"
         fleet_dir.mkdir()
-        code, out = self._run_fleet(str(fleet_dir))
+        code, _out = self._run_fleet(str(fleet_dir))
         self.assertEqual(code, 1)
 
     def test_directory_fleet_message_mentions_path(self):
         """The OSError message mentions the directory path that was passed."""
         fleet_dir = self.tmp / "myfleets2"
         fleet_dir.mkdir()
-        code, out = self._run_fleet(str(fleet_dir))
+        _code, out = self._run_fleet(str(fleet_dir))
         self.assertIn(str(fleet_dir), out)
 
     def test_directory_fleet_no_traceback(self):
         """No Python traceback appears in the output — only a clean message."""
         fleet_dir = self.tmp / "myfleets3"
         fleet_dir.mkdir()
-        code, out = self._run_fleet(str(fleet_dir))
+        _code, out = self._run_fleet(str(fleet_dir))
         self.assertNotIn("Traceback", out)
 
 

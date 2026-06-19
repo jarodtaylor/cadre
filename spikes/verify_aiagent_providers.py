@@ -256,9 +256,9 @@ def main() -> int:
     if not candidates:
         print(
             "No candidates found. Either:\n"
-            f"  • Edit PROVIDERS in this file, or\n"
+            "  • Edit PROVIDERS in this file, or\n"
             f"  • Populate {candidates_path} with a 'candidates' list\n"
-            f"  (Run the install script to seed it from fleets/palette.example.yaml)"
+            "  (Run the install script to seed it from fleets/palette.example.yaml)"
         )
         return 1
 
