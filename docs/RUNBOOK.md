@@ -71,3 +71,49 @@ A Hermes agent selects a fleet to run from a **host-local fleet library**, separ
 - **Selected by name.** The agent `ls`es `~/.cadre/fleets/`, picks `<name>.yaml`, and passes its full path to the runner. There is **no registry, no fuzzy-matching, and no `cadre fleets` CLI subcommand** in v0 — those are deferred. A flat directory of named YAML files is the whole convention.
 - **The repo `fleets/` directory is examples-only.** `fleets/research-swarm.example.yaml` (a flagship curated fleet) and `fleets/palette.example.yaml` (the candidate-seed/palette template) are templates, not runnable fleets. To make one runnable, copy it into `~/.cadre/fleets/` and set your host-confirmed strings (from `~/.cadre/palette.yaml`).
 - **One profile throughout.** A fleet runs ephemerally under one Hermes profile (b); install and runtime must use the **same** profile, or the palette's recorded toolsets won't match what the lanes can actually reach.
+
+## Install & provisioning (the agent-run handoff)
+
+`scripts/install.sh` handles mechanical scaffolding. The judgment steps below are what it cannot make for you.
+
+### Running the installer
+
+```bash
+# Auto-probe known venv locations (root-Linux first, then ~/.hermes):
+./scripts/install.sh
+
+# Override if your install is non-standard:
+./scripts/install.sh --venv-python /path/to/hermes/venv/bin/python
+# or equivalently:
+CADRE_HERMES_PYTHON=/path/to/python ./scripts/install.sh
+```
+
+The script is **idempotent** and **two-phase**:
+
+**First run** — scaffolds `~/.cadre/{,fleets/}` owner-only (`0o700`), records the resolved venv Python to `~/.cadre/config` (`0o600`), seeds `~/.cadre/palette-candidates.yaml` from `fleets/palette.example.yaml`, then **stops** with a message to edit the candidates file.
+
+**Second run** (after editing candidates) — runs the verify spike under the Hermes venv to confirm which `(provider, model)` pairs actually resolve and respond, then writes the verified palette to `~/.cadre/palette.yaml`. Also installs the `cadre-fleet` skill symlink if `HERMES_SKILLS_DIR` is set.
+
+### Provision the profile (the silently-ungrounded failure)
+
+The Hermes profile the invoking agent runs under must hold **two distinct things**:
+
+1. **The `terminal` toolset.** So the agent can shell out to the fleet runner. This is separate from — and NOT constrained by — the specialists' safe-toolset allowlist.
+2. **Every search/web tool the curated fleets' lanes declare.** For example, `web` lanes need exa or firecrawl; `x_search` lanes need SuperGrok/xAI. An unprovisioned lane runs and returns output — but that output is training knowledge, not live data. No error is raised (this is exactly the live exa/firecrawl failure from 2026-06-17 that led to the profile-scoped tool discovery). Confirm the profile has the tool credentials before accepting a result as grounded.
+
+### One profile throughout
+
+The verify spike (step 2) and the runtime skill invocation **must use the same Hermes profile**, or the palette's recorded toolset list won't match what the lanes can actually reach. Run the spike under the profile you'll run fleets in:
+
+```bash
+HERMES_HOME=~/.hermes/profiles/<name> "$PYBIN" spikes/verify_aiagent_providers.py
+```
+
+(where `$PYBIN` is the resolved venv Python recorded in `~/.cadre/config`).
+
+### After install
+
+1. **Edit candidates:** open `~/.cadre/palette-candidates.yaml`, set the `candidates` list to the `(provider, model)` pairs authenticated in your profile (same format as fleet specs — see file comments), and declare the `toolsets` your profile holds.
+2. **Re-run to verify:** `./scripts/install.sh` — verifies live and writes `~/.cadre/palette.yaml`.
+3. **Copy a fleet:** `cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml` and set provider/model strings from the palette.
+4. **Dogfood:** test the skill end-to-end with a real Hermes agent invocation (the v0 "agent-run done" bar — fakes passing ≠ live working).
