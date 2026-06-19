@@ -57,9 +57,12 @@ a dead lane that appears to succeed while returning nothing grounded.
 cat ~/.cadre/palette.yaml
 ```
 
-Write your composed fleet to `~/.cadre/fleets/<name>.yaml`. Use only
-`(provider, model)` pairs and toolsets listed in the palette. Do not set
-`allow_privileged_tools: true` on composed fleets (see Safety below).
+Write your composed fleet to `~/.cadre/fleets/<name>.yaml`. Model the YAML
+structure (`name`, `synthesis`, `specialists` with role/provider/model/toolset/
+focus) on `fleets/research-swarm.example.yaml`. Use only `(provider, model)`
+pairs and toolsets listed in the palette. Do not set `allow_privileged_tools:
+true` on composed fleets (see Safety below). The `--preview` step re-parses the
+file and reports every config error, so iterate against it until it renders clean.
 
 ### 2. Preview (mandatory — do not skip)
 
