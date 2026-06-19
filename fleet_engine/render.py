@@ -13,6 +13,12 @@ from fleet_engine.engine import FleetResult
 def render_result(result: FleetResult) -> str:
     header = "synthesized result" if result.ok else "partial result (no synthesis)"
     out = [f"=== {result.fleet} — {header} ==="]
+    if result.synth_ok is None:
+        # All specialists failed — synthesis was never attempted. Surface a
+        # prominent line so the caller never mistakes this for a valid result.
+        n_failed = len(result.failures)
+        n_total = len(result.specialists)
+        out.append(f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted.")
     if result.synthesis:
         out.append(result.synthesis)
     elif result.successes:
@@ -23,7 +29,12 @@ def render_result(result: FleetResult) -> str:
             out.append(f"\n--- {r.role} ({r.provider}/{r.model}) ---\n{r.text}")
     out.append("\n--- provenance ---")
     for r in result.specialists:
-        tag = "ok  " if r.ok else "FAIL"
+        if r.ok:
+            tag = "ok  "
+        elif r.timed_out:
+            tag = "TIMEOUT"
+        else:
+            tag = "FAIL"
         suffix = "" if r.ok else f": {r.error}"
         out.append(f"[{tag}] {r.role} ({r.provider}/{r.model}){suffix}")
     if result.notes:
