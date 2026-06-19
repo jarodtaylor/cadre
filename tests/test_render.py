@@ -1,14 +1,22 @@
-"""Direct unit tests for fleet_engine/render.py render_result.
+"""Direct unit tests for fleet_engine/render.py render_result and render_fleet_preview.
 
-Constructs FleetResult / AgentResult objects directly (no model calls, no CLI
-layer) to cover the three degraded shapes added in U5 and the happy path.
+Constructs FleetResult / AgentResult / FleetConfig objects directly (no model
+calls, no CLI layer) to cover the three degraded shapes added in U5, the happy
+path, and the fleet preview helper added in U2.
 """
 
 import unittest
+from pathlib import Path
 
+from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
-from fleet_engine.render import render_result
+from fleet_engine.render import render_fleet_preview, render_result
+
+# Path to the curated example fleet (used for some preview tests).
+_EXAMPLE_FLEET = (
+    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +330,186 @@ class TestTimedOutLaneAllFailed(unittest.TestCase):
 
     def test_no_fail_tags_when_all_timed_out(self):
         self.assertNotIn("[FAIL]", self.rendered)
+
+
+# ---------------------------------------------------------------------------
+# render_fleet_preview — unit tests (U2)
+# ---------------------------------------------------------------------------
+
+
+def _make_config(
+    name="test-fleet",
+    synth_provider="openrouter",
+    synth_model="google/gemini-2-flash",
+    synth_prompt="Synthesize the findings.",
+    allow_privileged_tools=False,
+    specialists=None,
+):
+    """Build a FleetConfig directly for render preview tests."""
+    if specialists is None:
+        specialists = [
+            SpecialistSpec(
+                role="web",
+                provider="openrouter",
+                model="google/gemini-3-flash",
+                focus="find sources",
+                toolset=["web"],
+            ),
+            SpecialistSpec(
+                role="analysis",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                focus="deep analysis",
+                toolset=["web", "search"],
+            ),
+        ]
+    return FleetConfig(
+        name=name,
+        synthesis=SynthesisSpec(
+            provider=synth_provider,
+            model=synth_model,
+            prompt=synth_prompt,
+        ),
+        specialists=specialists,
+        allow_privileged_tools=allow_privileged_tools,
+    )
+
+
+class TestRenderFleetPreviewSynthesizer(unittest.TestCase):
+    """render_fleet_preview surfaces the synthesizer provider/model string."""
+
+    def setUp(self):
+        self.cfg = _make_config()
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_synthesizer_provider_present(self):
+        self.assertIn("openrouter", self.rendered)
+
+    def test_synthesizer_model_present(self):
+        self.assertIn("google/gemini-2-flash", self.rendered)
+
+    def test_fleet_name_in_header(self):
+        self.assertIn("test-fleet", self.rendered)
+
+    def test_synthesis_prompt_present_verbatim(self):
+        self.assertIn("Synthesize the findings.", self.rendered)
+
+
+class TestRenderFleetPreviewCostWarning(unittest.TestCase):
+    """render_fleet_preview flags an Anthropic/Opus synthesizer as API-billed."""
+
+    def test_anthropic_opus_synthesizer_flags_cost(self):
+        cfg = _make_config(
+            synth_provider="openrouter",
+            synth_model="anthropic/claude-opus-4.8",
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("bills at API rates", rendered)
+
+    def test_anthropic_claude_synthesizer_flags_cost(self):
+        cfg = _make_config(
+            synth_provider="anthropic",
+            synth_model="claude-opus-4-5",
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("bills at API rates", rendered)
+
+    def test_non_anthropic_synthesizer_no_cost_warning(self):
+        cfg = _make_config(
+            synth_provider="openrouter",
+            synth_model="google/gemini-2-flash",
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("bills at API rates", rendered)
+
+    def test_example_fleet_flags_cost(self):
+        """The real example fleet (openrouter/anthropic/claude-opus-4.8) triggers the flag."""
+        cfg = FleetConfig.load(_EXAMPLE_FLEET)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("bills at API rates", rendered)
+
+
+class TestRenderFleetPreviewPrivilegedTools(unittest.TestCase):
+    """render_fleet_preview shows allow_privileged_tools and makes it prominent when True."""
+
+    def test_false_case_shows_allow_privileged_false(self):
+        cfg = _make_config(allow_privileged_tools=False)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("allow_privileged_tools: false", rendered)
+        # Must NOT show the warning line
+        self.assertNotIn("PRIVILEGED TOOLS ENABLED", rendered)
+
+    def test_true_case_is_prominent(self):
+        """allow_privileged_tools=True must be impossible to miss."""
+        # Build directly — can't load through FleetConfig.load (validation blocks
+        # a non-safe toolset without allow_privileged_tools; we test the render
+        # by constructing the object directly with ordinary specialists).
+        cfg = _make_config(allow_privileged_tools=True)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("PRIVILEGED TOOLS ENABLED", rendered)
+
+    def test_true_case_does_not_show_false_line(self):
+        cfg = _make_config(allow_privileged_tools=True)
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("allow_privileged_tools: false", rendered)
+
+
+class TestRenderFleetPreviewSpecialists(unittest.TestCase):
+    """render_fleet_preview surfaces each specialist's role, provider/model, toolset, focus."""
+
+    def setUp(self):
+        self.cfg = _make_config()
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_specialist_roles_present(self):
+        self.assertIn("web", self.rendered)
+        self.assertIn("analysis", self.rendered)
+
+    def test_specialist_provider_model_present(self):
+        self.assertIn("google/gemini-3-flash", self.rendered)
+        self.assertIn("anthropic/claude-sonnet-4.6", self.rendered)
+
+    def test_specialist_toolset_present(self):
+        self.assertIn("web", self.rendered)
+        self.assertIn("search", self.rendered)
+
+    def test_specialist_focus_present(self):
+        self.assertIn("find sources", self.rendered)
+        self.assertIn("deep analysis", self.rendered)
+
+    def test_empty_toolset_shown_as_none(self):
+        """A specialist with toolset=[] must render as '(none)', not blank."""
+        cfg = _make_config(
+            specialists=[
+                SpecialistSpec(
+                    role="no-tools",
+                    provider="openrouter",
+                    model="google/gemini-3-flash",
+                    focus="think only",
+                    toolset=[],
+                )
+            ]
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("(none)", rendered)
+
+    def test_specialist_count_in_header(self):
+        # Header line should mention the count of specialists.
+        self.assertIn("2", self.rendered)
+
+
+class TestRenderFleetPreviewSynthesisPrompt(unittest.TestCase):
+    """render_fleet_preview surfaces the synthesis.prompt verbatim."""
+
+    def test_prompt_verbatim_in_output(self):
+        cfg = _make_config(synth_prompt="Do exactly this: cite every source.")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("Do exactly this: cite every source.", rendered)
+
+    def test_empty_prompt_shows_none(self):
+        cfg = _make_config(synth_prompt="")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("(none)", rendered)
 
 
 if __name__ == "__main__":
