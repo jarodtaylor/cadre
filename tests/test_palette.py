@@ -525,5 +525,42 @@ class TestVerifyCandidatesBlankResponse(unittest.TestCase):
         self.assertEqual(result[0].detail, "empty response")
 
 
+class TestStandaloneScriptImport(unittest.TestCase):
+    """Regression (live dogfood, 2026-06-20): run as a standalone script
+    (`python spikes/verify_aiagent_providers.py`, how install.sh invokes it),
+    spikes/ is on sys.path[0] but the repo root is NOT, so write_palette's
+    `from fleet_engine.config import SAFE_TOOLSETS` raised ModuleNotFoundError.
+    The module now inserts the repo root itself."""
+
+    def test_write_palette_imports_fleet_engine_without_repo_root_on_path(self):
+        import subprocess
+
+        repo_root = Path(__file__).resolve().parents[1]
+        spike = repo_root / "spikes" / "verify_aiagent_providers.py"
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        out = tmp / "palette.yaml"
+        driver = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('v', {str(spike)!r})\n"
+            "m = importlib.util.module_from_spec(spec); sys.modules['v'] = m\n"
+            "spec.loader.exec_module(m)\n"
+            "m.write_palette([m.VerifyRecord('xai', 'grok-4.3', True)], ['web'], "
+            f"{str(out)!r})\n"
+            "print('OK')\n"
+        )
+        # `-I` (isolated): does NOT prepend cwd/'' to sys.path and ignores
+        # PYTHONPATH, so fleet_engine is importable ONLY via the spike's own
+        # repo-root insertion — reproducing the standalone-script condition.
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", driver],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, f"stderr:\n{result.stderr}")
+        self.assertTrue(out.exists(), "palette should have been written")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,16 @@ from pathlib import Path
 
 import yaml
 
+# When run as a standalone script (`python spikes/verify_aiagent_providers.py` —
+# how install.sh invokes it), Python puts spikes/ on sys.path[0], NOT the repo
+# root, so write_palette's lazy `from fleet_engine.config import ...` fails with
+# ModuleNotFoundError. Insert the repo root so it resolves whether run as a script
+# or imported. Mirrors skills/cadre-fleet/run.py. (Dev tests never hit this: they
+# run via `python -m unittest` from the repo root, which is already on sys.path.)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # Default candidates file path (operator edits once after install seeds it).
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
 
