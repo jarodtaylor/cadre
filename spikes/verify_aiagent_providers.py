@@ -37,6 +37,9 @@ RUNS ON THE HERMES HOST with the Hermes venv Python:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -126,17 +129,78 @@ def verify_candidates(candidates: list[tuple[str, str]]) -> list[VerifyRecord]:
     """
     records: list[VerifyRecord] = []
     for provider, model in candidates:
-        try:
-            text = _agent(provider, model).chat("Reply with the single word: ok")
-            ok = bool(text and str(text).strip())
-            detail = str(text)[:60] if ok else "empty response"
-            print(f"[{'OK' if ok else 'EMPTY'}] {provider} / {model}: {str(text)[:60]!r}")
-        except Exception as exc:  # noqa: BLE001
-            ok = False
-            detail = f"{type(exc).__name__}: {exc}"
-            print(f"[FAIL] {provider} / {model}: {detail}")
+        ok, detail = _verify_one(provider, model)
+        if ok:
+            print(f"  ✓ {provider} / {model}")
+        else:
+            print(f"  ✗ {provider} / {model}  — skipped ({_short_reason(detail)})")
         records.append(VerifyRecord(provider=provider, model=model, ok=ok, detail=detail))
     return records
+
+
+def _verify_one(provider: str, model: str) -> tuple[bool, str]:
+    """Run one verification chat call, SILENCING the provider's own output.
+
+    A candidate the host doesn't support (e.g. a model your provider doesn't
+    offer) makes AIAgent dump a multi-line error to stdout/stderr — which reads
+    like a crash even though a skipped candidate is a normal outcome. Capture
+    that output (and mute logging) so verify_candidates can print one calm line
+    instead. Set ``CADRE_VERIFY_VERBOSE=1`` to see the raw provider output.
+
+    Returns ``(ok, detail)``; never raises.
+    """
+    def _call() -> object:
+        return _agent(provider, model).chat("Reply with the single word: ok")
+
+    # Verbose: stream the raw provider output (for debugging an unexpected result).
+    if os.getenv("CADRE_VERIFY_VERBOSE"):
+        try:
+            text = _call()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"
+        ok = bool(text and str(text).strip())
+        return ok, (str(text)[:60] if ok else "empty response")
+
+    # Default: capture the provider's output + mute logging so a skip is one calm
+    # line — then mine the capture for the real reason (AIAgent usually logs the
+    # error and returns None rather than raising, so the bare result is just None).
+    sink = io.StringIO()
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            text = _call()
+        ok = bool(text and str(text).strip())
+        if ok:
+            return True, str(text)[:60]
+        return False, _reason_from_capture(sink.getvalue()) or "empty response"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def _short_reason(detail: str) -> str:
+    """A terse, one-line skip reason for DISPLAY — the last ': '-delimited segment
+    (strips noise like an emoji/'Error'/'HTTP 4xx' prefix). The full detail is
+    kept in the record."""
+    msg = detail.rsplit(": ", 1)[-1].strip()
+    return (msg[:70] + "…") if len(msg) > 71 else msg
+
+
+def _reason_from_capture(captured: str) -> str:
+    """Mine a calm one-line reason from suppressed provider output (or '')."""
+    lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
+    # Prefer the most specific phrasing, then a generic error/status line.
+    for needle in ("not supported", "unauthor", "forbidden", "denied",
+                   "invalid", "quota", "rate limit"):
+        for ln in lines:
+            if needle in ln.lower():
+                return ln
+    for ln in lines:
+        low = ln.lower()
+        if "error:" in low or "http 4" in low or "http 5" in low:
+            return _short_reason(ln)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -276,17 +340,24 @@ def main() -> int:
         )
         return 1
 
-    print(f"=== verifying {len(candidates)} candidate(s) ===")
+    print(
+        f"Verifying {len(candidates)} candidate(s) against this host — unsupported or\n"
+        "unauthenticated ones are skipped (a skip is normal, not an error). Provider\n"
+        "output is hidden; set CADRE_VERIFY_VERBOSE=1 to show it.\n"
+    )
     records = verify_candidates(candidates)
 
-    print(f"\n=== writing palette to {palette_path} ===")
+    n_ok = sum(1 for r in records if r.ok)
     try:
         write_palette(records, declared_toolsets, palette_path)
-        n_ok = sum(1 for r in records if r.ok)
-        print(f"[OK] wrote {n_ok} verified provider(s) to {palette_path}")
     except ValueError as exc:
-        print(f"[FAIL] {exc}")
+        print(f"\n✗ {exc}")
         return 1
+
+    print(f"\n✓ {n_ok} of {len(records)} verified → {palette_path}")
+    skipped = [f"{r.provider}/{r.model}" for r in records if not r.ok]
+    if skipped:
+        print(f"  skipped {len(skipped)}: {', '.join(skipped)}")
 
     return 0
 

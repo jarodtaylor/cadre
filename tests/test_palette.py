@@ -562,5 +562,54 @@ class TestStandaloneScriptImport(unittest.TestCase):
         self.assertTrue(out.exists(), "palette should have been written")
 
 
+class TestVerifyOutputSuppression(unittest.TestCase):
+    """verify_candidates hides a candidate's raw provider output (the scary
+    multi-line error AIAgent dumps for an unsupported model) and prints one calm
+    status line instead (DX fix from the 2026-06-20 live dogfood)."""
+
+    def test_provider_noise_is_suppressed_clean_status_shown(self):
+        import contextlib as ctx
+        import io as _io
+        import sys as _sys
+        import unittest.mock as mock
+
+        def noisy_ok(*_a, **_k):
+            print("SCARY PROVIDER STACK DUMP")
+            print("❌ Non-retryable error — Aborting", file=_sys.stderr)
+            return "ok"
+
+        with mock.patch.object(_spike, "_agent") as fake_agent:
+            fake_agent.return_value.chat.side_effect = noisy_ok
+            out = _io.StringIO()
+            with ctx.redirect_stdout(out):
+                records = _spike.verify_candidates([("xai", "grok-4.3")])
+
+        printed = out.getvalue()
+        self.assertNotIn("SCARY PROVIDER STACK DUMP", printed)  # noise captured, not dumped
+        self.assertIn("grok-4.3", printed)                      # calm status still shown
+        self.assertTrue(records[0].ok)
+
+    def test_skip_reason_mined_from_captured_output(self):
+        """When AIAgent logs an error and returns None (its real behaviour for an
+        unsupported model), the skip reason is mined from the captured output
+        rather than a vague 'empty response'."""
+        import contextlib as ctx
+        import io as _io
+        import sys as _sys
+        import unittest.mock as mock
+
+        def noisy_none(*_a, **_k):
+            print("   📝 Error: HTTP 400: The requested model is not supported.", file=_sys.stderr)
+            return None
+
+        with mock.patch.object(_spike, "_agent") as fake_agent:
+            fake_agent.return_value.chat.side_effect = noisy_none
+            with ctx.redirect_stdout(_io.StringIO()):
+                records = _spike.verify_candidates([("copilot", "claude-opus-4.5")])
+
+        self.assertFalse(records[0].ok)
+        self.assertIn("not supported", records[0].detail.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
