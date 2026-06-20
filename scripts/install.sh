@@ -60,8 +60,12 @@ fi
 
 # ── 4. Install the cadre-fleet skill ─────────────────────────────────────────
 if [ -n "${HERMES_SKILLS_DIR:-}" ]; then
-    ln -sfn "$(pwd)/skills/cadre-fleet" "$HERMES_SKILLS_DIR/cadre-fleet"
-    echo "[OK] installed cadre-fleet skill → $HERMES_SKILLS_DIR/cadre-fleet"
+    # Expand a leading ~ (it does NOT expand inside a quoted variable) and ensure
+    # the dir exists, so a ~-prefixed or not-yet-created skills dir still works.
+    DEST="${HERMES_SKILLS_DIR/#\~/$HOME}"
+    mkdir -p "$DEST"
+    ln -sfn "$(pwd)/skills/cadre-fleet" "$DEST/cadre-fleet"
+    echo "[OK] installed cadre-fleet skill → $DEST/cadre-fleet"
 else
     echo ""
     echo "HERMES_SKILLS_DIR is not set. To install the skill manually, run:"
