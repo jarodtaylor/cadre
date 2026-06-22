@@ -2,7 +2,7 @@
 
 Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and tools, then synthesize one grounded, attributed report. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 
-> **Status: building in public.** The engine and the agent-run handoff are built and unit-tested; live multi-provider dogfooding is in progress on a Hermes host. Expect APIs to change.
+> **Status: building in public.** The engine, run-capture, and the agent-run handoff are shipped and **dogfooded live** — a Hermes agent drove a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Expect APIs to change.
 
 ## Why
 
@@ -72,6 +72,17 @@ The engine imports and the suite passes **without** `hermes-agent` (the adapter 
 ## Running live
 
 Running a fleet for real needs a Hermes host with `hermes-agent` installed and providers authenticated. `docs/RUNBOOK.md` is the ordered checklist: install → verify the palette → compose a fleet → preview → run. The repo's `fleets/*.example.yaml` are **templates** — copy one into `~/.cadre/fleets/` and set your host-verified strings. Never commit API keys or tokens; credentials live in Hermes auth/env.
+
+## Roadmap
+
+v0 — the engine, run-capture, and the Hermes **agent-run handoff** — is shipped and dogfooded live. v1 is organized into four tracks (filter the issues by their `track:` label, or see the [**v1 milestone**](https://github.com/jarodtaylor/cadre/milestone/1)):
+
+- **Operator & agent experience** (`track: operator-dx`) — runs that feel alive and trustworthy.
+- **Fleet library & primitives** (`track: fleet-library`) — batteries-included fleets + new primitives.
+- **Trust & safety hardening** (`track: trust-safety`) — the human-approval gate, bulletproof.
+- **Reach & packaging** (`track: reach`) — a real `cadre` package + more runtime wrappers.
+
+See [STRATEGY.md](STRATEGY.md) for the full direction.
 
 ## Learn more
 
