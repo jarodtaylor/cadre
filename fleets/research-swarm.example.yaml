@@ -1,5 +1,7 @@
-# Research swarm — EXAMPLE fleet. U7 produces the real one with your confirmed
-# Hermes strings (verified by the U1 spike on the Hermes host).
+# Research swarm — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
 #
 # Replace provider/model values with the exact strings your Hermes resolves.
 # Per-provider model-string format:
@@ -21,18 +23,29 @@ synthesis:
     preserve every source / citation. Call out conflicts between specialists.
     Prioritize primary sources over secondary commentary.
 
+# A specialist's `focus` is a grounding control, not just a topic label. A
+# retrieval lane (web / x_search / exa / firecrawl) that isn't told to cite will
+# recite from the model's training memory and still look like research. Demand
+# sources explicitly AND bless "unsourced" so the demand can't induce fabricated
+# links. See docs/solutions/design-patterns/specialist-focus-grounding-control.md
 specialists:
   - role: social
     provider: xai            # OAuth provider -> bare model id
     model: grok-4.3
     toolset: [x_search]
-    focus: Search X / social for the latest real-time discussion and sentiment.
+    focus: >-
+      Search X / social for the latest real-time discussion and sentiment.
+      Attribute each point to a specific account or post (with a link where the
+      post gives one). Treat these as sentiment signals to validate, not facts.
 
   - role: web
     provider: openrouter     # aggregator -> full vendor/model slug
     model: google/gemini-3-flash
     toolset: [web]
-    focus: Find primary sources, papers, docs, and recent web data; cheap and fast.
+    focus: >-
+      Find primary sources, papers, docs, and recent web data; cheap and fast.
+      Cite a real, current source (with a link) for every claim; if you can't find
+      one, mark the item unsourced rather than asserting it.
 
   - role: analysis
     provider: openrouter

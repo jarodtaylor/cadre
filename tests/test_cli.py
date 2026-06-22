@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import os
 import shutil
 import stat
@@ -6,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fleet_engine.capture import _slugify, resolve_run_dir
 from fleet_engine.cli import run_command, validate_command
@@ -346,20 +348,21 @@ class TestSlugify(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Skill entry (skills/research-swarm/run.py) capture tests
+# Skill entry (skills/cadre-fleet/run.py) capture tests
 # ---------------------------------------------------------------------------
 
 def _load_skill_module():
-    """Import skills/research-swarm/run.py as a module without running it."""
-    skill_path = Path(__file__).resolve().parents[1] / "skills" / "research-swarm" / "run.py"
-    spec = importlib.util.spec_from_file_location("research_swarm_run", skill_path)
+    """Import skills/cadre-fleet/run.py as a module without running it."""
+    skill_path = Path(__file__).resolve().parents[1] / "skills" / "cadre-fleet" / "run.py"
+    spec = importlib.util.spec_from_file_location("cadre_fleet_run", skill_path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules["cadre_fleet_run"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
 class TestSkillEntryCapture(unittest.TestCase):
-    """skills/research-swarm/run.py captures identically to run_command."""
+    """skills/cadre-fleet/run.py captures identically to run_command."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -386,6 +389,7 @@ class TestSkillEntryCapture(unittest.TestCase):
     def test_skill_no_capture_writes_no_folder(self):
         # Clear tmp and check nothing is written
         code, fake = self._run_skill(extra_argv=["--no-capture"])
+        self.assertEqual(code, 0)
         # When --no-capture is set, manifest.json should not be written
         self.assertFalse((self.tmp / "manifest.json").exists())
 
@@ -411,6 +415,252 @@ class TestSkillEntryCapture(unittest.TestCase):
         with patch.object(self.run_mod, "save_run", side_effect=OSError("disk full")):
             code, fake = self._run_skill()
         self.assertEqual(code, 0)
+
+
+# ---------------------------------------------------------------------------
+# New cadre-fleet skill tests: preview, --fleet required, --task required
+# ---------------------------------------------------------------------------
+
+_EXAMPLE_FLEET = str(
+    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+)
+
+
+class TestSkillPreviewMakesNoModelCalls(unittest.TestCase):
+    """--preview exits 0, makes ZERO model calls and ZERO capture side-effects.
+
+    Covers R10: the preview short-circuit is BEFORE ModelClient and
+    prepare_run_dir — proven by asserting both mocks are never called.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+
+    def test_preview_exits_zero(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        self.assertEqual(code, 0)
+
+    def test_preview_makes_zero_model_calls(self):
+        """ModelClient must never be instantiated in preview mode."""
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        fake_client_cls.assert_not_called()
+
+    def test_preview_makes_zero_capture_calls(self):
+        """prepare_run_dir must never be called in preview mode."""
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        mock_prepare.assert_not_called()
+
+    def test_preview_output_contains_synthesizer_model(self):
+        """Preview output must surface the synthesizer provider/model string."""
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", MagicMock()):
+            with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        output = stdout_buf.getvalue()
+        # The example fleet uses openrouter/anthropic/claude-opus-4.8 as synthesizer
+        self.assertIn("openrouter", output)
+        self.assertIn("claude-opus-4.8", output)
+
+    def test_preview_output_contains_each_specialist_role(self):
+        """Preview must list every specialist role."""
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", MagicMock()):
+            with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        output = stdout_buf.getvalue()
+        for role in ("social", "web", "analysis"):
+            self.assertIn(role, output)
+
+    def test_preview_output_contains_allow_privileged_tools(self):
+        """Preview must surface the allow_privileged_tools value."""
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", MagicMock()):
+            with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        output = stdout_buf.getvalue()
+        self.assertIn("allow_privileged_tools", output)
+
+
+class TestSkillPreviewFlagsAPIBilledSynthesizer(unittest.TestCase):
+    """--preview flags the example's Anthropic/Opus synthesizer with a cost warning."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+
+    def test_preview_flags_cost_warning_for_anthropic_opus(self):
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", MagicMock()):
+            with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        output = stdout_buf.getvalue()
+        # The example synthesizer is openrouter/anthropic/claude-opus-4.8 —
+        # must trigger the API-billing warning.
+        self.assertIn("bills at API rates", output)
+
+
+class TestSkillFleetRequired(unittest.TestCase):
+    """--fleet is required; calling without it exits non-zero (argparse SystemExit(2))."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+
+    def test_missing_fleet_raises_system_exit(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_mod.main(["--task", "some task"])
+        self.assertNotEqual(ctx.exception.code, 0)
+
+
+class TestSkillTaskRequiredForRealRun(unittest.TestCase):
+    """--task is required for a real run (not preview); omitting it returns non-zero
+    with no model calls — the check fires before ModelClient is ever constructed.
+
+    Covers: the task-None guard fires before capture (prepare_run_dir not called).
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+
+    def test_missing_task_returns_nonzero(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET])
+        self.assertEqual(code, 2)
+
+    def test_missing_task_makes_zero_model_calls(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET])
+        fake_client_cls.assert_not_called()
+
+    def test_missing_task_emits_clear_message(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET])
+        self.assertIn("--task", stdout_buf.getvalue())
+
+    def test_missing_task_prepare_run_dir_not_called(self):
+        """Capture side-effect must NOT fire before the task-None guard."""
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(stdout_buf):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET])
+        mock_prepare.assert_not_called()
+
+
+class TestSkillFleetErrorPaths(unittest.TestCase):
+    """Error-path tests for skills/cadre-fleet/run.py main(): nonexistent file,
+    invalid YAML, and directory path all return 1 cleanly."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_mod = _load_skill_module()
+
+    def _run_fleet(self, fleet_arg, extra_env=None):
+        """Run skill main() with --no-capture, capturing stdout."""
+        buf = io.StringIO()
+        env = {"CADRE_RUN_DIR": str(self.tmp)}
+        if extra_env:
+            env.update(extra_env)
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", fleet_arg, "--task", "test", "--no-capture"]
+                    )
+        return code, buf.getvalue()
+
+    def test_nonexistent_fleet_returns_1(self):
+        """A --fleet path pointing to a nonexistent file returns exit code 1."""
+        code, _out = self._run_fleet(str(self.tmp / "does_not_exist.yaml"))
+        self.assertEqual(code, 1)
+
+    def test_invalid_yaml_fleet_returns_1(self):
+        """A --fleet path pointing to invalid YAML (ConfigError path) returns exit code 1."""
+        bad = self.tmp / "bad.yaml"
+        bad.write_text("name: [unterminated\n")
+        code, _out = self._run_fleet(str(bad))
+        self.assertEqual(code, 1)
+
+    def test_directory_fleet_returns_1(self):
+        """A --fleet path pointing at a directory (IsADirectoryError) returns exit code 1."""
+        fleet_dir = self.tmp / "myfleets"
+        fleet_dir.mkdir()
+        code, _out = self._run_fleet(str(fleet_dir))
+        self.assertEqual(code, 1)
+
+    def test_directory_fleet_message_mentions_path(self):
+        """The OSError message mentions the directory path that was passed."""
+        fleet_dir = self.tmp / "myfleets2"
+        fleet_dir.mkdir()
+        _code, out = self._run_fleet(str(fleet_dir))
+        self.assertIn(str(fleet_dir), out)
+
+    def test_directory_fleet_no_traceback(self):
+        """No Python traceback appears in the output — only a clean message."""
+        fleet_dir = self.tmp / "myfleets3"
+        fleet_dir.mkdir()
+        _code, out = self._run_fleet(str(fleet_dir))
+        self.assertNotIn("Traceback", out)
+
+
+class TestSkillArbitraryFleet(unittest.TestCase):
+    """Covers F2: any --fleet <path> runs, not just research-swarm."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_mod = _load_skill_module()
+
+    def test_arbitrary_fleet_runs_and_writes_manifest(self):
+        """A real run with --fleet <example> and a FakeClient exits 0, writes manifest."""
+        fake = FakeClient({"synthesizer": ("ok", "SYNTH FROM FLEET")})
+        run_dir = self.tmp
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                code = self.run_mod.main([
+                    "--fleet", _EXAMPLE_FLEET,
+                    "--task", "what is the best approach?",
+                ])
+        self.assertEqual(code, 0)
+        self.assertTrue((run_dir / "manifest.json").exists())
 
 
 if __name__ == "__main__":

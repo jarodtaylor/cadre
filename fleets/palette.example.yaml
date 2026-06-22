@@ -1,0 +1,69 @@
+# ===========================================================================
+# Cadre Palette — example / template
+# ===========================================================================
+#
+# This file documents TWO schemas:
+#
+#   1. The CANDIDATE SEED (below) — what the operator edits.
+#      Copy to ~/.cadre/palette-candidates.yaml (the install seeds this for you),
+#      edit to match the providers you've authenticated in this Hermes profile,
+#      then run the verify step:
+#
+#          ~/.hermes/hermes-agent/venv/bin/python spikes/verify_aiagent_providers.py
+#
+#      Verification keeps only the (provider, model) pairs that actually resolve
+#      and respond on this host, then writes them to ~/.cadre/palette.yaml.
+#
+#   2. The GENERATED PALETTE (see comment block below) — what write_palette produces.
+#      The cadre-fleet skill reads this; you do not edit it directly.
+#
+# ---------------------------------------------------------------------------
+# CANDIDATE SEED — copy to ~/.cadre/palette-candidates.yaml and edit
+# ---------------------------------------------------------------------------
+#
+# Per-provider model-string format (same as fleet specs):
+#   - OAuth providers (xai, openai-codex, nous): provider + bare model id
+#   - OpenRouter: provider "openrouter" + full "vendor/model" slug
+# NEVER put API keys here — credentials live in Hermes auth/env.
+candidates:
+  - provider: xai
+    model: grok-4.3
+  - provider: openrouter
+    model: google/gemini-3-flash
+  - provider: openrouter
+    model: anthropic/claude-opus-4.8   # valid but bills at API rates (synth candidate)
+
+# Safe toolsets to record as available for this profile. Must be a subset of
+# Cadre's SAFE_TOOLSETS (fleet_engine/config.py); the writer drops any non-safe
+# name. DECLARED here, not per-tool verified — you must provision them in the
+# Hermes profile (see RUNBOOK) or lanes that use them run silently ungrounded.
+toolsets: [web, search, x_search, vision]
+
+# ===========================================================================
+# GENERATED PALETTE SCHEMA — for reference only
+# ===========================================================================
+#
+# The file ~/.cadre/palette.yaml is produced by write_palette() in
+# spikes/verify_aiagent_providers.py after a successful verify run.
+# Its schema (owner-only 0o600, never edited by hand):
+#
+#   generated_at: "2026-06-18T14:30:00.123456"   # ISO-8601 stamp
+#   models:
+#     - provider: xai
+#       model: grok-4.3
+#     - provider: openrouter
+#       model: google/gemini-3-flash
+#   toolsets: [web, search, x_search, vision]
+#
+# Fields:
+#   generated_at  ISO-8601 timestamp from datetime.now().isoformat(). Use this
+#                 to detect staleness (verified strings drift; re-run the spike
+#                 after adding providers or rotating credentials).
+#   models        Only the (provider, model) pairs that actually resolved and
+#                 responded during the last verify run. Compose fleets ONLY from
+#                 strings in this list — guessing host-specific model strings is
+#                 one of the two silent failure modes this palette prevents.
+#   toolsets      The safe toolsets available in this Hermes profile, as declared
+#                 in the candidate seed and filtered to SAFE_TOOLSETS. Declared,
+#                 not verified — provision them in the profile (RUNBOOK) or lanes
+#                 that request them run silently ungrounded.
