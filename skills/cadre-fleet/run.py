@@ -10,6 +10,7 @@ user's providers are available.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from fleet_engine.capture import prepare_run_dir, save_run  # noqa: E402
+from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.engine import run_fleet  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
@@ -70,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     # THIS SHORT-CIRCUIT IS LOAD-BEARING: the human approves the parsed fleet,
     # not the agent's paraphrase of it.
     if args.preview:
+        # Show the profile the run will use (env-sourced, not part of the fleet
+        # config) so the human okays the fleet AND the profile it runs under — an
+        # unset HERMES_HOME silently falls back to the default, which is how a run
+        # lands on the wrong (e.g. ungrounded) profile unnoticed.
+        print(f"Profile (HERMES_HOME): {os.getenv('HERMES_HOME', DEFAULT_HERMES_HOME)}")
         print(render_fleet_preview(cfg))
         return 0
 

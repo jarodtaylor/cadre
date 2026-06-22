@@ -28,8 +28,9 @@ from pathlib import Path
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
 
-# Default Hermes profile location — recorded in the manifest when HERMES_HOME is unset.
-_DEFAULT_HERMES_HOME = "~/.hermes"
+# Default Hermes profile location — recorded in the manifest and shown in the
+# fleet preview when HERMES_HOME is unset.
+DEFAULT_HERMES_HOME = "~/.hermes"
 
 # Default root for run folders when CADRE_RUN_DIR is not set.
 _DEFAULT_RUNS_ROOT = "~/.cadre/runs"
@@ -314,6 +315,6 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "models": participating_models,
         "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
         "synth_ok": result.synth_ok,
-        "hermes_home": os.getenv("HERMES_HOME", _DEFAULT_HERMES_HOME),
+        "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),
         "lanes": lanes,
     }
