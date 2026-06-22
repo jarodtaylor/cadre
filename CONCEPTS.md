@@ -10,7 +10,12 @@ An ephemeral, fully-configured group of specialists plus a synthesizer that runs
 A fleet is created per task and torn down on completion; it carries no state between tasks.
 
 ### Specialist
-One stateless agent within a fleet — a role, a provider, a model, and a toolset — run once on the task. Specialists run concurrently and independently, and each may use a different model and provider.
+One stateless agent within a fleet — a role, a provider, a model, a toolset, and a focus — run once on the task. Specialists run concurrently and independently, and each may use a different model and provider.
+
+### Focus
+The role-specific instruction that tells a specialist what to investigate and how to ground its output.
+
+A focus that does not explicitly require live retrieval and citation will let the model answer from training knowledge even when a retrieval toolset is provisioned — so the focus, not the toolset alone, is the operative grounding control for a lane. Pairing a citation demand with explicit permission to mark an item "unsourced" keeps the demand from inducing fabricated sources.
 
 ### Synthesizer
 The single strong-model step that combines the specialists' successful outputs into one grounded result. It runs after the specialists, over only the survivors, and is expected to attribute claims to the specialist that surfaced them and preserve citations.
@@ -35,7 +40,7 @@ The structured, machine-readable record of one run's health: per specialist, its
 The host-local directory of runnable fleets a Hermes agent selects from — `~/.cadre/fleets/<name>.yaml`, created owner-only (`0o700`) at install. Distinct from the repo's `fleets/`, which holds examples only; copy one into the library to make it runnable. Selected by name: the agent lists the directory and passes the chosen file's path to the runner. There is no registry, fuzzy-matching, or CLI subcommand — a flat directory of named YAML files is the whole convention.
 
 ### Verified palette
-The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette.yaml`, written by the install's verify step. It records the `(provider, model)` pairs that actually resolved and responded on this host (**models verified by a live call**) plus the profile's safe toolsets (**declared and filtered to the safe set, not per-tool verified** — an unprovisioned tool still appears, so its lane can run silently ungrounded). Composing only from the palette prevents two silent failure modes: a guessed model string (a dead lane) and an unverified provider. It carries a `generated_at` stamp because verified strings drift.
+The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette.yaml`, written by the install's verify step. It records the `(provider, model)` pairs that actually resolved and responded on this host (**models verified by a live call**) plus the profile's safe toolsets (**declared and filtered to the safe set, not per-tool verified** — an unprovisioned tool still appears, so its lane can run silently ungrounded — as can a lane whose Focus doesn't demand retrieval). Composing only from the palette prevents two silent failure modes: a guessed model string (a dead lane) and an unverified provider. It carries a `generated_at` stamp because verified strings drift.
 
 ### Fleet preview
 The mechanically rendered view of a *parsed* fleet config — synthesizer (with a cost flag for API-billed models), `allow_privileged_tools`, the verbatim synthesis prompt, and every lane's role/provider/model/toolset — printed by the runner's `--preview` mode without making any model call. It is the operative control of the agent-run handoff: a human approves this rendered fleet, not the agent's paraphrase of it, so a tampered or privileged fleet cannot slip through unseen.
