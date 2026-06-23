@@ -3,10 +3,11 @@
 This script is the ONLY unit-tested piece of the U4 install. It is pure stdlib,
 importable on the dev machine (no hermes-agent, no fleet_engine import needed).
 
-Three exported functions:
+Four exported functions:
   resolve_venv(override, *, probe_paths, env)  — pure resolver, no I/O
   ensure_cadre_dirs(home)                       — owner-only dir scaffolding
   write_config(python_path, config_path)        — owner-only config writer
+  seed_starter_fleets(repo_root, cadre_home)    — idempotent fleet seeding, never raises
 
 main(argv) — argparse entry; prints ONLY the resolved python path to stdout;
              all diagnostics go to stderr. Designed for:
@@ -27,6 +28,55 @@ KNOWN_PROBE_PATHS = [
     "/usr/local/lib/hermes-agent/venv/bin/python",
     "~/.hermes/hermes-agent/venv/bin/python",
 ]
+
+# Explicit allowlist — NEVER glob fleets/*.yaml: palette.example.yaml lives there
+# and is not a fleet (it would break FleetConfig.load if seeded as a fleet).
+_STARTER_FLEETS = ("research-swarm.example.yaml", "code-review.example.yaml")
+
+
+def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
+    """Copy starter fleets from <repo_root>/fleets/ to <cadre_home>/fleets/ at install time.
+
+    Each source file has a ``.example`` infix that is stripped on copy
+    (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
+
+    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
+    Owner-only: the fleets dir is created 0o700 and each file written 0o600 under umask 0o077.
+    Never raises: all I/O errors are caught, warned to stderr, and skipped.
+    Never writes to stdout: all messages go to sys.stderr.
+
+    Args:
+        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
+        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+    """
+    old_umask = os.umask(0o077)
+    try:
+        fleets_dir = cadre_home / "fleets"
+        try:
+            fleets_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"[cadre] warning: could not create {fleets_dir}: {exc}", file=sys.stderr)
+            return
+
+        for name in _STARTER_FLEETS:
+            dest_name = name.replace(".example.yaml", ".yaml")
+            src = repo_root / "fleets" / name
+            dest = fleets_dir / dest_name
+            try:
+                if dest.exists():
+                    print(f"[cadre] {dest_name}: exists — preserved", file=sys.stderr)
+                    continue
+                content = src.read_text(encoding="utf-8")
+                fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                dest.chmod(0o600)
+                print(f"[cadre] seeded {dest_name}", file=sys.stderr)
+            except OSError as exc:
+                print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
+                continue
+    finally:
+        os.umask(old_umask)
 
 
 def resolve_venv(
@@ -195,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         home = ensure_cadre_dirs()
         print(f"scaffolded {home}", file=sys.stderr)
+        seed_starter_fleets(Path(__file__).resolve().parents[1], home)
         write_config(python_path)
         print(f"wrote ~/.cadre/config: CADRE_HERMES_PYTHON={python_path}", file=sys.stderr)
     except OSError as exc:

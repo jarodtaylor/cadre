@@ -327,9 +327,10 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with contextlib.redirect_stdout(stdout_buf):
-                    with contextlib.redirect_stderr(stderr_buf):
-                        code = rv.main(["--venv-python", "/some/python"])
+                with unittest.mock.patch.object(rv, "seed_starter_fleets"):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        with contextlib.redirect_stderr(stderr_buf):
+                            code = rv.main(["--venv-python", "/some/python"])
 
         self.assertEqual(code, 0)
         self.assertEqual(stdout_buf.getvalue(), "/some/python\n",
@@ -342,14 +343,79 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with contextlib.redirect_stdout(stdout_buf):
-                    with contextlib.redirect_stderr(stderr_buf):
-                        rv.main(["--venv-python", "/some/python"])
+                with unittest.mock.patch.object(rv, "seed_starter_fleets"):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        with contextlib.redirect_stderr(stderr_buf):
+                            rv.main(["--venv-python", "/some/python"])
 
         # stdout has only the path; stderr has the diagnostic messages
         self.assertEqual(stdout_buf.getvalue().strip(), "/some/python")
         # Diagnostics (scaffold/config lines) go to stderr
         self.assertIn("cadre", stderr_buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# New tests: seed_starter_fleets
+# ---------------------------------------------------------------------------
+
+
+class TestSeedStarterFleets(unittest.TestCase):
+    """seed_starter_fleets seeds fleets idempotently, owner-only, without stdout."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cadre_home = Path(self.tmp) / "cadre"
+        self.cadre_home.mkdir(mode=0o700)
+        # Real repo root: scripts/resolve_venv.py → parents[1] is the repo root
+        self.repo_root = Path(rv.__file__).resolve().parents[1]
+
+    def test_clean_dir_seeds_both_fleets(self):
+        """Both starter fleets are seeded with .example stripped; palette is NOT seeded."""
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+        self.assertTrue((self.cadre_home / "fleets" / "research-swarm.yaml").exists())
+        self.assertTrue((self.cadre_home / "fleets" / "code-review.yaml").exists())
+
+    def test_palette_not_seeded(self):
+        """palette.yaml and palette.example.yaml must NOT be seeded."""
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+        self.assertFalse((self.cadre_home / "fleets" / "palette.yaml").exists())
+        self.assertFalse((self.cadre_home / "fleets" / "palette.example.yaml").exists())
+
+    def test_idempotent_preserves_operator_edits(self):
+        """A pre-existing fleet file is NOT overwritten (operator edits preserved)."""
+        fleets_dir = self.cadre_home / "fleets"
+        fleets_dir.mkdir(mode=0o700, exist_ok=True)
+        sentinel_path = fleets_dir / "research-swarm.yaml"
+        sentinel_path.write_text("OPERATOR EDIT", encoding="utf-8")
+
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+
+        self.assertEqual(sentinel_path.read_text(encoding="utf-8"), "OPERATOR EDIT")
+
+    def test_stdout_silence(self):
+        """seed_starter_fleets writes NOTHING to stdout."""
+        stdout_buf = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buf):
+            rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+    def test_seeded_file_permissions_0o600(self):
+        """Freshly seeded fleet files are owner-only (0o600)."""
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+        for name in ("research-swarm.yaml", "code-review.yaml"):
+            path = self.cadre_home / "fleets" / name
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, 0o600, f"{name}: expected 0o600, got 0o{mode:03o}")
+
+    def test_never_raises_on_bad_cadre_home(self):
+        """seed_starter_fleets does NOT raise when cadre_home is unwritable/nonexistent."""
+        bad_home = Path("/nonexistent/unwritable/xyz")
+        stdout_buf = io.StringIO()
+        # Must not raise; must not write to stdout
+        with contextlib.redirect_stdout(stdout_buf):
+            rv.seed_starter_fleets(self.repo_root, bad_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
 
 
 if __name__ == "__main__":
