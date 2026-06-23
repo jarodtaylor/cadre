@@ -66,6 +66,19 @@ class FakeClient:
 
 
 class TestValidate(unittest.TestCase):
+    def test_description_shown_in_validate(self):
+        path = _tmp_yaml(
+            "name: d-fleet\n"
+            "description: A catalog blurb for this fleet\n"
+            "synthesis: {provider: openrouter, model: m}\n"
+            "specialists:\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+        )
+        self.addCleanup(os.unlink, path)
+        code, out = validate_command(path)
+        self.assertEqual(code, 0)
+        self.assertIn("A catalog blurb for this fleet", out)
+
     def test_valid_example_passes(self):
         code, out = validate_command(EXAMPLE)
         self.assertEqual(code, 0)

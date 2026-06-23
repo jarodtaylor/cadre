@@ -36,6 +36,13 @@ parallelism genuinely helps.
 
 Prefer a curated fleet first. Compose one from the palette only when nothing fits.
 
+**Two fleet shapes.** Most fleets **synthesize** — a strong model blends the
+specialists into one grounded report. Some fleets (e.g. `code-review`) use
+**collect** convergence: no synthesizer runs; the fleet returns each specialist's
+raw, attributed output for you to review. The preview shows which mode a fleet uses
+(a `Synthesizer:` line vs `Convergence: collect (no synthesizer)`); steps 4–5
+cover both.
+
 ## Procedure
 
 ### 1. Select or compose a fleet
@@ -83,10 +90,16 @@ Run the preview:
 ```
 
 Relay the complete preview output to the human. It shows:
-- **Synthesizer** (provider/model) and a cost warning if it looks API-billed
+- **Convergence** — either a **`Synthesizer:`** line (provider/model, with a cost
+  warning if it looks API-billed) plus the **synthesis prompt** verbatim
+  (unvalidated free text — the human must see exactly what the synthesizer
+  receives), OR **`Convergence: collect (no synthesizer)`** for a collect fleet
+  (no synthesizer, no prompt — the fleet returns raw attributed outputs)
 - **`allow_privileged_tools`** — prominently flagged when `true`
-- **Synthesis prompt** verbatim (unvalidated free text — the human must see exactly what instruction the synthesizer receives)
 - Each **specialist**: role, provider/model, toolset, and focus
+- A **fleet-validation summary** — advisory warnings for any model/toolset not on
+  the host palette and any retrieval lane whose focus lacks a sourcing directive.
+  It never blocks a run; relay it so the human sees it before approving.
 
 Ask the human to okay it before running. Do not paraphrase the fleet in lieu of
 the preview — the preview is the operative control.
@@ -94,22 +107,27 @@ the preview — the preview is the operative control.
 ### 3. Signal and run (on the human's okay)
 
 Signal that a fleet is running — it can take several minutes (specialists run
-in parallel, synthesis follows). Then run:
+in parallel; for synthesize fleets, synthesis follows). Then run:
 
 ```bash
 "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --task "<the task>"
 ```
 
-The runner prints the synthesized result and a `Run folder:` pointer to the
-captured run under `~/.cadre/runs/`.
+The runner prints the result — a synthesized report (synthesize fleets) or the
+attributed specialist blocks (collect fleets) — and a `Run folder:` pointer to
+the captured run under `~/.cadre/runs/`.
 
 Add `--no-capture` to suppress the run folder (not recommended — the manifest
 records the full result, provenance, and timings).
 
 ### 4. Read back honestly
 
-Relay the synthesized report. The result ends with a provenance section tagging
-each specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]`.
+**Synthesize fleets:** relay the synthesized report. **Collect fleets:** there is
+no synthesis — the result is a `collect result` header followed by one attributed
+block per specialist (`--- role (provider/model) ---`). Relay the blocks as the
+independent perspectives they are; do not blend them into a single voice or invent
+a consensus the fleet did not produce. Either way the result ends with a
+provenance section tagging each specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]`.
 
 If the result is **degraded**, relay the rendered degraded shape as-is:
 - **`[TIMEOUT]` lane:** a specialist timed out — its output is absent; the others
@@ -118,6 +136,9 @@ If the result is **degraded**, relay the rendered degraded shape as-is:
   no synthesis was attempted; relay this explicitly.
 - **Synthesizer-failed result:** surviving specialist outputs are shown in labeled
   sections — relay them verbatim, noting the synthesizer failed.
+- **Collect, all specialists failed:** the `collect result` header notes all lanes
+  failed and the provenance shows each `[FAIL]`/`[TIMEOUT]` — relay that no outputs
+  were produced; do not fabricate any.
 
 Never present a partial result as if it were the whole. Never fabricate a
 synthesis from the labeled lane outputs.
@@ -125,7 +146,8 @@ synthesis from the labeled lane outputs.
 ### 5. Weave back attributed
 
 Include the `Run folder:` pointer the runner prints. Attribute claims to the
-specialist and model that surfaced them (as the synthesis prompt instructs). If
+specialist and model that surfaced them — for synthesize fleets the synthesis
+prompt already does this; for collect fleets you attribute each block yourself. If
 lanes returned conflicts, surface them rather than silently resolving them.
 
 ## Config-read contract

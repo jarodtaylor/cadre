@@ -95,6 +95,11 @@ def render_fleet_preview(config: FleetConfig) -> str:
     Returns a multi-line string suitable for terminal display.
     """
     out = [f"=== fleet preview: {_sanitize(config.name)} ==="]
+    # Catalog metadata (R11): show the fleet's description so the human approving
+    # the preview sees what it is for. Sanitized single-line like every other
+    # config-sourced field — a tampered description cannot inject a fake line.
+    if config.description:
+        out.append(f"\n{_sanitize(config.description)}")
 
     # --- synthesizer / convergence ---
     # Branch on config.convergence (the explicit field — KTD1: a stray synthesis:

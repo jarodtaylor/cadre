@@ -1345,5 +1345,25 @@ class TestProgressRendererStreamFailure(unittest.TestCase):
         self.assertEqual(caught, [], f"heartbeat raised on the broken stream: {caught}")
 
 
+class TestRenderFleetPreviewDescription(unittest.TestCase):
+    """render_fleet_preview surfaces the catalog description (R11), sanitized."""
+
+    def test_description_shown_when_present(self):
+        cfg = _make_config()
+        cfg.description = "Catalog blurb for this fleet"
+        self.assertIn("Catalog blurb for this fleet", render_fleet_preview(cfg))
+
+    def test_description_absent_renders_without_crash(self):
+        cfg = _make_config()  # description defaults to ""
+        self.assertIn("=== fleet preview:", render_fleet_preview(cfg))
+
+    def test_description_is_sanitized(self):
+        cfg = _make_config()
+        cfg.description = "blurb\x1b[2J\rinjected"
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\r", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

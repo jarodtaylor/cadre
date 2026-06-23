@@ -31,7 +31,10 @@ def validate_command(path: str) -> tuple[int, str]:
         return 1, str(err)
     except FileNotFoundError:
         return 1, f"Fleet spec not found: {path}"
-    lines = [f"OK: {cfg.name}", f"  specialists: {len(cfg.specialists)}"]
+    lines = [f"OK: {cfg.name}"]
+    if cfg.description:
+        lines.append(f"  {cfg.description}")  # catalog metadata (R11)
+    lines.append(f"  specialists: {len(cfg.specialists)}")
     for s in cfg.specialists:
         lines.append(f"    - {s.role}: {s.provider}/{s.model} tools={s.toolset}")
     if cfg.convergence == "collect":
