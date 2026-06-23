@@ -170,7 +170,7 @@ def render_result(result: FleetResult) -> str:
         # findings in labeled sections so the user still gets the work, not just
         # provenance rows.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
     out.append("\n--- provenance ---")
     # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
     # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,

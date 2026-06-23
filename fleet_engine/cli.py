@@ -31,16 +31,21 @@ def validate_command(path: str) -> tuple[int, str]:
         return 1, str(err)
     except FileNotFoundError:
         return 1, f"Fleet spec not found: {path}"
-    lines = [f"OK: {cfg.name}"]
+    # Fleet-controlled fields are _sanitize()d — validate output is a terminal surface,
+    # same as the preview, so a tampered fleet must not inject escapes into it.
+    lines = [f"OK: {_sanitize(cfg.name)}"]
     if cfg.description:
-        lines.append(f"  {cfg.description}")  # catalog metadata (R11)
+        lines.append(f"  {_sanitize(cfg.description)}")  # catalog metadata (R11)
     lines.append(f"  specialists: {len(cfg.specialists)}")
     for s in cfg.specialists:
-        lines.append(f"    - {s.role}: {s.provider}/{s.model} tools={s.toolset}")
+        lines.append(
+            f"    - {_sanitize(s.role)}: {_sanitize(s.provider)}/{_sanitize(s.model)} "
+            f"tools={[_sanitize(t) for t in s.toolset]}"
+        )
     if cfg.convergence == "collect":
         lines.append("  convergence: collect (no synthesizer)")
     else:
-        lines.append(f"  synthesis: {cfg.synthesis.provider}/{cfg.synthesis.model}")
+        lines.append(f"  synthesis: {_sanitize(cfg.synthesis.provider)}/{_sanitize(cfg.synthesis.model)}")
     # Palette + focus validation — warn-never-block (KTD5). A missing or
     # unreadable palette yields a "validation skipped" note; validation
     # never causes a non-zero exit code from validate_command.

@@ -376,6 +376,17 @@ class TestSeedStarterFleets(unittest.TestCase):
         self.assertTrue((self.cadre_home / "fleets" / "research-swarm.yaml").exists())
         self.assertTrue((self.cadre_home / "fleets" / "code-review.yaml").exists())
 
+    def test_non_utf8_source_warned_and_skipped_no_raise(self):
+        """A non-UTF-8 source fleet is warned-and-skipped, never raised (never-raises contract)."""
+        repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo)
+        (repo / "fleets").mkdir()
+        (repo / "fleets" / "research-swarm.example.yaml").write_bytes(b"\xff\xfe not utf-8 \x80")
+        # Must not raise even though the source is undecodable.
+        rv.seed_starter_fleets(repo, self.cadre_home)
+        # The undecodable source was skipped — no destination written.
+        self.assertFalse((self.cadre_home / "fleets" / "research-swarm.yaml").exists())
+
     def test_palette_not_seeded(self):
         """palette.yaml and palette.example.yaml must NOT be seeded."""
         rv.seed_starter_fleets(self.repo_root, self.cadre_home)

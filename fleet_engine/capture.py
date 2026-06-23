@@ -351,6 +351,9 @@ def _synthesis_md(result: FleetResult) -> str:
     if result.convergence == "collect":
         successes = result.successes
         if successes:
+            # Raw (no _sanitize) is deliberate — this is on-disk output. The terminal
+            # path (render.render_result) sanitizes the identity fields; do NOT merge the
+            # two attributed-block renderers, they serve different trust surfaces.
             blocks = [
                 f"--- {lane.role} ({lane.provider}/{lane.model}) ---\n{lane.text or ''}"
                 for lane in successes

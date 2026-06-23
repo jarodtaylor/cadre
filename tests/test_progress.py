@@ -340,10 +340,6 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
         """run_with_progress emits a Validated event with synthesizers=0 for collect."""
         from fleet_engine.progress import Validated
         from fleet_engine.progress_runner import run_with_progress
-        emitted = []
-
-        def capturing_hook(event):
-            emitted.append(event)
 
         # Patch ProgressRenderer to capture the Validated event directly.
         # We drive run_with_progress and intercept the emitted Validated events.

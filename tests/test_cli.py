@@ -79,6 +79,20 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("A catalog blurb for this fleet", out)
 
+    def test_validate_output_sanitizes_fleet_fields(self):
+        """A terminal escape in a fleet field must not reach validate output (approval surface)."""
+        path = _tmp_yaml(
+            "name: d-fleet\n"
+            'description: "blurb\\u001b[2Kevil"\n'
+            "synthesis: {provider: openrouter, model: m}\n"
+            "specialists:\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+        )
+        self.addCleanup(os.unlink, path)
+        code, out = validate_command(path)
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b", out)
+
     def test_valid_example_passes(self):
         code, out = validate_command(EXAMPLE)
         self.assertEqual(code, 0)
@@ -1004,11 +1018,16 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         self.addCleanup(os.unlink, self.fleet_path)
 
     def test_collect_success_exits_zero(self):
-        """A collect run with >=1 specialist success exits 0."""
+        """A collect run with >=1 specialist success exits 0 and renders the collect shape."""
         # FakeClient defaults to ("ok", ...) for every role — both specialists succeed.
         client = FakeClient()
-        code, _out = run_command(self.fleet_path, "find tools", client=client, capture=False)
+        code, out = run_command(self.fleet_path, "find tools", client=client, capture=False)
         self.assertEqual(code, 0)
+        # Pin the integration render path: a successful collect run must NOT be framed as a
+        # failure (the load-bearing ok-aliasing — a regression routing it to the
+        # "partial result (no synthesis)" branch would be caught here, not just the exit code).
+        self.assertIn("collect result", out)
+        self.assertNotIn("synthesis was not attempted", out)
 
     def test_collect_all_failed_exits_nonzero(self):
         """A collect run with all specialists failed exits 1."""

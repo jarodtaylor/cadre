@@ -338,7 +338,7 @@ def run_fleet(
         # ok = True here (past the all-fail guard, so >=1 specialist succeeded).
         # synthesis stays None, synth_ok stays None — read result.convergence to
         # distinguish from an all-failed synthesize run (KTD2).
-        result.ok = len(successes) >= 1
+        result.ok = True  # guaranteed past the all-fail guard above (>=1 specialist succeeded)
         return result
 
     if len(successes) == 1:

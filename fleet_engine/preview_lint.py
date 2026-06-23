@@ -19,6 +19,7 @@ warn). See ``docs/solutions/design-patterns/specialist-focus-grounding-control.m
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,7 @@ from typing import Optional
 import yaml
 
 from fleet_engine.config import FleetConfig
+from fleet_engine.render import _sanitize  # caller-layer sibling; render does not import this module (no cycle)
 
 # Default palette location — mirrors the CADRE_RUN_DIR convention in capture.py.
 DEFAULT_PALETTE_PATH = "~/.cadre/palette.yaml"
@@ -74,12 +76,15 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
 
     try:
         raw = resolved.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError (a non-UTF-8 / binary palette) is NOT an OSError subclass,
+        # so it must be caught here too — otherwise it escapes read_text and crashes the
+        # preview/validate gate. A corrupt palette degrades to "validation skipped".
         return None
 
     try:
         data = yaml.safe_load(raw)
-    except (yaml.YAMLError, UnicodeDecodeError):
+    except yaml.YAMLError:
         return None
 
     if not isinstance(data, dict):
@@ -142,17 +147,24 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
     warnings: list[str] = []
     palette_hint = "swap to a verified pair from ~/.cadre/palette.yaml"
 
+    # These warnings print to the --preview / validate approval surface, so every
+    # fleet-controlled string is _sanitize()d before interpolation — the same invariant
+    # render.py enforces (a tampered fleet must not spoof or hide the approval output via
+    # terminal escapes). See docs/solutions/design-patterns/
+    # sanitize-trust-surface-renders-against-terminal-escapes.md. Membership checks use the
+    # RAW values; only the displayed text is sanitized.
     for spec in config.specialists:
         pair = (spec.provider, spec.model)
         if pair not in palette.models:
             warnings.append(
-                f"specialist '{spec.role}': ({spec.provider}, {spec.model}) not in palette; "
+                f"specialist '{_sanitize(spec.role)}': "
+                f"({_sanitize(spec.provider)}, {_sanitize(spec.model)}) not in palette; "
                 f"{palette_hint}"
             )
         for tool in spec.toolset:
             if tool not in palette.toolsets:
                 warnings.append(
-                    f"specialist '{spec.role}': toolset '{tool}' not in palette; "
+                    f"specialist '{_sanitize(spec.role)}': toolset '{_sanitize(tool)}' not in palette; "
                     f"verify the toolset name against ~/.cadre/palette.yaml"
                 )
 
@@ -161,7 +173,7 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
         syn = config.synthesis
         if (syn.provider, syn.model) not in palette.models:
             warnings.append(
-                f"synthesizer: ({syn.provider}, {syn.model}) not in palette; "
+                f"synthesizer: ({_sanitize(syn.provider)}, {_sanitize(syn.model)}) not in palette; "
                 f"{palette_hint}"
             )
 
@@ -173,16 +185,21 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
 # ---------------------------------------------------------------------------
 
 # Toolsets that perform live retrieval; a lane with these is subject to focus
-# grounding checks. Names are Hermes toolset identifiers (verified against
-# hermes-agent's toolsets.py and SAFE_TOOLSETS in config.py).
+# grounding checks. web/search/x_search are in config.py's SAFE_TOOLSETS; exa and
+# firecrawl are NOT (yet) — a fleet declaring them needs allow_privileged_tools and is
+# rejected by config validation before this lint runs, so those two entries are reachable
+# only for privileged fleets. They stay listed so the lint already covers them if/when
+# they are host-verified into SAFE_TOOLSETS. (Names per the grounding-control learning;
+# not re-verified against hermes-agent here — see AGENTS.md.)
 RETRIEVAL_TOOLSETS = frozenset({"web", "search", "x_search", "exa", "firecrawl"})
 
-# Substrings that indicate a sourcing directive is present in the focus text.
-# Matched against the lowercased focus. "attribut" catches both "attribution"
-# and "attribute"; "source" catches "sources"/"unsourced"; "cite" catches
-# "cited"/"cites"/"citation" (but not "citation" via "cite" — include both).
-# Note: "source" also matches "resource"; acceptable given the conservative
-# direction (false-negative warn is worse than false-positive silence here).
+# Stems that indicate a sourcing directive in the focus text. Matched with a LEADING
+# word boundary (\b + stem) against the lowercased focus, so morphological variants still
+# count ("source"->sources/sourced, "cite"->cited/cites, "attribut"->attribute/attribution)
+# while incidental substrings do NOT ("resource" no longer satisfies "source"). "citation"
+# is listed separately since it does not share the "cite" stem. The harmful direction is a
+# MISSED warn — a truly ungrounded retrieval lane slipping through — so the match aims to
+# recognize genuine sourcing language precisely, not loosely.
 _SOURCING_TERMS = ("cite", "citation", "source", "link", "url", "primary source", "reference", "attribut")
 
 # Substrings that indicate anti-grounding intent (breadth/speed framing that
@@ -221,18 +238,19 @@ def check_focus_grounding(config: "FleetConfig") -> list[str]:
         if not (set(spec.toolset) & RETRIEVAL_TOOLSETS):
             continue  # not a retrieval lane → skip
         focus = (spec.focus or "").lower()
-        if any(t in focus for t in _SOURCING_TERMS):
+        if any(re.search(r"\b" + re.escape(t), focus) for t in _SOURCING_TERMS):
             continue  # sourcing directive present → grounded → no warn
-        # Retrieval lane with NO sourcing directive.
+        # Retrieval lane with NO sourcing directive. Role is _sanitize()d — these
+        # warnings print to the approval surface (see the note in check_palette).
         if any(t in focus for t in _ANTI_GROUNDING_TERMS):
             msg = (
-                f"specialist '{spec.role}': retrieval toolset + anti-grounding phrasing "
+                f"specialist '{_sanitize(spec.role)}': retrieval toolset + anti-grounding phrasing "
                 f"(breadth/speed framing) but no sourcing directive — "
                 f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
             )
         else:
             msg = (
-                f"specialist '{spec.role}': retrieval toolset but focus does not request "
+                f"specialist '{_sanitize(spec.role)}': retrieval toolset but focus does not request "
                 f"sources or citations — "
                 f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
             )

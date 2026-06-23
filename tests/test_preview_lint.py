@@ -294,18 +294,17 @@ class TestLoadPalettePathResolution(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_no_env_no_param_uses_default_path(self):
-        # Without CADRE_PALETTE and without explicit param, falls back to
-        # ~/.cadre/palette.yaml, which doesn't exist on dev → None.
+        """No CADRE_PALETTE and no param → resolves the default path; returns None when absent.
+
+        Deterministic: patch DEFAULT_PALETTE_PATH to a guaranteed-missing temp path so the
+        assertion holds regardless of whether the dev box has a real ~/.cadre/palette.yaml.
+        """
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_PALETTE"}
-        with patch.dict(os.environ, env_without, clear=True):
+        missing = str(self.tmp / "definitely-missing-palette.yaml")
+        with patch.dict(os.environ, env_without, clear=True), \
+                patch("fleet_engine.preview_lint.DEFAULT_PALETTE_PATH", missing):
             result = load_palette(None)
-        # Dev machine has no ~/.cadre/palette.yaml, so None is expected.
-        # (If the machine happens to have one, the test would still pass because
-        # load_palette either returns None on missing or a Palette on success —
-        # we don't assert None here, just assert no exception.)
-        # We can check the default path is used by pointing DEFAULT_PALETTE_PATH
-        # at a controlled location via the env override; the above test covers that.
-        # This test just confirms no exception.
+        self.assertIsNone(result)
 
     def test_explicit_param_takes_priority_over_env(self):
         """Explicit path param beats CADRE_PALETTE env."""
@@ -754,6 +753,16 @@ class TestCheckFocusGroundingRetrievalWarn(unittest.TestCase):
         self.assertTrue(any("cite" in w.lower() for w in warnings),
                         f"warning should mention cite directive, got: {warnings}")
 
+    def test_incidental_source_substring_still_warns(self):
+        """A retrieval focus whose only 'source'-ish word is 'resources' (no citation
+        demand) still warns — word-boundary matching excludes the incidental substring."""
+        cfg = _make_focus_config(
+            focus="Review the available resources for the topic.",
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1)
+
     def test_before_focus_anti_grounding_warns(self):
         """Grounding-control 'Before' focus (anti-grounding, no sourcing) → warn."""
         cfg = _make_focus_config(focus=_BEFORE_FOCUS, toolset=["web"])
@@ -842,14 +851,21 @@ class TestCheckFocusGroundingRetrievalNoWarn(unittest.TestCase):
         warnings = check_focus_grounding(cfg)
         self.assertEqual(warnings, [])
 
-    def test_focus_with_source_in_unsourced_context_no_warn(self):
-        """'source' in 'mark as unsourced' still counts — the term is present → no warn."""
+    def test_unsourced_hedge_without_demand_warns(self):
+        """The 'unsourced' hedge ALONE (no citation demand) is not grounding — it warns.
+
+        Per the grounding-control learning, grounding needs the DEMAND ("cite a real
+        source / link") AND the hedge ("mark unsourced"); the hedge by itself gives the
+        lane no instruction to seek sources. Word-boundary matching means "unsourced"
+        no longer satisfies the "source" stem, so a hedge-only focus correctly warns.
+        A realistic grounded focus still passes via its demand words (cite/source/link).
+        """
         cfg = _make_focus_config(
             focus="Cover the landscape. Mark anything you can't verify as unsourced.",
             toolset=["web"],
         )
         warnings = check_focus_grounding(cfg)
-        self.assertEqual(warnings, [])
+        self.assertEqual(len(warnings), 1)
 
 
 class TestCheckFocusGroundingNonRetrieval(unittest.TestCase):
@@ -1048,6 +1064,39 @@ class TestR8EnginePurity(unittest.TestCase):
     def test_config_does_not_import_preview_lint(self):
         source = self._module_source("config")
         self.assertNotIn("preview_lint", source)
+
+
+class TestLoadPaletteNonUtf8(unittest.TestCase):
+    """A non-UTF-8 / binary palette degrades to None (UnicodeDecodeError caught) — never crashes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_non_utf8_palette_returns_none(self):
+        path = self.tmp / "binary.yaml"
+        path.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
+        self.assertIsNone(load_palette(str(path)))
+
+
+class TestPreviewWarningsSanitized(unittest.TestCase):
+    """Fleet-controlled strings are sanitized in lint warnings — the preview/validate output
+    is a human-approval surface, so a tampered fleet must not inject terminal escapes into it
+    (parallels render._sanitize; see sanitize-trust-surface learning)."""
+
+    def test_escape_in_model_stripped_from_palette_warning(self):
+        cfg = _make_focus_config(focus="cite a primary source with a link", toolset=["web"])
+        cfg.specialists[0].model = "m\x1b[2Kevil"  # off-palette model carrying an ESC
+        warnings = check_palette(cfg, Palette(models=set(), toolsets={"web"}))
+        self.assertTrue(warnings, "off-palette model should warn")
+        self.assertNotIn("\x1b", "\n".join(warnings))
+
+    def test_escape_in_role_stripped_from_focus_warning(self):
+        cfg = _make_focus_config(focus="overview of the area", toolset=["web"])  # no sourcing → warns
+        cfg.specialists[0].role = "scan\x1b[2J"
+        warnings = check_focus_grounding(cfg)
+        self.assertTrue(warnings, "ungrounded retrieval lane should warn")
+        self.assertNotIn("\x1b", "\n".join(warnings))
 
 
 if __name__ == "__main__":

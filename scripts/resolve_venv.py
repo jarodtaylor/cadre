@@ -72,7 +72,9 @@ def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
                     f.write(content)
                 dest.chmod(0o600)
                 print(f"[cadre] seeded {dest_name}", file=sys.stderr)
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
+                # UnicodeDecodeError (a non-UTF-8 source) is not an OSError subclass; catch
+                # it too so the never-raises contract holds for a corrupt source file.
                 print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
                 continue
     finally:
