@@ -118,21 +118,35 @@ def _start_daemon(fn: Callable[[], AgentResult], name: str) -> tuple[threading.T
 def _start_lane(
     idx: int,
     fn: Callable[[], AgentResult],
-    done_q: "queue.Queue[tuple[int, AgentResult]]",
+    done_q: "queue.Queue[tuple[int, AgentResult, float]]",
     name: str,
 ) -> float:
-    """Launch ``fn`` in a daemon thread that pushes ``(idx, result)`` onto ``done_q``
-    the instant the call returns; return its launch time (``time.monotonic()``).
+    """Launch ``fn`` in a daemon thread that pushes ``(idx, result, completed_at)``
+    onto ``done_q`` the instant the call returns; return its launch time.
 
     Daemon so a wedged provider can never block interpreter exit; the queue push is
     how the drainer observes completion in ARRIVAL order (a slow lane never hides a
-    fast one). ``idx`` and ``fn`` are passed as args (a fresh frame per lane), so each
-    thread closes over its own lane, not the loop's last. ``fn`` (a ``ModelClient.run``
-    call) does not raise by contract; if it ever did, the put never happens and the
-    drainer reads the silent lane as a timeout — the same degradation as ``_collect``.
+    fast one). ``completed_at`` is the worker's OWN ``time.monotonic()`` at push, so
+    the drainer can compute ``elapsed_s`` and decide timed-out-or-not from when the
+    lane *actually finished* — never from when a (possibly slow) progress hook let
+    the drainer get around to pulling it. ``idx`` and ``fn`` are passed as args (a
+    fresh frame per lane), so each thread closes over its own lane, not the loop's
+    last. ``fn`` (a ``ModelClient.run`` call) does not raise by contract; if it ever
+    did, the put never happens and the drainer reads the silent lane as a timeout.
     """
-    threading.Thread(target=lambda: done_q.put((idx, fn())), name=name, daemon=True).start()
-    return time.monotonic()
+
+    # Capture launch time BEFORE starting the thread: with an instant ``fn`` the worker
+    # can run and stamp ``completed_at`` before this function would otherwise reach a
+    # post-start ``monotonic()``, which would make ``completed_at - launched_at`` go
+    # NEGATIVE. Captured first, ``launched_at <= completed_at`` always holds.
+    launched_at = time.monotonic()
+
+    def _run() -> None:
+        result = fn()
+        done_q.put((idx, result, time.monotonic()))
+
+    threading.Thread(target=_run, name=name, daemon=True).start()
+    return launched_at
 
 
 def _timed_out_result(role: str, provider: str, model: str, timeout: float) -> AgentResult:
@@ -204,19 +218,29 @@ def _fan_out(
 ) -> list[AgentResult]:
     """Run every specialist concurrently; return results in CONFIG order.
 
-    Each lane's daemon pushes ``(idx, result)`` onto ``done_q`` on arrival; this
-    thread drains them, stamps the capture signals, and emits one ``LaneDone`` per
-    lane in ARRIVAL order — so a slow lane never hides a fast one and the live counts
-    stay honest (R4). Lanes still running at the shared deadline are fabricated as
-    timed-out here (single-emit — the queue is never read again, so a late-returning
-    abandoned worker can't re-fire). The returned list is CONFIG-ordered: capture
+    Each lane's daemon pushes ``(idx, result, completed_at)`` onto ``done_q`` on
+    arrival; this thread drains them, stamps the capture signals, and emits one
+    ``LaneDone`` per lane in ARRIVAL order — so a slow lane never hides a fast one and
+    the live counts stay honest (R4). The returned list is CONFIG-ordered: capture
     dedup and the manifest depend on that stable order, independent of arrival.
+
+    Timeout accounting is decoupled from progress-hook latency. The production hook
+    does stderr rendering AND synchronous per-lane capture I/O, which can be slow; if
+    the deadline were re-checked only between hook calls, a slow hook on one lane
+    could let the deadline lapse while *already-finished* results sit unread in the
+    queue, fabricating those completed lanes as false timeouts (cross-model
+    adversarial finding). So a lane is a timeout iff it NEVER pushed: Phase 1 waits up
+    to the shared deadline; Phase 2 then non-blockingly drains the backlog — any lane
+    that pushed completed in time, even if a slow hook delayed the pull; only Phase 3
+    (never-pushed lanes) fabricates timeouts (single-emit — a late push is never
+    drained). ``elapsed_s`` uses the worker's own ``completed_at``, so hook latency
+    can't inflate it either.
 
     All emission happens from THIS thread — never a worker — so the hook sees events
     serially and the edge guards only the heartbeat.
     """
     n = len(config.specialists)
-    done_q: "queue.Queue[tuple[int, AgentResult]]" = queue.Queue()
+    done_q: "queue.Queue[tuple[int, AgentResult, float]]" = queue.Queue()
     # Start every lane before draining any, so they run concurrently under one shared
     # deadline (total ~= call_timeout, not N x call_timeout).
     launched_at = [
@@ -225,31 +249,50 @@ def _fan_out(
     ]
     progress(LaneLaunched(roles=[spec.role for spec in config.specialists]))
 
-    deadline = None if call_timeout is None else time.monotonic() + call_timeout
     collected: dict[int, AgentResult] = {}
+
+    def _record(idx: int, lane: AgentResult, completed_at: float) -> None:
+        # Stamp from the worker's OWN completion time (not the drain time), then emit
+        # — so the captured .md/event is complete and a slow hook can't skew elapsed.
+        # The engine is the single source of truth: a pushed result did not time out,
+        # regardless of what the client left on the field.
+        lane.timed_out = False
+        lane.elapsed_s = completed_at - launched_at[idx]
+        lane.toolset = list(config.specialists[idx].toolset)
+        collected[idx] = lane
+        progress(LaneDone(result=lane))
+
+    deadline = None if call_timeout is None else time.monotonic() + call_timeout
+    # Phase 1 — wait for arrivals up to the shared deadline, emitting in arrival order.
     while len(collected) < n:
         if deadline is None:
-            idx, lane = done_q.get()  # block until every lane arrives (call_timeout=None)
+            idx, lane, completed_at = done_q.get()  # block until all arrive (call_timeout=None)
         else:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             try:
-                idx, lane = done_q.get(timeout=remaining)
+                idx, lane, completed_at = done_q.get(timeout=remaining)
             except queue.Empty:
                 break
-        # Stamp capture signals BEFORE emitting, so the captured .md / event is
-        # complete. The engine is the single source of truth for these (a returned
-        # call did not time out, regardless of what the client left on the field).
-        lane.timed_out = False
-        lane.elapsed_s = time.monotonic() - launched_at[idx]
-        lane.toolset = list(config.specialists[idx].toolset)
-        collected[idx] = lane
-        progress(LaneDone(result=lane))
+        _record(idx, lane, completed_at)
 
-    # Lanes still unseen at the deadline wedged: the drainer fabricates and emits
-    # their lane-done itself. (``call_timeout`` is a number whenever this runs — a
-    # None timeout never breaks out of the loop above, so the format is safe.)
+    # Phase 2 — drain the backlog of lanes that already PUSHED a result but weren't
+    # pulled (a slow Phase-1 hook can let the deadline lapse while finished results
+    # queue up). These completed in time, so they are successes, NOT timeouts. This is
+    # the fix for the hook-latency false-timeout bug. get_nowait is non-blocking, so a
+    # genuinely wedged lane (never pushed) just isn't here and falls to Phase 3.
+    while len(collected) < n:
+        try:
+            idx, lane, completed_at = done_q.get_nowait()
+        except queue.Empty:
+            break
+        _record(idx, lane, completed_at)
+
+    # Phase 3 — lanes that never pushed are genuinely wedged: the drainer fabricates
+    # and emits their timed-out lane-done. (``call_timeout`` is a number whenever this
+    # fabricates — a None timeout blocks in Phase 1 until all arrive, so n are
+    # collected and this loop is a no-op; the format is safe.)
     fabricated_at = time.monotonic()
     for idx, spec in enumerate(config.specialists):
         if idx in collected:

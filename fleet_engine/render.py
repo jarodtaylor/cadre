@@ -369,7 +369,11 @@ class ProgressRenderer:
             )
 
         if isinstance(event, RunFolder):
-            return f"[cadre] run folder: {event.path}"
+            # Sanitize the path too: an explicit run_dir / CADRE_RUN_DIR is caller- or
+            # env-controlled, and a POSIX path may carry newlines or ESC bytes that
+            # would otherwise forge a second [cadre] line or inject a terminal escape
+            # into the stream a supervising agent parses (cross-model adversarial finding).
+            return f"[cadre] run folder: {_sanitize(event.path)}"
 
         if isinstance(event, LaneLaunched):
             roles = ", ".join(_sanitize(r) for r in event.roles)
@@ -398,7 +402,9 @@ class ProgressRenderer:
         if isinstance(event, Completion):
             total = f"{event.elapsed_s:.1f}"
             if event.run_dir is not None:
-                return f"[cadre] done in {total}s — run folder: {event.run_dir}"
+                # Sanitize the path (see RunFolder above — same caller/env-controlled
+                # source, same forge/escape risk on the agent's control stream).
+                return f"[cadre] done in {total}s — run folder: {_sanitize(event.run_dir)}"
             else:
                 return f"[cadre] done in {total}s"
 

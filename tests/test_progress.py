@@ -219,6 +219,36 @@ class TestTimeoutEmission(unittest.TestCase):
         self.assertTrue(social.result.timed_out)
 
 
+class TestSlowHookDoesNotCauseFalseTimeouts(unittest.TestCase):
+    """Timeout classification must be independent of progress-hook latency.
+
+    The production hook does stderr rendering AND synchronous per-lane capture I/O.
+    Before the fix, a hook slower than call_timeout let the deadline lapse while
+    already-finished results sat unread in the queue, fabricating those completed
+    lanes as false timeouts (cross-model adversarial finding). Now a lane is a
+    timeout iff it never pushed — the drainer drains the backlog before fabricating.
+    """
+
+    def test_slow_hook_does_not_time_out_completed_lanes(self):
+        def slow_hook(event):
+            if isinstance(event, LaneDone):
+                time.sleep(0.25)  # > call_timeout; models stalled capture I/O
+
+        # All three specialists return instantly; the hook (not the model) is slow.
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client, call_timeout=0.1, progress=slow_hook)
+
+        for lane in result.specialists:
+            self.assertFalse(lane.timed_out, f"{lane.role} completed but was marked timed_out")
+            self.assertTrue(lane.ok, f"{lane.role} should be a success")
+        self.assertEqual(len(result.successes), 3)
+        self.assertTrue(result.ok)
+        # elapsed is measured from the worker's completion, so it is NOT inflated to
+        # the ~0.25s hook delay that elapsed between completion and the drainer's pull.
+        for lane in result.specialists:
+            self.assertLess(lane.elapsed_s, 0.2, f"{lane.role} elapsed inflated by hook latency")
+
+
 class TestNoSynthOnTotalFailure(unittest.TestCase):
     def test_all_lanes_fail_no_synth_started(self):
         # Covers AE4: every lane fails -> no SynthStarted/SynthDone, no synthesis.
