@@ -73,6 +73,7 @@ def make_result(
     synth_ok=None,
     notes=None,
     ok=False,
+    convergence="synthesize",
 ):
     """Return a FleetResult; caller provides the specialists list and result state."""
     return FleetResult(
@@ -83,6 +84,7 @@ def make_result(
         synth_ok=synth_ok,
         notes=notes or [],
         ok=ok,
+        convergence=convergence,
     )
 
 
@@ -597,6 +599,203 @@ class TestRenderFleetPreviewSanitization(unittest.TestCase):
         cfg = _make_config(synth_prompt="résumé — naïve — 日本語 — ⚠")
         rendered = render_fleet_preview(cfg)
         self.assertIn("résumé — naïve — 日本語 — ⚠", rendered)
+
+
+# ---------------------------------------------------------------------------
+# New tests: collect-convergence in render_fleet_preview (U3)
+# ---------------------------------------------------------------------------
+
+
+def _make_collect_config(allow_privileged_tools=False):
+    """Build a collect FleetConfig (synthesis=None) for preview tests."""
+    return FleetConfig(
+        name="test-collect-fleet",
+        synthesis=None,
+        convergence="collect",
+        specialists=[
+            SpecialistSpec(
+                role="web",
+                provider="openrouter",
+                model="google/gemini-3-flash",
+                focus="find sources",
+                toolset=["web"],
+            ),
+            SpecialistSpec(
+                role="analysis",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                focus="deep analysis",
+                toolset=["web", "search"],
+            ),
+        ],
+        allow_privileged_tools=allow_privileged_tools,
+    )
+
+
+class TestRenderFleetPreviewCollect(unittest.TestCase):
+    """render_fleet_preview handles collect fleets — no synthesizer, no prompt block."""
+
+    def setUp(self):
+        self.cfg = _make_collect_config()
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_collect_convergence_line_present(self):
+        self.assertIn("collect (no synthesizer)", self.rendered)
+
+    def test_no_synthesizer_line(self):
+        self.assertNotIn("Synthesizer:", self.rendered)
+
+    def test_no_synthesis_prompt_block(self):
+        self.assertNotIn("Synthesis prompt:", self.rendered)
+
+    def test_specialists_still_listed(self):
+        self.assertIn("web", self.rendered)
+        self.assertIn("analysis", self.rendered)
+        self.assertIn("Specialists (2)", self.rendered)
+
+    def test_no_raises(self):
+        """render_fleet_preview must not AttributeError on synthesis=None."""
+        # setUp already called it — if it raised, setUp would have failed.
+        self.assertIsInstance(self.rendered, str)
+
+    def test_privileged_tools_still_renders_collect_true(self):
+        """A collect fleet with allow_privileged_tools=True must still show the warning."""
+        cfg = _make_collect_config(allow_privileged_tools=True)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("PRIVILEGED TOOLS ENABLED", rendered)
+        self.assertIn("collect (no synthesizer)", rendered)
+
+    def test_privileged_tools_false_renders_collect(self):
+        """A collect fleet with allow_privileged_tools=False shows the false line."""
+        self.assertIn("allow_privileged_tools: false", self.rendered)
+        self.assertIn("collect (no synthesizer)", self.rendered)
+
+
+class TestRenderFleetPreviewCollectKeyedOnConvergence(unittest.TestCase):
+    """render_fleet_preview keys on config.convergence, not config.synthesis being None.
+
+    A collect fleet that carries a stray synthesis: block must still preview
+    as collect — the explicit convergence field is the source of truth (KTD1).
+    """
+
+    def test_stray_synthesis_block_still_previews_as_collect(self):
+        """convergence="collect" wins even when synthesis is non-None."""
+        cfg = FleetConfig(
+            name="stray-synth-fleet",
+            synthesis=SynthesisSpec(
+                provider="openrouter",
+                model="google/gemini-2-flash",
+                prompt="Should not appear.",
+            ),
+            convergence="collect",
+            specialists=[
+                SpecialistSpec(
+                    role="web",
+                    provider="openrouter",
+                    model="google/gemini-3-flash",
+                    toolset=["web"],
+                ),
+            ],
+        )
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("collect (no synthesizer)", rendered)
+        self.assertNotIn("Synthesizer:", rendered)
+        self.assertNotIn("Synthesis prompt:", rendered)
+        self.assertNotIn("Should not appear.", rendered)
+
+
+# ---------------------------------------------------------------------------
+# New tests: collect-convergence in render_result (U3)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderResultCollectSuccess(unittest.TestCase):
+    """render_result on a successful collect run — the critical KTD2 negative test.
+
+    ok=True, synthesis=None, synth_ok=None, convergence="collect".
+    The 'synthesis was not attempted' line must NEVER appear; the header must
+    be 'collect result', not 'synthesized result' or 'partial result'.
+    """
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", text="web findings here"),
+            make_lane(role="analysis", text="analysis findings here"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            synthesis=None,
+            synth_ok=None,
+            ok=True,
+            convergence="collect",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_collect_result_header_present(self):
+        self.assertIn("collect result", self.rendered)
+
+    def test_no_synthesis_was_not_attempted_line(self):
+        """The load-bearing negative assertion: the false-failure line must not fire."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+    def test_no_partial_result_header(self):
+        """'partial result' is a synthesize-mode label; must not appear on collect."""
+        self.assertNotIn("partial result", self.rendered)
+
+    def test_no_synthesized_result_header(self):
+        """'synthesized result' is a synthesize-mode label; must not appear on collect."""
+        self.assertNotIn("synthesized result", self.rendered)
+
+    def test_attributed_specialist_blocks_present(self):
+        """Specialist text is surfaced in labeled sections (the elif result.successes branch)."""
+        self.assertIn("--- web", self.rendered)
+        self.assertIn("web findings here", self.rendered)
+        self.assertIn("--- analysis", self.rendered)
+        self.assertIn("analysis findings here", self.rendered)
+
+    def test_provenance_rows_present(self):
+        self.assertIn("[ok  ] web", self.rendered)
+        self.assertIn("[ok  ] analysis", self.rendered)
+
+
+class TestRenderResultCollectAllFailed(unittest.TestCase):
+    """render_result on a collect run where all specialists failed.
+
+    ok=False, synthesis=None, synth_ok=None, convergence="collect".
+    This state is closest to the original bug trigger (synth_ok is None AND ok is
+    False) — the guard must still suppress 'synthesis was not attempted'.
+    """
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", ok=False, error="connection refused"),
+            make_lane(role="analysis", ok=False, error="quota exceeded"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            synthesis=None,
+            synth_ok=None,
+            ok=False,
+            convergence="collect",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_collect_failed_header_present(self):
+        self.assertIn("collect result — all specialists failed", self.rendered)
+
+    def test_no_synthesis_was_not_attempted_line(self):
+        """Guard must suppress this line for collect even when ok=False."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+    def test_no_partial_result_header(self):
+        self.assertNotIn("partial result", self.rendered)
+
+    def test_no_synthesized_result_header(self):
+        self.assertNotIn("synthesized result", self.rendered)
+
+    def test_provenance_rows_tagged_fail(self):
+        self.assertIn("[FAIL] web", self.rendered)
+        self.assertIn("[FAIL] analysis", self.rendered)
 
 
 # ---------------------------------------------------------------------------

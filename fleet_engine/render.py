@@ -96,13 +96,21 @@ def render_fleet_preview(config: FleetConfig) -> str:
     """
     out = [f"=== fleet preview: {_sanitize(config.name)} ==="]
 
-    # --- synthesizer (cost predicate runs on the RAW strings; only display is sanitized) ---
-    synth_str = f"{_sanitize(config.synthesis.provider)}/{_sanitize(config.synthesis.model)}"
-    out.append(f"\nSynthesizer: {synth_str}")
-    if _looks_api_billed(config.synthesis.provider, config.synthesis.model):
-        out.append("  ⚠ bills at API rates inside Hermes")
+    # --- synthesizer / convergence ---
+    # Branch on config.convergence (the explicit field — KTD1: a stray synthesis:
+    # block in a collect fleet must still preview as collect).
+    if config.convergence == "collect":
+        out.append("\nConvergence: collect (no synthesizer)")
+    else:
+        # synthesize path — cost predicate runs on the RAW strings; only display is sanitized
+        synth_str = f"{_sanitize(config.synthesis.provider)}/{_sanitize(config.synthesis.model)}"
+        out.append(f"\nSynthesizer: {synth_str}")
+        if _looks_api_billed(config.synthesis.provider, config.synthesis.model):
+            out.append("  ⚠ bills at API rates inside Hermes")
 
     # --- privileged tools flag (our text, not fleet-controlled — cannot be spoofed) ---
+    # Unconditional: a collect fleet can carry privileged tools, so this must render
+    # regardless of convergence mode.
     if config.allow_privileged_tools:
         out.append("\n⚠ PRIVILEGED TOOLS ENABLED (allow_privileged_tools: true)")
     else:
@@ -112,11 +120,13 @@ def render_fleet_preview(config: FleetConfig) -> str:
     # Render the prompt byte-faithful to the parsed config (no .strip()): the
     # preview is the approval surface, so it must match what actually runs. Only
     # fall back to "(none)" when the sanitized prompt is truly empty.
-    raw_prompt = config.synthesis.prompt or ""
-    prompt_text = _sanitize(raw_prompt, multiline=True)
-    if prompt_text == "":
-        prompt_text = "(none)"
-    out.append(f"\nSynthesis prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
+    # Skipped for collect fleets — there is no synthesizer to run a prompt.
+    if config.convergence != "collect":
+        raw_prompt = config.synthesis.prompt or ""
+        prompt_text = _sanitize(raw_prompt, multiline=True)
+        if prompt_text == "":
+            prompt_text = "(none)"
+        out.append(f"\nSynthesis prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
 
     # --- specialists ---
     out.append(f"\nSpecialists ({len(config.specialists)}):")
@@ -131,9 +141,18 @@ def render_fleet_preview(config: FleetConfig) -> str:
 
 
 def render_result(result: FleetResult) -> str:
-    header = "synthesized result" if result.ok else "partial result (no synthesis)"
+    # Key the header on convergence so a successful collect run (ok=True,
+    # synthesis=None, synth_ok=None) is never mislabeled as a failure.
+    if result.convergence == "collect":
+        header = "collect result" if result.ok else "collect result — all specialists failed"
+    else:
+        header = "synthesized result" if result.ok else "partial result (no synthesis)"
     out = [f"=== {_sanitize(result.fleet)} — {header} ==="]
-    if result.synth_ok is None:
+    # Guard: only emit the "synthesis was not attempted" preamble for synthesize
+    # fleets where synthesis never ran (all specialists failed). On a collect fleet
+    # synth_ok is always None by design — emitting this on collect success is the
+    # load-bearing bug this unit fixes (KTD2).
+    if result.convergence != "collect" and result.synth_ok is None:
         # All specialists failed — synthesis was never attempted. Surface a
         # prominent line so the caller never mistakes this for a valid result.
         n_failed = len(result.failures)
