@@ -73,8 +73,9 @@ class FleetResult:
     specialists: list[AgentResult]                   # every specialist, success or failure (provenance)
     synthesis: str | None = None                     # synthesized text, or None if synthesis didn't happen
     notes: list[str] = field(default_factory=list)   # failure / degradation notes
-    ok: bool = False                                 # True only when a synthesis was produced
+    ok: bool = False                                 # True only when a synthesis was produced (synthesize) or >=1 specialist succeeded (collect)
     synth_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
+    convergence: str = "synthesize"                  # "synthesize" or "collect" — always set; consumers must read this to disambiguate ok=True,synthesis=None
 
     @property
     def successes(self) -> list[AgentResult]:
@@ -323,7 +324,7 @@ def run_fleet(
     """
     specialist_results = _fan_out(config, task, client, call_timeout, progress)
 
-    result = FleetResult(fleet=config.name, task=task, specialists=specialist_results)
+    result = FleetResult(fleet=config.name, task=task, specialists=specialist_results, convergence=config.convergence)
     for failed in result.failures:
         result.notes.append(f"specialist '{failed.role}' failed: {failed.error}")
 
@@ -331,6 +332,14 @@ def run_fleet(
     if not successes:
         result.notes.append("all specialists failed — no synthesis")
         return result  # ok stays False; synthesis never runs, so no synth-started
+
+    if config.convergence == "collect":
+        # Collect: return raw specialist lanes; synthesizer is never invoked.
+        # ok = True here (past the all-fail guard, so >=1 specialist succeeded).
+        # synthesis stays None, synth_ok stays None — read result.convergence to
+        # distinguish from an all-failed synthesize run (KTD2).
+        result.ok = len(successes) >= 1
+        return result
 
     if len(successes) == 1:
         result.notes.append("synthesized from a single surviving specialist (degenerate fan-out)")
