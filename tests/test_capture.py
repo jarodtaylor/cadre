@@ -13,7 +13,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.capture import _safe_role, prepare_run_dir, resolve_run_dir, save_run
+from fleet_engine.capture import (
+    _safe_role,
+    lane_filename_map,
+    prepare_run_dir,
+    resolve_run_dir,
+    save_lane,
+    save_run,
+)
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
@@ -88,22 +95,24 @@ def _result(task="What is the best AI design tool?",
 
 
 class TestSaveRunWritesAllArtifacts(unittest.TestCase):
-    """save_run writes prompt.txt + one specialist file per specialist + synthesis.md + manifest.json."""
+    """save_run writes synthesis.md + manifest.json (U3 split: per-lane files written by save_lane)."""
 
     def setUp(self):
         self.run_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.run_dir)
 
-    def test_prompt_txt_written(self):
+    def test_prompt_txt_not_written_by_save_run(self):
+        """save_run no longer writes prompt.txt — that moved to the edge (R2, U4)."""
         r = _result()
         save_run(_cfg(), r, self.run_dir)
-        prompt_path = self.run_dir / "prompt.txt"
-        self.assertTrue(prompt_path.exists())
-        self.assertEqual(prompt_path.read_text(encoding="utf-8"), r.task)
+        self.assertFalse((self.run_dir / "prompt.txt").exists())
 
     def test_one_specialist_file_per_specialist(self):
+        """Per-lane .md files are written by save_lane, not save_run."""
         r = _result()
-        save_run(_cfg(), r, self.run_dir)
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
         self.assertTrue((self.run_dir / "specialist-web.md").exists())
         self.assertTrue((self.run_dir / "specialist-social.md").exists())
 
@@ -231,8 +240,11 @@ class TestFailedSpecialist(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.run_dir)
 
     def test_failed_specialist_file_written(self):
+        """save_lane writes the file for a failed specialist (error text preserved)."""
         failed = _lane("social", ok=False, error="auth error", toolset=["x_search"])
         r = _result(specialists=[_lane("web", toolset=["web"]), failed])
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        save_lane(failed, fmap["social"], self.run_dir)
         save_run(_cfg(), r, self.run_dir)
         social_path = self.run_dir / "specialist-social.md"
         self.assertTrue(social_path.exists())
@@ -250,11 +262,11 @@ class TestFailedSpecialist(unittest.TestCase):
         self.assertEqual(lane["error"], "auth error")
 
     def test_folder_still_complete_with_failed_specialist(self):
+        """save_run writes synthesis.md + manifest.json; per-lane files are save_lane's job."""
         failed = _lane("social", ok=False, error="auth error", toolset=["x_search"])
         r = _result(specialists=[_lane("web", toolset=["web"]), failed])
         save_run(_cfg(), r, self.run_dir)
-        for fname in ("prompt.txt", "specialist-web.md", "specialist-social.md",
-                      "synthesis.md", "manifest.json"):
+        for fname in ("synthesis.md", "manifest.json"):
             self.assertTrue((self.run_dir / fname).exists(), f"missing: {fname}")
 
 
@@ -323,6 +335,7 @@ class TestFullyFailedRun(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.run_dir)
 
     def test_folder_complete_on_all_specialists_failed(self):
+        """save_run writes synthesis.md + manifest.json even when all specialists failed."""
         specialists = [
             _lane("web", ok=False, error="down", toolset=["web"]),
             _lane("social", ok=False, error="down", provider="xai",
@@ -330,8 +343,7 @@ class TestFullyFailedRun(unittest.TestCase):
         ]
         r = _result(specialists=specialists, synthesis=None, ok=False, synth_ok=None)
         save_run(_cfg(), r, self.run_dir)
-        for fname in ("prompt.txt", "specialist-web.md", "specialist-social.md",
-                      "synthesis.md", "manifest.json"):
+        for fname in ("synthesis.md", "manifest.json"):
             self.assertTrue((self.run_dir / fname).exists(), f"missing: {fname}")
 
     def test_synthesis_md_notes_failure_count_when_synth_not_attempted(self):
@@ -382,13 +394,12 @@ class TestFilePermissions(unittest.TestCase):
         self.run_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.run_dir)
 
-    def test_prompt_txt_is_0o600(self):
-        save_run(_cfg(), _result(), self.run_dir)
-        mode = stat.S_IMODE((self.run_dir / "prompt.txt").stat().st_mode)
-        self.assertEqual(mode, 0o600)
-
     def test_specialist_files_are_0o600(self):
-        save_run(_cfg(), _result(), self.run_dir)
+        """save_lane writes per-lane files owner-only (0o600)."""
+        r = _result()
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
         for fname in ("specialist-web.md", "specialist-social.md"):
             mode = stat.S_IMODE((self.run_dir / fname).stat().st_mode)
             self.assertEqual(mode, 0o600, f"{fname} should be 0o600")
@@ -412,12 +423,13 @@ class TestRunDirInjection(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.run_dir)
 
     def test_all_artifacts_under_injected_run_dir(self):
+        """save_run writes only synthesis.md + manifest.json (prompt.txt is U4's job)."""
         save_run(_cfg(), _result(), self.run_dir)
         artifacts = list(self.run_dir.iterdir())
         names = {p.name for p in artifacts}
-        self.assertIn("prompt.txt", names)
         self.assertIn("manifest.json", names)
         self.assertIn("synthesis.md", names)
+        self.assertNotIn("prompt.txt", names)
         # All artifacts are immediate children of run_dir (or subdirs thereof)
         for p in artifacts:
             self.assertTrue(str(p).startswith(str(self.run_dir)))
@@ -474,6 +486,8 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
     def test_slash_role_file_inside_run_dir(self):
         """specialist with role='web/evil' writes inside run_dir, not as a subpath escape."""
         r = _result(specialists=[_lane("web/evil", toolset=[])])
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        save_lane(r.specialists[0], fmap["web/evil"], self.run_dir)
         save_run(_cfg(specialists=[
             {"role": "web/evil", "provider": "openrouter", "model": "m"},
         ]), r, self.run_dir)
@@ -486,6 +500,8 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
     def test_dotdot_role_file_inside_run_dir(self):
         """specialist with role='../escape' writes inside run_dir."""
         r = _result(specialists=[_lane("../escape", toolset=[])])
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        save_lane(r.specialists[0], fmap["../escape"], self.run_dir)
         save_run(_cfg(specialists=[
             {"role": "../escape", "provider": "openrouter", "model": "m"},
         ]), r, self.run_dir)
@@ -506,9 +522,8 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
     def test_slash_role_true_role_in_markdown_header(self):
         """The markdown header must use the TRUE role."""
         r = _result(specialists=[_lane("web/evil", toolset=[])])
-        save_run(_cfg(specialists=[
-            {"role": "web/evil", "provider": "openrouter", "model": "m"},
-        ]), r, self.run_dir)
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        save_lane(r.specialists[0], fmap["web/evil"], self.run_dir)
         content = (self.run_dir / "specialist-web-evil.md").read_text(encoding="utf-8")
         self.assertIn("# Specialist: web/evil", content)
 
@@ -706,6 +721,9 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
             _lane("a:b", toolset=[]),
         ]
         r = _result(specialists=specialists)
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
         save_run(_cfg(specialists=[
             {"role": "a/b", "provider": "openrouter", "model": "m"},
             {"role": "a:b", "provider": "openrouter", "model": "m"},
@@ -723,10 +741,9 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
             _lane("a:b", toolset=[], text="output-ab-colon"),
         ]
         r = _result(specialists=specialists)
-        save_run(_cfg(specialists=[
-            {"role": "a/b", "provider": "openrouter", "model": "m"},
-            {"role": "a:b", "provider": "openrouter", "model": "m"},
-        ]), r, self.run_dir)
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
 
         content1 = (self.run_dir / "specialist-a-b.md").read_text(encoding="utf-8")
         content2 = (self.run_dir / "specialist-a-b-2.md").read_text(encoding="utf-8")
@@ -740,6 +757,9 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
             _lane("a:b", toolset=[]),
         ]
         r = _result(specialists=specialists)
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
         save_run(_cfg(specialists=[
             {"role": "a/b", "provider": "openrouter", "model": "m"},
             {"role": "a:b", "provider": "openrouter", "model": "m"},
@@ -755,13 +775,16 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
         self.assertIn("file", lane_ab_colon)
         self.assertEqual(lane_ab_slash["file"], "specialist-a-b.md")
         self.assertEqual(lane_ab_colon["file"], "specialist-a-b-2.md")
-        # And the files actually exist
+        # And the files actually exist (written by save_lane above)
         self.assertTrue((self.run_dir / lane_ab_slash["file"]).exists())
         self.assertTrue((self.run_dir / lane_ab_colon["file"]).exists())
 
     def test_non_colliding_roles_have_file_key_in_manifest(self):
         """Normal (non-colliding) lanes also have the 'file' key in the manifest."""
         r = _result()
+        fmap = lane_filename_map([lane.role for lane in r.specialists])
+        for lane in r.specialists:
+            save_lane(lane, fmap[lane.role], self.run_dir)
         save_run(_cfg(), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -769,6 +792,130 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
             self.assertIn("file", lane, f"lane {lane['role']!r} missing 'file' key")
             self.assertTrue(lane["file"].endswith(".md"))
             self.assertTrue((self.run_dir / lane["file"]).exists())
+
+
+# ---------------------------------------------------------------------------
+# lane_filename_map: deterministic role→filename mapping (U3)
+# ---------------------------------------------------------------------------
+
+
+class TestLaneFilenameMap(unittest.TestCase):
+    """lane_filename_map produces the same filenames save_run previously wrote."""
+
+    def test_normal_roles_produce_specialist_prefix(self):
+        """Plain roles map to specialist-<role>.md."""
+        fmap = lane_filename_map(["web", "social"])
+        self.assertEqual(fmap["web"], "specialist-web.md")
+        self.assertEqual(fmap["social"], "specialist-social.md")
+
+    def test_slash_role_is_sanitized_in_filename(self):
+        """A slash in a role becomes '-' in the filename; the key stays the true role."""
+        fmap = lane_filename_map(["web/evil"])
+        self.assertIn("web/evil", fmap)
+        self.assertEqual(fmap["web/evil"], "specialist-web-evil.md")
+
+    def test_colliding_roles_get_deduped_filenames(self):
+        """Two roles that sanitize to the same stem get -2 suffix on the second."""
+        fmap = lane_filename_map(["a/b", "a:b"])
+        self.assertEqual(fmap["a/b"], "specialist-a-b.md")
+        self.assertEqual(fmap["a:b"], "specialist-a-b-2.md")
+
+    def test_map_is_injective(self):
+        """No two roles map to the same filename."""
+        roles = ["web", "social", "a/b", "a:b", "scan"]
+        fmap = lane_filename_map(roles)
+        filenames = list(fmap.values())
+        self.assertEqual(len(filenames), len(set(filenames)), "filenames must be unique")
+
+    def test_map_is_order_stable(self):
+        """Roles are processed in config order; dedup suffix reflects that order."""
+        fmap = lane_filename_map(["a:b", "a/b"])
+        # Now a:b arrives first and gets the plain name; a/b gets -2
+        self.assertEqual(fmap["a:b"], "specialist-a-b.md")
+        self.assertEqual(fmap["a/b"], "specialist-a-b-2.md")
+
+    def test_empty_roles_returns_empty_map(self):
+        self.assertEqual(lane_filename_map([]), {})
+
+    def test_single_role_returns_single_entry(self):
+        fmap = lane_filename_map(["scan"])
+        self.assertEqual(fmap, {"scan": "specialist-scan.md"})
+
+
+# ---------------------------------------------------------------------------
+# save_lane: per-lane writer called on LaneDone (U3)
+# ---------------------------------------------------------------------------
+
+
+class TestSaveLane(unittest.TestCase):
+    """save_lane writes each specialist's .md the moment its lane finishes."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_save_lane_writes_file(self):
+        """save_lane writes the specialist markdown file at the pre-mapped filename."""
+        lane = _lane("web", text="web output", toolset=["web"])
+        save_lane(lane, "specialist-web.md", self.run_dir)
+        self.assertTrue((self.run_dir / "specialist-web.md").exists())
+
+    def test_save_lane_file_is_0o600(self):
+        """save_lane writes the file owner-only (0o600)."""
+        lane = _lane("web", toolset=["web"])
+        save_lane(lane, "specialist-web.md", self.run_dir)
+        mode = stat.S_IMODE((self.run_dir / "specialist-web.md").stat().st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_save_lane_true_role_in_header(self):
+        """The markdown header uses the TRUE role, not the safe filename stem."""
+        lane = _lane("web/evil", toolset=[])
+        save_lane(lane, "specialist-web-evil.md", self.run_dir)
+        content = (self.run_dir / "specialist-web-evil.md").read_text(encoding="utf-8")
+        self.assertIn("# Specialist: web/evil", content)
+
+    def test_save_lane_failed_lane_writes_error_content(self):
+        """A failed lane's error text lands in its .md file."""
+        lane = _lane("social", ok=False, error="rate limit", toolset=[])
+        save_lane(lane, "specialist-social.md", self.run_dir)
+        content = (self.run_dir / "specialist-social.md").read_text(encoding="utf-8")
+        self.assertIn("rate limit", content)
+
+    def test_save_lane_two_distinct_files_do_not_collide(self):
+        """Two save_lane calls with pre-mapped distinct filenames do not overwrite each other."""
+        lane_ab = _lane("a/b", text="output-ab-slash", toolset=[])
+        lane_colon = _lane("a:b", text="output-ab-colon", toolset=[])
+        fmap = lane_filename_map(["a/b", "a:b"])
+        save_lane(lane_ab, fmap["a/b"], self.run_dir)
+        save_lane(lane_colon, fmap["a:b"], self.run_dir)
+        content1 = (self.run_dir / "specialist-a-b.md").read_text(encoding="utf-8")
+        content2 = (self.run_dir / "specialist-a-b-2.md").read_text(encoding="utf-8")
+        self.assertIn("output-ab-slash", content1)
+        self.assertIn("output-ab-colon", content2)
+
+    def test_save_lane_creates_run_dir_if_missing(self):
+        """save_lane creates run_dir if it doesn't yet exist (crash-resilience, R11)."""
+        nested = self.run_dir / "not-yet" / "leaf"
+        self.assertFalse(nested.exists())
+        lane = _lane("web", toolset=[])
+        save_lane(lane, "specialist-web.md", nested)
+        self.assertTrue(nested.exists())
+        self.assertTrue((nested / "specialist-web.md").exists())
+
+    def test_partial_run_leaves_only_written_lanes(self):
+        """Writing only 2 of 3 lanes leaves exactly those 2 files (crash-resilience, R11)."""
+        lanes = [
+            _lane("web", text="web-out", toolset=[]),
+            _lane("social", text="social-out", toolset=[]),
+            _lane("scan", text="scan-out", toolset=[]),
+        ]
+        fmap = lane_filename_map(["web", "social", "scan"])
+        # Write only the first two (simulate a crash before the third)
+        save_lane(lanes[0], fmap["web"], self.run_dir)
+        save_lane(lanes[1], fmap["social"], self.run_dir)
+        self.assertTrue((self.run_dir / "specialist-web.md").exists())
+        self.assertTrue((self.run_dir / "specialist-social.md").exists())
+        self.assertFalse((self.run_dir / "specialist-scan.md").exists())
 
 
 # ---------------------------------------------------------------------------
