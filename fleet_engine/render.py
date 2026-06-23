@@ -3,12 +3,32 @@
 Kept out of the engine — the engine returns structured data, each surface
 formats it — and shared here so the skill renders without depending on the CLI
 command layer.
+
+``ProgressRenderer`` is a third sibling of ``render_fleet_preview`` and
+``render_result``: it turns lifecycle events into ``[cadre] …`` breadcrumbs on
+stderr (serialized, sanitized) and owns the heartbeat timer.
 """
 
 from __future__ import annotations
 
+import sys
+import threading
+import time
+from typing import Callable, Optional
+
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
+from fleet_engine.progress import (
+    Completion,
+    LaneDone,
+    LaneLaunched,
+    ProgressEvent,
+    RunFolder,
+    SynthDone,
+    SynthStarted,
+    Validated,
+    outcome_label,
+)
 
 # Predicate: synthesizer looks API-billed (Anthropic/Claude/Opus) inside Hermes.
 # False-negatives (missed expensive runs) are worse than false-positives (extra
@@ -145,3 +165,235 @@ def render_result(result: FleetResult) -> str:
         out.append("\nnotes:")
         out.extend(f"  - {n}" for n in result.notes)
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Live breadcrumb renderer + heartbeat (U2)
+# ---------------------------------------------------------------------------
+
+# Default heartbeat cadence — chosen so the silent gap never exceeds 15 s
+# during a normal run (specialists take 30-120 s each in practice). An env
+# override is cheap to add later (plan Open Questions); hardcode for now.
+_HEARTBEAT_INTERVAL_S = 15.0
+
+
+class ProgressRenderer:
+    """Turn lifecycle events into serialized ``[cadre] …`` breadcrumbs on stderr.
+
+    This is the third sibling of ``render_fleet_preview`` and ``render_result``:
+    every config-sourced identity string that flows into a breadcrumb (fleet name,
+    role) is passed through ``_sanitize()`` before emission, for the same reason
+    as the sibling surfaces — a tampered fleet must not be able to spoof the
+    stream an agent reads (KTD4, ``docs/solutions/design-patterns/
+    sanitize-trust-surface-renders-against-terminal-escapes.md``).
+
+    Threading contract (KTD3): ``emit()`` is called from exactly ONE thread
+    (the engine's arrival-order drainer, then the main thread for synthesis
+    events). The ONLY concurrent actor is the heartbeat timer thread.  A single
+    ``threading.Lock`` serializes every write to the stream AND every tally
+    mutation; the heartbeat acquires that same lock to read the tally and write
+    its line, ensuring no two lines are ever interleaved on the stream.
+
+    Per-lane file I/O is NOT in scope here — that is U3's responsibility.
+    """
+
+    def __init__(
+        self,
+        stream=None,
+        filename_for: Optional[Callable[[str], str]] = None,
+        interval_s: float = _HEARTBEAT_INTERVAL_S,
+    ) -> None:
+        """Initialise the renderer.
+
+        Args:
+            stream: Write target for breadcrumbs.  When ``None``, resolves to
+                ``sys.stderr`` at init time — deliberately NOT at import time so
+                that tests can patch stderr before constructing the renderer.
+            filename_for: Optional callable mapping a lane role (raw, as in the
+                config) to its resolved on-disk artifact filename.  ``None`` when
+                capture is off — lane-done lines then omit the filename (R13).
+                The edge guarantees every emitted role is covered by the map.
+            interval_s: Heartbeat cadence in seconds.  Defaults to
+                ``_HEARTBEAT_INTERVAL_S``; tests pass a tiny value (e.g. 0.05)
+                to keep runtime short.
+        """
+        self._stream = stream if stream is not None else sys.stderr
+        self._filename_for = filename_for
+        self._interval_s = interval_s
+
+        # Serialises every write to self._stream and every tally mutation.
+        # The heartbeat thread acquires this same lock before reading the tally
+        # or writing its line — one lock, one critical section.
+        self._lock = threading.Lock()
+
+        # Live tally — updated under self._lock on LaneLaunched and LaneDone.
+        self._total: int = 0
+        self._done: int = 0
+        self._failed: int = 0
+
+        # Heartbeat timer state — set by start_heartbeat, consumed by stop.
+        self._stop_event: threading.Event = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_start: Optional[float] = None  # monotonic seconds
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def emit(self, event: ProgressEvent) -> None:
+        """Format ``event`` into a ``[cadre] …`` line and write it to the stream.
+
+        Must be called from a single thread only (the engine drainer or the main
+        thread for edge events).  The write is serialised under ``self._lock``
+        so heartbeat ticks cannot interleave.
+
+        NEVER emits ``result.error`` — the breadcrumb carries the outcome label
+        only, keeping untrusted model-failure strings off the agent's control
+        stream (restriction lives HERE, not in the event dataclass).
+        """
+        line = self._format(event)
+        if line is None:
+            return
+        with self._lock:
+            # Update the tally BEFORE writing the line so the count on the line
+            # is accurate for anything that reads back the stream.
+            self._update_tally(event)
+            self._write(line)
+
+    def start_heartbeat(self) -> None:
+        """Start the daemon heartbeat timer.
+
+        The first tick fires after ``interval_s``; subsequent ticks repeat at
+        the same cadence while the stop event is clear.  ``daemon=True`` so the
+        thread is abandoned at interpreter exit and never blocks process
+        termination (``docs/solutions/design-patterns/
+        daemon-threads-for-uncancellable-timeouts.md``).
+        """
+        self._heartbeat_start = time.monotonic()
+        self._stop_event.clear()
+        t = threading.Thread(
+            target=self._heartbeat_loop,
+            name="cadre-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = t
+        t.start()
+
+    def stop_heartbeat(self) -> None:
+        """Stop the heartbeat timer cleanly.
+
+        Sets the stop event (which wakes ``Event.wait()`` immediately, so the
+        thread exits on the next loop iteration) then joins briefly.  Idempotent:
+        safe to call before ``start_heartbeat`` or more than once.  Never blocks
+        interpreter exit (the thread is a daemon).
+        """
+        self._stop_event.set()
+        t = self._heartbeat_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=self._interval_s + 0.5)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _write(self, line: str) -> None:
+        """Write ``line + newline`` to the stream in one atomic call.
+
+        Must be called under ``self._lock``.  A single ``write()`` of the full
+        ``line + "\\n"`` is important: two separate ``write()`` calls would let
+        a concurrent heartbeat interleave between them and garble the output.
+        """
+        self._stream.write(line + "\n")
+        self._stream.flush()
+
+    def _update_tally(self, event: ProgressEvent) -> None:
+        """Update the active/done/failed tally from an event.
+
+        Must be called under ``self._lock``, BEFORE writing the line for this
+        event.  Only LaneLaunched and LaneDone change the tally.
+        """
+        if isinstance(event, LaneLaunched):
+            self._total = len(event.roles)
+        elif isinstance(event, LaneDone):
+            label = outcome_label(event.result)
+            if label == "ok":
+                self._done += 1
+            else:
+                # Both "failed" and "timed-out" count toward the failure tally.
+                self._failed += 1
+
+    def _format(self, event: ProgressEvent) -> Optional[str]:
+        """Return the ``[cadre] …`` line for ``event``, or ``None`` to skip.
+
+        All config-sourced identity strings (fleet name, role) are sanitised
+        before interpolation.  Internal labels, counts, elapsed times, paths,
+        and pre-computed filenames are NOT sanitised — they are either our own
+        strings or filesystem-safe by construction.
+        """
+        if isinstance(event, Validated):
+            name = _sanitize(event.fleet)
+            return (
+                f"[cadre] validated fleet '{name}'"
+                f" — {event.specialists} specialists, {event.synthesizers} synthesizer(s)"
+            )
+
+        if isinstance(event, RunFolder):
+            return f"[cadre] run folder: {event.path}"
+
+        if isinstance(event, LaneLaunched):
+            roles = ", ".join(_sanitize(r) for r in event.roles)
+            return f"[cadre] launched {len(event.roles)} specialists: {roles}"
+
+        if isinstance(event, LaneDone):
+            role = _sanitize(event.result.role)
+            label = outcome_label(event.result)
+            elapsed = f"{event.result.elapsed_s:.1f}" if event.result.elapsed_s is not None else "?.?"
+            if self._filename_for is not None:
+                # Capture on — look up the filename by the RAW role (the map key
+                # the edge builds from config roles), display the sanitised role.
+                filename = self._filename_for(event.result.role)
+                return f"[cadre] lane {role} {label} {elapsed}s -> {filename}"
+            else:
+                return f"[cadre] lane {role} {label} {elapsed}s"
+
+        if isinstance(event, SynthStarted):
+            return f"[cadre] synthesizing over {event.survivors} survivor(s)"
+
+        if isinstance(event, SynthDone):
+            # SynthDone.outcome is already a label string — do NOT call outcome_label().
+            elapsed = f"{event.elapsed_s:.1f}"
+            return f"[cadre] synthesis {event.outcome} {elapsed}s"
+
+        if isinstance(event, Completion):
+            total = f"{event.elapsed_s:.1f}"
+            if event.run_dir is not None:
+                return f"[cadre] done in {total}s — run folder: {event.run_dir}"
+            else:
+                return f"[cadre] done in {total}s"
+
+        # Unknown event type — skip silently rather than crashing.
+        return None
+
+    def _heartbeat_loop(self) -> None:
+        """Body of the daemon heartbeat thread.
+
+        Loops ``while not stop_event.wait(interval_s)`` — the ``wait`` doubles
+        as the cadence delay AND the stop check.  The first tick fires after
+        ``interval_s``, not immediately (matching spec: "first tick at
+        +interval_s").  Every tick reads the live tally and writes one line,
+        both under the shared lock so no partial line can interleave with an
+        ``emit()`` call on the main thread.
+        """
+        while not self._stop_event.wait(self._interval_s):
+            with self._lock:
+                elapsed_s = int(time.monotonic() - self._heartbeat_start)
+                mm = elapsed_s // 60
+                ss = elapsed_s % 60
+                active = self._total - self._done - self._failed
+                line = (
+                    f"[cadre] heartbeat {mm:02d}:{ss:02d}"
+                    f" active={active}/{self._total}"
+                    f" done={self._done}"
+                    f" failed={self._failed}"
+                )
+                self._write(line)

@@ -3,15 +3,31 @@
 Constructs FleetResult / AgentResult / FleetConfig objects directly (no model
 calls, no CLI layer) to cover the three degraded shapes added in U5, the happy
 path, and the fleet preview helper added in U2.
+
+U2 tests (``TestProgressRenderer*``) cover the breadcrumb renderer and heartbeat
+added in this unit: line formats, tally accounting, sanitisation, concurrency
+atomicity, no-survivors path, and clean heartbeat lifecycle.
 """
 
+import io
+import threading
+import time
 import unittest
 from pathlib import Path
 
 from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
-from fleet_engine.render import render_fleet_preview, render_result
+from fleet_engine.progress import (
+    Completion,
+    LaneDone,
+    LaneLaunched,
+    RunFolder,
+    SynthDone,
+    SynthStarted,
+    Validated,
+)
+from fleet_engine.render import ProgressRenderer, render_fleet_preview, render_result
 
 # Path to the curated example fleet (used for some preview tests).
 _EXAMPLE_FLEET = (
@@ -694,6 +710,348 @@ class TestRenderResultTabInSynthesis(unittest.TestCase):
         self.assertIn("\t", result)
         self.assertIn("Column A:", result)
         self.assertIn("Column B", result)
+
+
+# ---------------------------------------------------------------------------
+# ProgressRenderer — U2 tests
+# ---------------------------------------------------------------------------
+
+# Tiny heartbeat interval for tests so they run fast.
+_HB_INTERVAL = 0.05
+
+
+def _make_renderer(stream=None, filename_for=None, interval_s=_HB_INTERVAL):
+    """Build a ProgressRenderer pointed at an io.StringIO (default) or a given stream."""
+    if stream is None:
+        stream = io.StringIO()
+    return ProgressRenderer(stream=stream, filename_for=filename_for, interval_s=interval_s), stream
+
+
+def _lines(stream: io.StringIO) -> list[str]:
+    """Return non-empty lines written to the StringIO."""
+    return [ln for ln in stream.getvalue().split("\n") if ln]
+
+
+class TestProgressRendererLineFormats(unittest.TestCase):
+    """Each event type renders its expected ``[cadre] …`` line (Covers AE1)."""
+
+    def _emit_and_get(self, event, filename_for=None):
+        r, stream = _make_renderer(filename_for=filename_for)
+        r.emit(event)
+        return _lines(stream)
+
+    def test_validated_format(self):
+        lines = self._emit_and_get(Validated(fleet="my-fleet", specialists=3, synthesizers=1))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] validated fleet 'my-fleet' — 3 specialists, 1 synthesizer(s)")
+
+    def test_run_folder_format(self):
+        lines = self._emit_and_get(RunFolder(path="/tmp/cadre/run-001"))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] run folder: /tmp/cadre/run-001")
+
+    def test_lane_launched_format(self):
+        lines = self._emit_and_get(LaneLaunched(roles=["web", "social", "analysis"]))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] launched 3 specialists: web, social, analysis")
+
+    def test_lane_done_with_capture(self):
+        """LaneDone with ``filename_for`` produces the ``-> <filename>`` suffix."""
+        result = make_lane(role="web", ok=True, elapsed_s=12.3)
+        lines = self._emit_and_get(
+            LaneDone(result=result),
+            filename_for=lambda role: f"{role}.md",
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] lane web ok 12.3s -> web.md")
+
+    def test_lane_done_without_capture(self):
+        """LaneDone without ``filename_for`` omits the filename (R13)."""
+        result = make_lane(role="web", ok=True, elapsed_s=5.0)
+        lines = self._emit_and_get(LaneDone(result=result))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] lane web ok 5.0s")
+
+    def test_lane_done_failed_label(self):
+        result = make_lane(role="scan", ok=False, elapsed_s=3.7)
+        lines = self._emit_and_get(LaneDone(result=result))
+        self.assertEqual(lines[0], "[cadre] lane scan failed 3.7s")
+
+    def test_lane_done_timed_out_label(self):
+        result = make_lane(role="analysis", ok=False, timed_out=True, elapsed_s=600.0)
+        lines = self._emit_and_get(LaneDone(result=result))
+        self.assertEqual(lines[0], "[cadre] lane analysis timed-out 600.0s")
+
+    def test_synth_started_format(self):
+        lines = self._emit_and_get(SynthStarted(survivors=2))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] synthesizing over 2 survivor(s)")
+
+    def test_synth_done_ok_format(self):
+        lines = self._emit_and_get(SynthDone(outcome="ok", elapsed_s=8.2))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] synthesis ok 8.2s")
+
+    def test_synth_done_failed_format(self):
+        lines = self._emit_and_get(SynthDone(outcome="failed", elapsed_s=1.0))
+        self.assertEqual(lines[0], "[cadre] synthesis failed 1.0s")
+
+    def test_completion_with_run_dir(self):
+        lines = self._emit_and_get(Completion(elapsed_s=45.6, run_dir="/tmp/cadre/run-001"))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] done in 45.6s — run folder: /tmp/cadre/run-001")
+
+    def test_completion_without_run_dir(self):
+        """Completion with run_dir=None omits the run-folder suffix (capture off, R13)."""
+        lines = self._emit_and_get(Completion(elapsed_s=30.0, run_dir=None))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] done in 30.0s")
+
+
+class TestProgressRendererTally(unittest.TestCase):
+    """Tally reflects done/failed honestly as LaneDone events arrive (Covers AE2/AE3)."""
+
+    def setUp(self):
+        self.r, self.stream = _make_renderer()
+
+    def _tally(self):
+        return self.r._total, self.r._done, self.r._failed
+
+    def test_lane_launched_sets_total(self):
+        self.r.emit(LaneLaunched(roles=["web", "social", "analysis"]))
+        total, done, failed = self._tally()
+        self.assertEqual(total, 3)
+        self.assertEqual(done, 0)
+        self.assertEqual(failed, 0)
+
+    def test_ok_lane_increments_done(self):
+        self.r.emit(LaneLaunched(roles=["web"]))
+        self.r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=1.0)))
+        total, done, failed = self._tally()
+        self.assertEqual(done, 1)
+        self.assertEqual(failed, 0)
+        self.assertEqual(total - done - failed, 0)  # active=0
+
+    def test_failed_lane_increments_failed(self):
+        self.r.emit(LaneLaunched(roles=["web", "scan"]))
+        self.r.emit(LaneDone(result=make_lane(role="web", ok=False, elapsed_s=2.0)))
+        total, done, failed = self._tally()
+        self.assertEqual(done, 0)
+        self.assertEqual(failed, 1)
+        self.assertEqual(total - done - failed, 1)  # active=1
+
+    def test_timed_out_lane_increments_failed(self):
+        """A timed-out lane counts as failed, not done (Covers AE3)."""
+        self.r.emit(LaneLaunched(roles=["web"]))
+        self.r.emit(LaneDone(result=make_lane(role="web", ok=False, timed_out=True, elapsed_s=600.0)))
+        _, done, failed = self._tally()
+        self.assertEqual(done, 0)
+        self.assertEqual(failed, 1)
+
+    def test_mixed_lanes_tally_correctly(self):
+        self.r.emit(LaneLaunched(roles=["web", "social", "scan"]))
+        self.r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=10.0)))
+        self.r.emit(LaneDone(result=make_lane(role="social", ok=False, elapsed_s=5.0)))
+        self.r.emit(LaneDone(result=make_lane(role="scan", ok=False, timed_out=True, elapsed_s=600.0)))
+        total, done, failed = self._tally()
+        self.assertEqual(total, 3)
+        self.assertEqual(done, 1)
+        self.assertEqual(failed, 2)
+        self.assertEqual(total - done - failed, 0)  # all accounted for
+
+
+class TestProgressRendererHeartbeat(unittest.TestCase):
+    """The heartbeat fires on cadence and shows the current tally."""
+
+    def test_heartbeat_fires_with_correct_shape(self):
+        """A heartbeat line with correct prefix and tally appears after ``interval_s``."""
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.emit(LaneLaunched(roles=["web", "social"]))
+        r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=1.0)))
+        r.start_heartbeat()
+        # Sleep long enough for at least one tick.
+        time.sleep(_HB_INTERVAL * 3)
+        r.stop_heartbeat()
+
+        hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
+        self.assertGreater(len(hb_lines), 0, "at least one heartbeat line must appear")
+        # Shape: [cadre] heartbeat mm:ss active=A/T done=D failed=F
+        import re
+        pattern = r"^\[cadre\] heartbeat \d{2}:\d{2} active=\d+/\d+ done=\d+ failed=\d+$"
+        for ln in hb_lines:
+            self.assertRegex(ln, pattern, f"heartbeat line has wrong shape: {ln!r}")
+
+    def test_heartbeat_reflects_live_tally(self):
+        """The heartbeat tally values match the emitted lane-done events."""
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.emit(LaneLaunched(roles=["web", "social", "scan"]))
+        r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=1.0)))
+        r.emit(LaneDone(result=make_lane(role="social", ok=False, elapsed_s=2.0)))
+        # scan still active
+        r.start_heartbeat()
+        time.sleep(_HB_INTERVAL * 3)
+        r.stop_heartbeat()
+
+        hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
+        self.assertGreater(len(hb_lines), 0)
+        # All heartbeat lines must show: active=1/3 done=1 failed=1
+        for ln in hb_lines:
+            self.assertIn("active=1/3", ln, f"unexpected active count: {ln!r}")
+            self.assertIn("done=1", ln, f"unexpected done count: {ln!r}")
+            self.assertIn("failed=1", ln, f"unexpected failed count: {ln!r}")
+
+    def test_no_heartbeat_line_before_start(self):
+        """Before ``start_heartbeat`` is called, no heartbeat line appears."""
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.emit(LaneLaunched(roles=["web"]))
+        # Do NOT call start_heartbeat.
+        time.sleep(_HB_INTERVAL * 2)
+        hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
+        self.assertEqual(len(hb_lines), 0)
+
+    def test_no_heartbeat_after_stop(self):
+        """After ``stop_heartbeat``, no further heartbeat lines appear."""
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.start_heartbeat()
+        time.sleep(_HB_INTERVAL * 2)
+        r.stop_heartbeat()
+        count_before = len([ln for ln in _lines(stream) if "[cadre] heartbeat" in ln])
+        # Wait two more intervals — no new ticks should fire.
+        time.sleep(_HB_INTERVAL * 2)
+        count_after = len([ln for ln in _lines(stream) if "[cadre] heartbeat" in ln])
+        self.assertEqual(count_before, count_after, "no heartbeat lines after stop_heartbeat")
+
+    def test_stop_before_start_is_idempotent(self):
+        """Calling ``stop_heartbeat`` before ``start_heartbeat`` must not raise."""
+        r, _ = _make_renderer()
+        r.stop_heartbeat()  # must not raise
+
+    def test_double_stop_is_idempotent(self):
+        """Calling ``stop_heartbeat`` twice must not raise."""
+        r, _ = _make_renderer(interval_s=_HB_INTERVAL)
+        r.start_heartbeat()
+        r.stop_heartbeat()
+        r.stop_heartbeat()  # must not raise
+
+    def test_no_leaked_heartbeat_thread_after_stop(self):
+        """After ``stop_heartbeat``, no thread named 'cadre-heartbeat' remains alive."""
+        r, _ = _make_renderer(interval_s=_HB_INTERVAL)
+        r.start_heartbeat()
+        time.sleep(_HB_INTERVAL * 2)
+        r.stop_heartbeat()
+        # Give the join a brief moment to complete, then check.
+        time.sleep(0.02)
+        alive_names = [t.name for t in threading.enumerate() if t.is_alive()]
+        self.assertNotIn("cadre-heartbeat", alive_names)
+
+
+class TestProgressRendererSanitization(unittest.TestCase):
+    """Config-sourced fields are sanitised; terminal escapes are neutralised (KTD4)."""
+
+    def test_esc_in_fleet_name_stripped_from_validated(self):
+        """ESC byte in fleet name must not appear in the Validated breadcrumb."""
+        r, stream = _make_renderer()
+        r.emit(Validated(fleet="evil\x1b[2Jname", specialists=1, synthesizers=1))
+        out = stream.getvalue()
+        self.assertNotIn("\x1b", out, "ESC byte must be stripped from fleet name")
+        self.assertIn("[cadre] validated fleet", out)
+
+    def test_cr_in_fleet_name_stripped(self):
+        """CR byte in fleet name must not appear in the Validated breadcrumb."""
+        r, stream = _make_renderer()
+        r.emit(Validated(fleet="fleet\rfake", specialists=2, synthesizers=1))
+        out = stream.getvalue()
+        self.assertNotIn("\r", out, "CR must be stripped from fleet name")
+
+    def test_esc_in_role_stripped_from_lane_done(self):
+        """ESC byte in role must not appear in the LaneDone breadcrumb."""
+        # Use capture off (filename_for=None) so we don't need a map key lookup.
+        result = make_lane(role="web\x1b[31m", ok=True, elapsed_s=1.0)
+        r, stream = _make_renderer(filename_for=None)
+        r.emit(LaneLaunched(roles=["web\x1b[31m"]))
+        r.emit(LaneDone(result=result))
+        out = stream.getvalue()
+        self.assertNotIn("\x1b", out, "ESC byte must be stripped from role in LaneDone")
+
+    def test_newline_in_role_cannot_forge_breadcrumb_line(self):
+        """A newline in a role name cannot inject a fake breadcrumb line."""
+        forged = "web\n[cadre] launch fake"
+        result = make_lane(role=forged, ok=True, elapsed_s=1.0)
+        r, stream = _make_renderer(filename_for=None)
+        r.emit(LaneDone(result=result))
+        output_lines = _lines(stream)
+        # No standalone line that exactly matches the forged injection.
+        forged_standalone = [ln for ln in output_lines if ln.strip() == "[cadre] launch fake"]
+        self.assertEqual(len(forged_standalone), 0, "forged breadcrumb line must not appear")
+
+    def test_internal_labels_not_altered(self):
+        """Internal labels (ok, failed, timed-out), counts, and elapsed are never sanitised."""
+        result = make_lane(role="web", ok=True, elapsed_s=7.5)
+        r, stream = _make_renderer()
+        r.emit(LaneDone(result=result))
+        self.assertIn("ok", stream.getvalue())
+        self.assertIn("7.5s", stream.getvalue())
+
+
+class TestProgressRendererConcurrency(unittest.TestCase):
+    """Concurrent heartbeat-vs-emit does not garble any output line."""
+
+    def test_no_garbled_lines_under_concurrent_heartbeat(self):
+        """Every non-empty output line starts with '[cadre] ' when the heartbeat runs
+        concurrently with several emit() calls on the test thread.
+
+        The only concurrency this tests is heartbeat-vs-emit; emit() itself is
+        single-threaded (the engine drainer never races with the test thread).
+        """
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.emit(LaneLaunched(roles=["web", "social", "scan", "analysis"]))
+        r.start_heartbeat()
+
+        # Emit several lane-done events while the heartbeat may tick between them.
+        for role, ok in [("web", True), ("social", False), ("scan", True), ("analysis", True)]:
+            r.emit(LaneDone(result=make_lane(role=role, ok=ok, elapsed_s=1.0)))
+            # Briefly yield so the heartbeat gets a chance to interleave.
+            time.sleep(_HB_INTERVAL * 0.5)
+
+        r.stop_heartbeat()
+
+        output_lines = _lines(stream)
+        for ln in output_lines:
+            self.assertTrue(
+                ln.startswith("[cadre] "),
+                f"garbled line (does not start with '[cadre] '): {ln!r}",
+            )
+
+
+class TestProgressRendererNoSurvivors(unittest.TestCase):
+    """A no-survivors run still renders the completion line (Covers AE4)."""
+
+    def test_all_failed_completion_renders(self):
+        """After all lanes fail, the Completion event still produces a done line."""
+        r, stream = _make_renderer()
+        r.emit(LaneLaunched(roles=["web", "social"]))
+        r.emit(LaneDone(result=make_lane(role="web", ok=False, elapsed_s=3.0)))
+        r.emit(LaneDone(result=make_lane(role="social", ok=False, elapsed_s=2.5)))
+        r.emit(Completion(elapsed_s=7.1, run_dir="/tmp/cadre/run-fail"))
+
+        lines = _lines(stream)
+        completion_lines = [ln for ln in lines if "[cadre] done in" in ln]
+        self.assertEqual(len(completion_lines), 1)
+        self.assertEqual(completion_lines[0], "[cadre] done in 7.1s — run folder: /tmp/cadre/run-fail")
+
+    def test_all_failed_tally_correct(self):
+        """After all lanes fail, the tally shows total==failed, done==0, active==0."""
+        r, stream = _make_renderer()
+        r.emit(LaneLaunched(roles=["web", "social"]))
+        r.emit(LaneDone(result=make_lane(role="web", ok=False, elapsed_s=3.0)))
+        r.emit(LaneDone(result=make_lane(role="social", ok=False, elapsed_s=2.5)))
+
+        total, done, failed = r._total, r._done, r._failed
+        active = total - done - failed
+        self.assertEqual(total, 2)
+        self.assertEqual(done, 0)
+        self.assertEqual(failed, 2)
+        self.assertEqual(active, 0)
 
 
 if __name__ == "__main__":
