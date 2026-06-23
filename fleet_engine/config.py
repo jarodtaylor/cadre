@@ -64,8 +64,10 @@ class SynthesisSpec:
 @dataclass
 class FleetConfig:
     name: str
-    synthesis: SynthesisSpec
     specialists: list[SpecialistSpec]
+    synthesis: SynthesisSpec | None = None
+    convergence: str = "synthesize"
+    description: str = ""
     allow_privileged_tools: bool = False
 
     @classmethod
@@ -98,15 +100,32 @@ class FleetConfig:
         else:
             allow_priv = allow_priv_raw
 
+        conv_raw = data.get("convergence", "synthesize")
+        if conv_raw not in {"synthesize", "collect"}:
+            errors.append("`convergence` must be one of: synthesize, collect")
+            convergence = "synthesize"
+        else:
+            convergence = conv_raw
+
+        description = str(data.get("description", ""))
+
         syn_raw = data.get("synthesis")
         synthesis: SynthesisSpec | None = None
-        if not isinstance(syn_raw, dict):
-            errors.append("`synthesis` is required and must be a mapping with provider + model")
-        else:
-            if not syn_raw.get("provider"):
-                errors.append("`synthesis.provider` is required")
-            if not syn_raw.get("model"):
-                errors.append("`synthesis.model` is required")
+        if convergence == "synthesize":
+            if not isinstance(syn_raw, dict):
+                errors.append("`synthesis` is required and must be a mapping with provider + model")
+            else:
+                if not syn_raw.get("provider"):
+                    errors.append("`synthesis.provider` is required")
+                if not syn_raw.get("model"):
+                    errors.append("`synthesis.model` is required")
+                synthesis = SynthesisSpec(
+                    provider=str(syn_raw.get("provider", "")),
+                    model=str(syn_raw.get("model", "")),
+                    prompt=str(syn_raw.get("prompt", "")),
+                )
+        elif isinstance(syn_raw, dict):
+            # collect mode: synthesis block is optional; parse it if present
             synthesis = SynthesisSpec(
                 provider=str(syn_raw.get("provider", "")),
                 model=str(syn_raw.get("model", "")),
@@ -170,10 +189,13 @@ class FleetConfig:
         if errors:
             raise ConfigError(errors)
 
-        assert synthesis is not None  # guaranteed: a None synthesis appended an error above
+        # In synthesize mode, a None synthesis means an error was accumulated above.
+        assert convergence != "synthesize" or synthesis is not None
         return cls(
             name=str(name),
-            synthesis=synthesis,
             specialists=specialists,
+            synthesis=synthesis,
+            convergence=convergence,
+            description=description,
             allow_privileged_tools=allow_priv,
         )
