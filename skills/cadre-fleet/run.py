@@ -23,7 +23,7 @@ from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run 
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
-from fleet_engine.render import render_fleet_preview, render_result  # noqa: E402
+from fleet_engine.render import _sanitize, render_fleet_preview, render_result  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,11 +110,12 @@ def main(argv: list[str] | None = None) -> int:
             save_run(cfg, result, run_dir)
             output = f"{output}\n\nRun folder: {run_dir}"
         except Exception as exc:  # noqa: BLE001
-            # Best-effort warning on the [cadre] stream: a dead stderr (the same
-            # broken pipe the renderer guards) must not turn a save_run failure into
-            # a lost report — the warning print must not raise before print(output).
+            # Best-effort warning on the [cadre] stream: sanitize the exception text
+            # (a run_dir in the message could carry control bytes) and never let a dead
+            # stderr turn a save_run failure into a lost report — the warning print must
+            # not raise before print(output).
             with contextlib.suppress(OSError, ValueError):
-                print(f"[cadre] warn: failed to save run artifacts: {exc}", file=sys.stderr)
+                print(f"[cadre] warn: failed to save run artifacts: {_sanitize(str(exc))}", file=sys.stderr)
 
     print(output)
     return 0 if result.ok else 1

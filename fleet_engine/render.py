@@ -386,7 +386,10 @@ class ProgressRenderer:
             if self._filename_for is not None:
                 # Capture on — look up the filename by the RAW role (the map key
                 # the edge builds from config roles), display the sanitised role.
-                filename = self._filename_for(event.result.role)
+                # Sanitize the filename too: it is _safe_role-derived (safe by
+                # construction) today, but filename_for is a caller-injected callable
+                # and the renderer must not trust it to keep the [cadre] stream clean.
+                filename = _sanitize(self._filename_for(event.result.role))
                 return f"[cadre] lane {role} {label} {elapsed}s -> {filename}"
             else:
                 return f"[cadre] lane {role} {label} {elapsed}s"

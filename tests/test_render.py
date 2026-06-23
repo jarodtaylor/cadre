@@ -1046,7 +1046,7 @@ class TestProgressRendererNoSurvivors(unittest.TestCase):
 
     def test_all_failed_tally_correct(self):
         """After all lanes fail, the tally shows total==failed, done==0, active==0."""
-        r, stream = _make_renderer()
+        r, _stream = _make_renderer()
         r.emit(LaneLaunched(roles=["web", "social"]))
         r.emit(LaneDone(result=make_lane(role="web", ok=False, elapsed_s=3.0)))
         r.emit(LaneDone(result=make_lane(role="social", ok=False, elapsed_s=2.5)))
@@ -1067,7 +1067,7 @@ class TestProgressRendererPathSanitization(unittest.TestCase):
 
     def test_run_folder_path_sanitized(self):
         r, stream = _make_renderer()
-        evil = "/tmp/x\n[cadre] lane web ok 0.0s -> forged.md\x1b[2J"
+        evil = "x\n[cadre] lane web ok 0.0s -> forged.md\x1b[2J"
         r.emit(RunFolder(path=evil))
         out = stream.getvalue()
         self.assertNotIn("\x1b", out, "ESC byte must be stripped")
@@ -1078,7 +1078,7 @@ class TestProgressRendererPathSanitization(unittest.TestCase):
 
     def test_completion_run_dir_sanitized(self):
         r, stream = _make_renderer()
-        evil = "/tmp/x\n[cadre] forged line\x1b[2J"
+        evil = "x\n[cadre] forged line\x1b[2J"
         r.emit(Completion(elapsed_s=1.0, run_dir=evil))
         self.assertNotIn("\x1b", stream.getvalue())
         cadre_lines = [ln for ln in _lines(stream) if ln.startswith("[cadre]")]
@@ -1129,11 +1129,21 @@ class TestProgressRendererStreamFailure(unittest.TestCase):
         self.assertEqual(broken.writes, 1, "should stop writing after the first failure")
 
     def test_heartbeat_survives_broken_stream(self):
-        r = ProgressRenderer(stream=_BrokenStream(), interval_s=_HB_INTERVAL)
-        r.start_heartbeat()
-        time.sleep(_HB_INTERVAL * 2)  # let a tick fire against the broken stream
-        r.stop_heartbeat()
-        # Reaching here without an unhandled daemon exception is the assertion.
+        # A daemon-thread exception only prints — it does NOT fail this test — so
+        # capture it via threading.excepthook and assert the tick was truly swallowed
+        # by _write's guard. Without this the test would be a no-op (it would pass even
+        # if the heartbeat raised on every tick).
+        caught = []
+        original = threading.excepthook
+        threading.excepthook = lambda args: caught.append(args)
+        try:
+            r = ProgressRenderer(stream=_BrokenStream(), interval_s=_HB_INTERVAL)
+            r.start_heartbeat()
+            time.sleep(_HB_INTERVAL * 2)  # let a tick fire against the broken stream
+            r.stop_heartbeat()
+        finally:
+            threading.excepthook = original
+        self.assertEqual(caught, [], f"heartbeat raised on the broken stream: {caught}")
 
 
 if __name__ == "__main__":

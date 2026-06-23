@@ -286,9 +286,12 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
     """
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    # Pre-compute the role→filename map (same dedup the edge used in save_lane)
-    # so the manifest's lanes[].file keys match the actual on-disk filenames.
-    fmap = lane_filename_map([lane.role for lane in result.specialists])
+    # Build the role→filename map from cfg.specialists — the SAME config-order source
+    # the edge used for save_lane — so the manifest's lanes[].file always match the
+    # on-disk filenames, by construction rather than by relying on result.specialists
+    # happening to be config-ordered (matters only when two roles collide under
+    # _safe_role and the -2 suffix would otherwise flip).
+    fmap = lane_filename_map([spec.role for spec in cfg.specialists])
     lane_filenames = [fmap[lane.role] for lane in result.specialists]
 
     # synthesis.md — the synthesized output, or a failure note.

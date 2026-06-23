@@ -810,19 +810,33 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         self.assertIn("THE REPORT", output, "the synthesized report survives a broken stream")
         self.assertTrue((self.tmp / "r" / "manifest.json").exists(), "capture still completed")
 
-    def test_save_run_failure_with_broken_stderr_still_returns_report(self):
-        # The worst case: the supervising agent stopped draining stderr AND save_run
-        # fails. The save_run warning print() must not raise out of run_command and
-        # cost the (already computed) report.
+    def test_save_run_failure_with_broken_warn_stream_still_returns_report(self):
+        # The worst case: the supervising agent stopped draining the progress stream
+        # (where the save_run warning now routes) AND save_run fails. The warning
+        # print() must not raise out of run_command and cost the (already computed)
+        # report.
         client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
         with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
-            with patch("sys.stderr", _BrokenStream()):
-                code, output = run_command(
-                    EXAMPLE, "task", client=client,
-                    run_dir=self.tmp / "r2", progress_stream=io.StringIO(),
-                )
+            code, output = run_command(
+                EXAMPLE, "task", client=client,
+                run_dir=self.tmp / "r2", progress_stream=_BrokenStream(),
+            )
         self.assertEqual(code, 0)
         self.assertIn("MY SYNTHESIS", output)
+
+    def test_save_run_warning_routed_to_progress_stream_and_sanitized(self):
+        # The warning rides the SAME [cadre] stream as the breadcrumbs (not sys.stderr),
+        # and a control byte in the exception text (e.g. a run_dir path) can't forge a
+        # second line.
+        prog = io.StringIO()
+        client = FakeClient({"synthesizer": ("ok", "S")})
+        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full\n[cadre] forged")):
+            run_command(EXAMPLE, "task", client=client, run_dir=self.tmp / "r3", progress_stream=prog)
+        text = prog.getvalue()
+        self.assertIn("[cadre] warn: failed to save run artifacts:", text)
+        warn_lines = [ln for ln in text.split("\n") if ln.startswith("[cadre] warn:")]
+        self.assertEqual(len(warn_lines), 1, "warning must be a single sanitized line")
+        self.assertNotIn("\n[cadre] forged", text)  # embedded newline stripped — no forged line
 
 
 class TestRunCommandLaneCaptureFailure(unittest.TestCase):
