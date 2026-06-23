@@ -810,6 +810,20 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         self.assertIn("THE REPORT", output, "the synthesized report survives a broken stream")
         self.assertTrue((self.tmp / "r" / "manifest.json").exists(), "capture still completed")
 
+    def test_save_run_failure_with_broken_stderr_still_returns_report(self):
+        # The worst case: the supervising agent stopped draining stderr AND save_run
+        # fails. The save_run warning print() must not raise out of run_command and
+        # cost the (already computed) report.
+        client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
+        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+            with patch("sys.stderr", _BrokenStream()):
+                code, output = run_command(
+                    EXAMPLE, "task", client=client,
+                    run_dir=self.tmp / "r2", progress_stream=io.StringIO(),
+                )
+        self.assertEqual(code, 0)
+        self.assertIn("MY SYNTHESIS", output)
+
 
 class TestRunCommandLaneCaptureFailure(unittest.TestCase):
     """A per-lane artifact write failure degrades (warns on the stream) and never

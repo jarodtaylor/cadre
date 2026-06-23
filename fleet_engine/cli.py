@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -93,7 +94,11 @@ def run_command(
             save_run(cfg, result, run_dir)
             output = f"{output}\n\nRun folder: {run_dir}"
         except Exception as exc:  # noqa: BLE001
-            print(f"Warning: failed to save run artifacts: {exc}", file=sys.stderr)
+            # Best-effort warning on the [cadre] stream: never let a dead stderr (the
+            # same broken pipe the renderer guards) turn a save_run failure into a
+            # lost report — the warning print must not raise out of run_command.
+            with contextlib.suppress(OSError, ValueError):
+                print(f"[cadre] warn: failed to save run artifacts: {exc}", file=sys.stderr)
 
     return exit_code, output
 
