@@ -71,7 +71,8 @@ to match the providers you've authenticated in your Hermes profile, then run
 the verify step:
 
 ```bash
-~/.local/lib/hermes-agent/venv/bin/python spikes/verify_aiagent_providers.py
+PYBIN="${CADRE_HERMES_PYTHON:-$(grep -E '^CADRE_HERMES_PYTHON=' ~/.cadre/config | cut -d= -f2-)}"
+"$PYBIN" spikes/verify_aiagent_providers.py
 ```
 
 Verification keeps only the `(provider, model)` pairs that actually resolve on

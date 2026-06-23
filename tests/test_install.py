@@ -327,7 +327,7 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with unittest.mock.patch.object(rv, "seed_starter_fleets"):
+                with unittest.mock.patch.object(rv, "seed_starter_fleets") as seed_mock:
                     with contextlib.redirect_stdout(stdout_buf):
                         with contextlib.redirect_stderr(stderr_buf):
                             code = rv.main(["--venv-python", "/some/python"])
@@ -335,6 +335,8 @@ class TestMainStdoutContract(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stdout_buf.getvalue(), "/some/python\n",
                          "stdout must be EXACTLY the path + newline (nothing else)")
+        # Guard the call site: if main() stops seeding, this fails (the patch alone wouldn't).
+        seed_mock.assert_called_once_with(Path(rv.__file__).resolve().parents[1], Path("/fake/cadre"))
 
     def test_diagnostics_go_to_stderr_not_stdout(self):
         """Scaffold confirmations appear on stderr, not stdout."""
@@ -343,7 +345,7 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with unittest.mock.patch.object(rv, "seed_starter_fleets"):
+                with unittest.mock.patch.object(rv, "seed_starter_fleets") as seed_mock:
                     with contextlib.redirect_stdout(stdout_buf):
                         with contextlib.redirect_stderr(stderr_buf):
                             rv.main(["--venv-python", "/some/python"])
@@ -352,6 +354,7 @@ class TestMainStdoutContract(unittest.TestCase):
         self.assertEqual(stdout_buf.getvalue().strip(), "/some/python")
         # Diagnostics (scaffold/config lines) go to stderr
         self.assertIn("cadre", stderr_buf.getvalue())
+        seed_mock.assert_called_once_with(Path(rv.__file__).resolve().parents[1], Path("/fake/cadre"))
 
 
 # ---------------------------------------------------------------------------

@@ -72,14 +72,14 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
     if path is None:
         env = os.getenv("CADRE_PALETTE")
         path = env if env else DEFAULT_PALETTE_PATH
-    resolved = Path(path).expanduser()
 
     try:
-        raw = resolved.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # UnicodeDecodeError (a non-UTF-8 / binary palette) is NOT an OSError subclass,
-        # so it must be caught here too — otherwise it escapes read_text and crashes the
-        # preview/validate gate. A corrupt palette degrades to "validation skipped".
+        # Path()/expanduser() can raise ValueError (an embedded NUL byte in the path) or
+        # TypeError (a non-str/Path) — both must degrade to None, not crash, to honor the
+        # never-raises contract. read_text adds OSError (missing/unreadable) and
+        # UnicodeDecodeError (a non-UTF-8 / binary palette, NOT an OSError subclass).
+        raw = Path(path).expanduser().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
         return None
 
     try:
@@ -279,12 +279,15 @@ def render_preview_warnings(
     the SAME ``⚠ fleet validation`` block as palette warnings and run regardless
     of whether the palette loaded (focus lint is palette-independent).
     """
-    # Resolve the path (for the "skipped" note — the user sees the path we tried).
-    if palette_path is None:
-        env = os.getenv("CADRE_PALETTE")
-        resolved_path = Path(env if env else DEFAULT_PALETTE_PATH).expanduser()
-    else:
-        resolved_path = Path(palette_path).expanduser()
+    # Resolve the path for the "skipped" note (the user sees the path we tried).
+    # Path()/expanduser() can raise ValueError/TypeError on a malformed path arg (e.g. an
+    # embedded NUL byte); fall back to the raw value rather than crash the preview
+    # (warn-never-block). It is _sanitize()d at the interpolation site below.
+    raw_path = palette_path if palette_path is not None else (os.getenv("CADRE_PALETTE") or DEFAULT_PALETTE_PATH)
+    try:
+        resolved_path = str(Path(raw_path).expanduser())
+    except (ValueError, TypeError):
+        resolved_path = str(raw_path)
 
     palette = load_palette(palette_path)
 

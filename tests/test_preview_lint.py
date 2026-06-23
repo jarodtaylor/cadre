@@ -1078,6 +1078,11 @@ class TestLoadPaletteNonUtf8(unittest.TestCase):
         path.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
         self.assertIsNone(load_palette(str(path)))
 
+    def test_nul_byte_path_returns_none(self):
+        # Path()/expanduser() raises ValueError on an embedded NUL — must degrade to None,
+        # not crash (the never-raises contract). Copilot finding.
+        self.assertIsNone(load_palette("/tmp/\x00bad-palette.yaml"))
+
 
 class TestPreviewWarningsSanitized(unittest.TestCase):
     """Fleet-controlled strings are sanitized in lint warnings — the preview/validate output
@@ -1109,6 +1114,17 @@ class TestPreviewWarningsSanitized(unittest.TestCase):
         # The embedded newline is stripped, so no standalone forged "[cadre] forged line".
         forged = [ln for ln in out.split("\n") if ln.strip() == "[cadre] forged line"]
         self.assertEqual(forged, [])
+
+    def test_nul_byte_path_arg_does_not_crash(self):
+        """A malformed palette_path (embedded NUL → ValueError from Path) degrades, never crashes.
+
+        Note: CADRE_PALETTE itself can't carry a NUL (os.environ rejects it at set time), so the
+        reachable vector is an explicit palette_path arg — the never-raises contract holds for it.
+        """
+        cfg = _make_focus_config(focus="cite a source with a link", toolset=["web"])  # lint-clean
+        out = render_preview_warnings(cfg, palette_path="/tmp/\x00bad")  # must not raise
+        self.assertIsInstance(out, str)
+        self.assertIn("validation skipped", out)
 
 
 if __name__ == "__main__":
