@@ -241,6 +241,13 @@ class TestConvergenceField(unittest.TestCase):
             FleetConfig.from_dict(make_data(convergence="bogus"))
         self.assertTrue(any("convergence" in e for e in ctx.exception.errors))
 
+    def test_non_string_convergence_accumulates_error_not_typeerror(self):
+        # A non-str (unhashable) convergence must accumulate a ConfigError, never raise
+        # TypeError on the set-membership check (the loader's malformed-input contract).
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(convergence=["collect"]))
+        self.assertTrue(any("convergence" in e for e in ctx.exception.errors))
+
     def test_collect_privileged_toolset_still_requires_optin(self):
         data = {
             "name": "collect-fleet",

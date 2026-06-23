@@ -63,18 +63,25 @@ def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
             src = repo_root / "fleets" / name
             dest = fleets_dir / dest_name
             try:
-                if dest.exists():
-                    print(f"[cadre] {dest_name}: exists — preserved", file=sys.stderr)
-                    continue
                 content = src.read_text(encoding="utf-8")
-                fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                # Atomic preserve-existing: O_EXCL fails if the destination already exists,
+                # closing the TOCTOU window a separate exists()-then-open had (which could
+                # truncate an operator-edited fleet); O_NOFOLLOW refuses to follow a symlink
+                # planted at the destination. Mirrors capture.prepare_run_dir's atomic
+                # reservation idiom.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(str(dest), flags, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(content)
                 dest.chmod(0o600)
                 print(f"[cadre] seeded {dest_name}", file=sys.stderr)
+            except FileExistsError:
+                # Destination already exists (a regular file or a symlink) — preserve it.
+                print(f"[cadre] {dest_name}: exists — preserved", file=sys.stderr)
             except (OSError, UnicodeDecodeError) as exc:
-                # UnicodeDecodeError (a non-UTF-8 source) is not an OSError subclass; catch
-                # it too so the never-raises contract holds for a corrupt source file.
+                # UnicodeDecodeError (a non-UTF-8 source) is not an OSError subclass; catch it
+                # too so the never-raises contract holds. ELOOP from O_NOFOLLOW on a symlink
+                # also lands here — warned and skipped, never followed.
                 print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
                 continue
     finally:

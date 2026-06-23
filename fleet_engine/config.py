@@ -101,7 +101,10 @@ class FleetConfig:
             allow_priv = allow_priv_raw
 
         conv_raw = data.get("convergence", "synthesize")
-        if conv_raw not in {"synthesize", "collect"}:
+        # isinstance guard FIRST: a non-str value (e.g. `convergence: [collect]`) is
+        # unhashable and would raise TypeError on the set membership test — accumulate a
+        # ConfigError instead, honoring the loader's malformed-input-never-tracebacks contract.
+        if not isinstance(conv_raw, str) or conv_raw not in {"synthesize", "collect"}:
             errors.append("`convergence` must be one of: synthesize, collect")
             convergence = "synthesize"
         else:

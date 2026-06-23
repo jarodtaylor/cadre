@@ -387,6 +387,17 @@ class TestSeedStarterFleets(unittest.TestCase):
         # The undecodable source was skipped — no destination written.
         self.assertFalse((self.cadre_home / "fleets" / "research-swarm.yaml").exists())
 
+    def test_symlink_at_destination_not_followed(self):
+        """A symlink planted at the destination is not followed/overwritten (O_EXCL/O_NOFOLLOW)."""
+        fleets_dir = self.cadre_home / "fleets"
+        fleets_dir.mkdir(mode=0o700, exist_ok=True)
+        sentinel = self.cadre_home / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET")
+        (fleets_dir / "research-swarm.yaml").symlink_to(sentinel)
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)  # must not raise
+        # The symlink target is untouched — seeding refused to follow the link and write through.
+        self.assertEqual(sentinel.read_text(), "OPERATOR SECRET")
+
     def test_palette_not_seeded(self):
         """palette.yaml and palette.example.yaml must NOT be seeded."""
         rv.seed_starter_fleets(self.repo_root, self.cadre_home)

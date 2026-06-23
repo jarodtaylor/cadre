@@ -1098,6 +1098,18 @@ class TestPreviewWarningsSanitized(unittest.TestCase):
         self.assertTrue(warnings, "ungrounded retrieval lane should warn")
         self.assertNotIn("\x1b", "\n".join(warnings))
 
+    def test_env_palette_path_sanitized_in_skipped_note(self):
+        """A CADRE_PALETTE path with a newline/escape can't forge a line on the approval surface."""
+        cfg = _make_focus_config(focus="cite a source with a link", toolset=["web"])  # lint-clean
+        evil = "/tmp/nope\n[cadre] forged line\x1b[2K"
+        with patch.dict(os.environ, {"CADRE_PALETTE": evil}):
+            out = render_preview_warnings(cfg)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\r", out)
+        # The embedded newline is stripped, so no standalone forged "[cadre] forged line".
+        forged = [ln for ln in out.split("\n") if ln.strip() == "[cadre] forged line"]
+        self.assertEqual(forged, [])
+
 
 if __name__ == "__main__":
     unittest.main()
