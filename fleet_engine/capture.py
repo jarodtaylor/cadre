@@ -3,9 +3,17 @@
 This is a caller-layer module: imported only by cli.py and skills/cadre-fleet/run.py.
 NEVER imported by engine.py or model_client.py — the engine holds no file I/O.
 
-``save_run`` takes a resolved ``run_dir: Path`` injected by the caller (U3 owns the
-fail-fast writability check and env-var resolution). Tests drive ``save_run`` with a
-``tempfile.mkdtemp()`` dir and never touch ``~/.cadre``.
+Incremental capture split (U3):
+  ``lane_filename_map(roles)`` pre-computes the role→filename map once, using the same
+  stateful dedup that ``save_run`` used before the split.
+
+  ``save_lane(lane, filename, run_dir)`` writes one specialist's ``.md`` the moment its
+  lane finishes (called by the edge on each ``LaneDone`` event, R11).
+
+  ``save_run(cfg, result, run_dir)`` now writes ONLY ``synthesis.md`` + ``manifest.json``
+  (the run-completion marker). In a live run, per-lane files are already written by the
+  time ``save_run`` runs; in a ``save_run``-only unit test they won't pre-exist — that is
+  expected, the manifest still names them. ``prompt.txt`` moved to the edge (R2, U4).
 
 ``resolve_run_dir(task)`` is a PURE path resolver: returns ``CADRE_RUN_DIR``
 (expanduser) when that env var is set, else ``~/.cadre/runs/<YYYY-MM-DD-HHMMSS>-<slug>``.
@@ -175,40 +183,35 @@ def prepare_run_dir(task: str, run_dir: Path | None = None) -> Path:
     return run_dir
 
 
-def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
-    """Write a complete run folder into ``run_dir``.
+def lane_filename_map(roles: list[str]) -> dict[str, str]:
+    """Return a deterministic role→filename map for the given specialist roles.
 
-    Creates the ``run_dir`` leaf if missing, owner-only (0o700). All artifact
-    files are written owner-only (0o600). The synthesizer is represented at run
-    level only (synth_ok + synthesis.md), never as a per-lane entry.
+    Runs the same stateful dedup loop ``save_run`` used before the U3 split, so
+    the filenames are identical to what ``save_run`` previously wrote on disk.
+    Two distinct roles that collide under ``_safe_role`` (e.g. 'a/b' and 'a:b'
+    both → 'a-b') get 'specialist-a-b.md' and 'specialist-a-b-2.md'.
 
-    ``manifest.json`` is written LAST intentionally — it serves as a
-    run-completion marker.  A reader can treat its absence as a partial or
-    failed write.
+    The map is keyed by the TRUE role (never the safe variant) so look-up is
+    injective and callers can index by role regardless of the sanitized form.
+    Roles are guaranteed unique per fleet (config validates), so this is safe.
 
-    Specialist filenames are deduplicated after ``_safe_role`` sanitization:
-    if two distinct roles reduce to the same safe name (e.g. 'a/b' and 'a:b'
-    both → 'a-b'), the second gets '-2', the third '-3', etc.  The actual
-    written filename is recorded in the manifest lane under the ``"file"`` key.
+    The map is computed once over the full specialist list before lanes launch,
+    and is shared by both the per-lane writer (``save_lane``, called on each
+    LaneDone) and the manifest builder (``save_run``).  Both reading the same
+    pre-computed map means no lock is needed — each lane writes a distinct,
+    pre-mapped file (KTD3 / atomic-reservation learning).
 
     Args:
-        cfg: The validated fleet configuration for this run.
-        result: The FleetResult returned by run_fleet.
-        run_dir: The directory to write artifacts into (injected — caller resolves).
+        roles: Specialist roles in config order (``[spec.role for spec in fleet]``).
+
+    Returns:
+        ``{"web": "specialist-web.md", "a/b": "specialist-a-b.md", ...}``
     """
-    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-    # prompt.txt — the task that drove this run.
-    _write(run_dir / "prompt.txt", result.task)
-
-    # One markdown file per specialist (success and failure alike).
-    # _safe_role sanitizes the role for the FILENAME ONLY; the markdown content
-    # and manifest always use the true (un-sanitized) lane.role.
-    # Track used filenames (stem only) to disambiguate sanitization collisions.
     used_stems: set[str] = set()
-    lane_filenames: list[str] = []
-    for lane in result.specialists:
-        stem = f"specialist-{_safe_role(lane.role)}"
+    # Local name avoids the module's `result` (a FleetResult) convention.
+    mapping: dict[str, str] = {}
+    for role in roles:
+        stem = f"specialist-{_safe_role(role)}"
         if stem not in used_stems:
             used_stems.add(stem)
             filename = f"{stem}.md"
@@ -219,13 +222,82 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
             stem = f"{stem}-{counter}"
             used_stems.add(stem)
             filename = f"{stem}.md"
-        lane_filenames.append(filename)
-        _write(run_dir / filename, _specialist_md(lane))
+        mapping[role] = filename
+    return mapping
+
+
+def save_prompt(run_dir: Path, task: str) -> None:
+    """Write ``prompt.txt`` (the run's task) into ``run_dir``, owner-only (0o600).
+
+    Called by the edge BEFORE lanes launch (R2) — moved out of ``save_run`` in the
+    U3 split so the run folder carries the task from the very start of a run, even
+    if the run later crashes before ``save_run`` writes the manifest. Mirrors
+    ``save_lane``'s mkdir so it lands whether or not the folder exists yet.
+    """
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write(run_dir / "prompt.txt", task)
+
+
+def save_lane(lane, filename: str, run_dir: Path) -> None:  # lane: AgentResult
+    """Write one specialist's ``.md`` the moment its lane finishes (R11).
+
+    The edge calls this on each ``LaneDone`` event (capture on).  ``filename``
+    comes from ``lane_filename_map`` — pre-computed over the full specialist list
+    before any lanes launched, so each lane owns a distinct, pre-mapped file and
+    no lock is needed (KTD3).
+
+    Creates ``run_dir`` if it does not yet exist (mirrors ``save_run``'s mkdir so
+    a lane-done arriving before ``save_run`` still lands safely).
+
+    Args:
+        lane:     An ``AgentResult`` from the engine (the ``LaneDone.result``).
+        filename: The pre-computed filename from ``lane_filename_map``.
+        run_dir:  The run directory (injected — same as ``save_run``'s run_dir).
+    """
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write(run_dir / filename, _specialist_md(lane))
+
+
+def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
+    """Write ``synthesis.md`` and ``manifest.json`` into ``run_dir`` (run-completion step).
+
+    In a live run the edge has already written each specialist's ``.md`` via
+    ``save_lane`` on each ``LaneDone`` event; ``save_run`` is called at the end
+    to write the two run-wide artifacts.  In a ``save_run``-only unit test (no
+    edge, no ``save_lane`` calls) the per-lane files won't pre-exist — that is
+    expected; the manifest still names them.
+
+    ``prompt.txt`` is written by the edge before lanes launch (R2, U4) — NOT here.
+
+    ``manifest.json`` is written LAST intentionally — it serves as a
+    run-completion marker.  A reader can treat its absence as a partial or
+    failed write.
+
+    The manifest's ``lanes[].file`` values come from ``lane_filename_map`` so
+    they match exactly what ``save_lane`` wrote (or would write).
+
+    The synthesizer is represented at run level only (synth_ok + synthesis.md),
+    never as a per-lane entry.
+
+    Args:
+        cfg: The validated fleet configuration for this run.
+        result: The FleetResult returned by run_fleet.
+        run_dir: The directory to write artifacts into (injected — caller resolves).
+    """
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    # Build the role→filename map from cfg.specialists — the SAME config-order source
+    # the edge used for save_lane — so the manifest's lanes[].file always match the
+    # on-disk filenames, by construction rather than by relying on result.specialists
+    # happening to be config-ordered (matters only when two roles collide under
+    # _safe_role and the -2 suffix would otherwise flip).
+    fmap = lane_filename_map([spec.role for spec in cfg.specialists])
+    lane_filenames = [fmap[lane.role] for lane in result.specialists]
 
     # synthesis.md — the synthesized output, or a failure note.
     _write(run_dir / "synthesis.md", _synthesis_md(result))
 
-    # manifest.json — structured run-health record.
+    # manifest.json — structured run-health record (written LAST as completion marker).
     _write(
         run_dir / "manifest.json",
         json.dumps(_build_manifest(cfg, result, lane_filenames), indent=2),

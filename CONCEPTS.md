@@ -12,6 +12,11 @@ A fleet is created per task and torn down on completion; it carries no state bet
 ### Specialist
 One stateless agent within a fleet — a role, a provider, a model, a toolset, and a focus — run once on the task. Specialists run concurrently and independently, and each may use a different model and provider.
 
+### Lane
+The runtime execution of one specialist within a fan-out run — its concurrent worker, its outcome (success, failure, or timeout), its elapsed time, and the artifact it produces. *Specialist* names the configured participant; *Lane* names that participant actually running.
+
+A Lane counts as completed once its worker reports a result, even if the engine reads that result slightly after the shared deadline; only a Lane whose worker never reports by the deadline is a timeout. Each Lane's artifact is written the moment the Lane finishes, not at the end of the run.
+
 ### Focus
 The role-specific instruction that tells a specialist what to investigate and how to ground its output.
 

@@ -69,5 +69,6 @@ Closure gotcha: build each thunk in its own frame (a helper that takes `spec` an
 A subprocess test is what actually guards the exit property: an in-process test can prove "returns within N seconds" but cannot observe interpreter shutdown, so a silent revert to `ThreadPoolExecutor` would stay green. Run `run_fleet` with a hung call in a child process and assert it exits.
 
 ## Related
+- [Decouple a deadline from callback latency](decouple-timeout-from-callback-latency.md) — the collection-side companion: once you fan out across daemon threads, don't let the drain's per-result callback latency starve already-finished lanes into false timeouts.
 - [Empty toolset collapsed to ALL tools](../security-issues/empty-toolset-collapsed-to-all-tools.md) — another lesson from the same engine-hardening pass.
-- Implemented in `fleet_engine/engine.py` (`run_fleet`, `_start_daemon`, `_collect`); guarded by `tests/test_engine.py` (`TestCleanExitOnHang`).
+- Implemented in `fleet_engine/engine.py` (the daemon fan-out — `_start_lane`/`_fan_out` for specialists, `_start_daemon`/`_collect` for the synthesizer); guarded by `tests/test_engine.py` (`TestCleanExitOnHang`).

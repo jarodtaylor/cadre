@@ -12,14 +12,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
 from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
-from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import ModelClient
-from fleet_engine.render import render_result
+from fleet_engine.progress_runner import run_with_progress
+from fleet_engine.render import _sanitize, render_result
 
 
 def validate_command(path: str) -> tuple[int, str]:
@@ -43,6 +44,7 @@ def run_command(
     *,
     run_dir: Path | None = None,
     capture: bool = True,
+    progress_stream=None,
 ) -> tuple[int, str]:
     """Load the fleet spec and run it on ``task``.
 
@@ -77,7 +79,13 @@ def run_command(
                 "Use --no-capture to bypass run capture.",
             )
 
-    result = run_fleet(cfg, task, client or ModelClient())
+    result = run_with_progress(
+        cfg,
+        task,
+        client or ModelClient(),
+        run_dir=run_dir if capture else None,
+        progress_stream=progress_stream,
+    )
     output = render_result(result)
     exit_code = 0 if result.ok else 1
 
@@ -86,7 +94,13 @@ def run_command(
             save_run(cfg, result, run_dir)
             output = f"{output}\n\nRun folder: {run_dir}"
         except Exception as exc:  # noqa: BLE001
-            print(f"Warning: failed to save run artifacts: {exc}", file=sys.stderr)
+            # Best-effort warning on the [cadre] stream: route to the SAME stream as the
+            # breadcrumbs (progress_stream), sanitize the exception text (a run_dir in
+            # the message could carry control bytes that forge a line), and never let a
+            # dead stream turn a save_run failure into a lost report.
+            warn_stream = progress_stream if progress_stream is not None else sys.stderr
+            with contextlib.suppress(OSError, ValueError):
+                print(f"[cadre] warn: failed to save run artifacts: {_sanitize(str(exc))}", file=warn_stream)
 
     return exit_code, output
 
