@@ -356,10 +356,13 @@ class ProgressRenderer:
     def _format(self, event: ProgressEvent) -> Optional[str]:
         """Return the ``[cadre] …`` line for ``event``, or ``None`` to skip.
 
-        All config-sourced identity strings (fleet name, role) are sanitised
-        before interpolation.  Internal labels, counts, elapsed times, paths,
-        and pre-computed filenames are NOT sanitised — they are either our own
-        strings or filesystem-safe by construction.
+        Every interpolated string that originates outside this renderer is passed
+        through ``_sanitize()`` before it reaches the line: config-sourced identity
+        fields (fleet name, role), caller/env-supplied paths (run folder, run_dir),
+        and the resolved artifact filename. The breadcrumb is a control stream an
+        agent parses, so nothing external may carry a newline or escape into it.
+        Only our OWN strings and numbers — the internal outcome labels, counts, and
+        elapsed times — are interpolated unsanitised.
         """
         if isinstance(event, Validated):
             name = _sanitize(event.fleet)

@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import shutil
 import stat
 import sys
@@ -869,6 +870,33 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
         prog_text = prog.getvalue()
         self.assertIn("[cadre] warn:", prog_text, "the failure is warned on the [cadre] stream")
         self.assertIn("web", prog_text)
+
+
+class TestLaneArtifactWrittenBeforeBreadcrumb(unittest.TestCase):
+    """The 'lane … -> specialist-X.md' breadcrumb is emitted only AFTER the artifact
+    is on disk, so a supervisor that parses the breadcrumb can rely on the file being
+    there (Copilot review)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_artifact_exists_when_its_breadcrumb_is_emitted(self):
+        run_dir = self.tmp / "r"
+        violations = []
+
+        class CheckingStream:
+            def write(self, s):
+                m = re.search(r"-> (specialist-[\w.-]+\.md)", s)
+                if m and not (run_dir / m.group(1)).exists():
+                    violations.append(s.strip())
+
+            def flush(self):
+                pass
+
+        client = FakeClient({"synthesizer": ("ok", "S")})
+        run_command(EXAMPLE, "task", client=client, run_dir=run_dir, progress_stream=CheckingStream())
+        self.assertEqual(violations, [], f"breadcrumb named a not-yet-written artifact: {violations}")
 
 
 class TestSkillProgressStreamSplit(unittest.TestCase):

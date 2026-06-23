@@ -63,14 +63,16 @@ def run_with_progress(
 
     def hook(event):
         # Called only from the engine's single drainer/main thread — never a worker.
-        renderer.emit(event)
+        # Write the per-lane artifact BEFORE emitting its breadcrumb, so the
+        # "lane … -> <file>" line a supervisor parses reliably means the file is
+        # already on disk (success case). A write failure is collected and warned
+        # later — it must not crash the run.
         if capture and isinstance(event, LaneDone):
             try:
                 save_lane(event.result, fmap[event.result.role], run_dir)
             except Exception as exc:  # noqa: BLE001
-                # A per-lane write failure must not crash the run. Collect it and warn
-                # after the heartbeat stops; save_run still attempts the manifest.
                 capture_errors.append((event.result.role, exc))
+        renderer.emit(event)
 
     renderer.emit(Validated(fleet=cfg.name, specialists=len(cfg.specialists)))
     if capture:
