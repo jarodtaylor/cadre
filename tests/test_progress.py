@@ -290,5 +290,124 @@ class TestEnginePurity(unittest.TestCase):
                 )
 
 
+# ---------------------------------------------------------------------------
+# U4 (fleet-shapes): Validated breadcrumb synthesizer count — collect vs synthesize
+# ---------------------------------------------------------------------------
+
+
+class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
+    """run_with_progress emits Validated with synthesizers=0 for collect, 1 for synthesize."""
+
+    def _run_and_get_progress(self, cfg):
+        """Run run_with_progress with a FakeClient and capture the progress stream."""
+        from io import StringIO
+        from fleet_engine.progress_runner import run_with_progress
+        prog = StringIO()
+        run_with_progress(cfg, "test task", FakeClient({"synthesizer": ("ok", "S")}),
+                          run_dir=None, progress_stream=prog)
+        return prog.getvalue()
+
+    def _collect_config(self):
+        return FleetConfig.from_dict({
+            "name": "collect-fleet",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+            ],
+        })
+
+    def _synthesize_config(self):
+        return FleetConfig.from_dict({
+            "name": "synth-fleet",
+            "convergence": "synthesize",
+            "synthesis": {"provider": "openrouter", "model": "synth/model"},
+            "specialists": [
+                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+            ],
+        })
+
+    def test_collect_validated_breadcrumb_reports_zero_synthesizers(self):
+        """A collect fleet's Validated breadcrumb reports 0 synthesizer(s)."""
+        text = self._run_and_get_progress(self._collect_config())
+        self.assertIn("0 synthesizer(s)", text)
+
+    def test_synthesize_validated_breadcrumb_reports_one_synthesizer(self):
+        """A synthesize fleet's Validated breadcrumb still reports 1 synthesizer(s)."""
+        text = self._run_and_get_progress(self._synthesize_config())
+        self.assertIn("1 synthesizer(s)", text)
+
+    def test_collect_validated_event_synthesizers_is_zero(self):
+        """run_with_progress emits a Validated event with synthesizers=0 for collect."""
+        from fleet_engine.progress import Validated
+        from fleet_engine.progress_runner import run_with_progress
+        emitted = []
+
+        def capturing_hook(event):
+            emitted.append(event)
+
+        # Patch ProgressRenderer to capture the Validated event directly.
+        # We drive run_with_progress and intercept the emitted Validated events.
+        from unittest.mock import patch as _patch
+
+        validated_events = []
+
+        class CapturingRenderer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def emit(self, event):
+                if isinstance(event, Validated):
+                    validated_events.append(event)
+
+            def start_heartbeat(self):
+                pass
+
+            def stop_heartbeat(self):
+                pass
+
+            def note(self, _msg):
+                pass
+
+        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+            run_with_progress(self._collect_config(), "task", FakeClient(),
+                              run_dir=None, progress_stream=None)
+
+        self.assertTrue(validated_events, "no Validated event was emitted")
+        self.assertEqual(validated_events[0].synthesizers, 0)
+
+    def test_synthesize_validated_event_synthesizers_is_one(self):
+        """run_with_progress emits a Validated event with synthesizers=1 for synthesize."""
+        from fleet_engine.progress import Validated
+        from fleet_engine.progress_runner import run_with_progress
+        from unittest.mock import patch as _patch
+
+        validated_events = []
+
+        class CapturingRenderer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def emit(self, event):
+                if isinstance(event, Validated):
+                    validated_events.append(event)
+
+            def start_heartbeat(self):
+                pass
+
+            def stop_heartbeat(self):
+                pass
+
+            def note(self, _msg):
+                pass
+
+        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+            run_with_progress(self._synthesize_config(), "task",
+                              FakeClient({"synthesizer": ("ok", "S")}),
+                              run_dir=None, progress_stream=None)
+
+        self.assertTrue(validated_events, "no Validated event was emitted")
+        self.assertEqual(validated_events[0].synthesizers, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

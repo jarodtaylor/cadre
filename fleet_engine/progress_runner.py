@@ -74,7 +74,13 @@ def run_with_progress(
                 capture_errors.append((event.result.role, exc))
         renderer.emit(event)
 
-    renderer.emit(Validated(fleet=cfg.name, specialists=len(cfg.specialists)))
+    # Key on cfg.convergence (KTD1): a collect fleet runs no synthesizer regardless of
+    # whether a stray synthesis block is present in the config.
+    renderer.emit(Validated(
+        fleet=cfg.name,
+        specialists=len(cfg.specialists),
+        synthesizers=0 if cfg.convergence == "collect" else 1,
+    ))
     if capture:
         renderer.emit(RunFolder(path=str(run_dir)))
         try:

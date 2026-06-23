@@ -345,7 +345,22 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
 
 
 def _synthesis_md(result: FleetResult) -> str:
-    """Synthesis markdown: the synthesis text, or an accurate failure note."""
+    """Synthesis markdown: the synthesis text, a collect summary, or an accurate failure note."""
+    # Collect mode: synthesis never ran by design — produce attributed specialist output.
+    # Check convergence FIRST so synthesize mode falls through to its existing branches.
+    if result.convergence == "collect":
+        successes = result.successes
+        if successes:
+            blocks = [
+                f"--- {lane.role} ({lane.provider}/{lane.model}) ---\n{lane.text or ''}"
+                for lane in successes
+            ]
+            return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
+        # All specialists failed in collect mode.
+        n = len(result.specialists)
+        return f"No specialist outputs — all {n} specialists failed (collect mode)."
+
+    # Synthesize mode: existing logic unchanged.
     if result.synthesis is not None:
         return result.synthesis
 
@@ -398,7 +413,11 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "task": result.task,
         "timestamp": datetime.now().isoformat(),
         "models": participating_models,
-        "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
+        # Null-guard: a collect fleet has no synthesizer (cfg.synthesis may be None).
+        # Key on convergence (KTD1) — not cfg.synthesis, which can be present in a
+        # collect fleet that carries a stray synthesis block.
+        "synthesizer": None if result.convergence == "collect" else {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
+        "convergence": result.convergence,
         "synth_ok": result.synth_ok,
         "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),
         "lanes": lanes,

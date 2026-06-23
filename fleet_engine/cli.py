@@ -33,7 +33,10 @@ def validate_command(path: str) -> tuple[int, str]:
     lines = [f"OK: {cfg.name}", f"  specialists: {len(cfg.specialists)}"]
     for s in cfg.specialists:
         lines.append(f"    - {s.role}: {s.provider}/{s.model} tools={s.toolset}")
-    lines.append(f"  synthesis: {cfg.synthesis.provider}/{cfg.synthesis.model}")
+    if cfg.convergence == "collect":
+        lines.append("  convergence: collect (no synthesizer)")
+    else:
+        lines.append(f"  synthesis: {cfg.synthesis.provider}/{cfg.synthesis.model}")
     return 0, "\n".join(lines)
 
 
