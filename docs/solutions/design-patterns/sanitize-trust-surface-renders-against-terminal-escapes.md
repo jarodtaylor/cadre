@@ -1,7 +1,7 @@
 ---
 title: "Sanitize attacker-controlled fields in a render that IS a human-approval control"
 date: 2026-06-19
-last_updated: 2026-06-19
+last_updated: 2026-06-23
 category: design-patterns
 module: fleet_engine
 problem_type: design_pattern
@@ -11,7 +11,9 @@ applies_when:
   - "A rendered output is itself a security control — a human approves what it shows before an action runs"
   - "That render includes fields an attacker can influence (config, file contents, model output, user input)"
   - "The output is shown in a terminal or any sink that interprets control/escape sequences"
-tags: [security, terminal-escapes, sanitization, trust-boundary, human-in-the-loop, preview, ansi]
+  - "You are ADDING a new surface (a warning, summary, or log line) that renders the same untrusted data — it inherits every obligation below"
+  - "Malformed/untrusted input could make the approval surface CRASH, not just spoof — a gate that tracebacks is also a failed control"
+tags: [security, terminal-escapes, sanitization, trust-boundary, human-in-the-loop, preview, ansi, malformed-input, degrade-gracefully, fail-safe]
 ---
 
 # Sanitize attacker-controlled fields in a render that IS a human-approval control
@@ -38,10 +40,11 @@ def _sanitize(text: str, *, multiline: bool = False) -> str:
 
 Apply it to *each* attacker-controlled field; keep your own labels and warnings as separate, un-tainted strings so they can't be hidden. Drop newlines in single-line fields so a field can't inject a fake line; preserve them only where multi-line text is expected. You do **not** need a full ANSI parser — dropping the ESC byte alone neutralizes the sequence.
 
-### Two completeness traps (both bit Cadre — caught by an adversarial review pass)
+### Three completeness traps (each bit Cadre — caught by successive review passes)
 
-1. **Sibling surfaces.** Cover *every* surface that renders the same attacker-controlled data, not just the one where the bug was first found. Cadre hardened the *preview* (`render_fleet_preview`) but left the symmetric post-run output (`render_result`) — which renders the same config-derived `role`/`provider`/`model` and is what the agent weaves back as its honesty signal — unsanitized, so a tampered fleet could forge a `[ok  ] ghost (x/y)` provenance row. When you add sanitization, grep for *every* reader of those fields and treat them as one unit.
+1. **Sibling surfaces.** Cover *every* surface that renders the same attacker-controlled data, not just the one where the bug was first found. Cadre hardened the *preview* (`render_fleet_preview`) but left the symmetric post-run output (`render_result`) — which renders the same config-derived `role`/`provider`/`model` and is what the agent weaves back as its honesty signal — unsanitized, so a tampered fleet could forge a `[ok  ] ghost (x/y)` provenance row. When you add sanitization, grep for *every* reader of those fields and treat them as one unit. **This recurs — treat it as a property of the surface, not a per-field fix.** A later change (PR #21) added a *new* warning surface (the `preview_lint` palette/focus warnings, printed on the same `--preview`/`validate` output) and re-introduced raw interpolation — and this time the unsanitized vector included an env-derived *path* (`CADRE_PALETTE`), not just fleet fields. Three separate review passes (persona, cross-model, PR bots) each found a *different* unguarded spot on the same surface. Piecemeal per-field patching guarantees the next reviewer finds another hole; funnel every external string the surface prints through one sanitizing chokepoint.
 2. **Beyond C0/C1.** Stripping ASCII control bytes (C0 `0x00–0x1F`, DEL, C1 `0x80–0x9F`) is necessary but not sufficient: Unicode line/paragraph separators (U+2028, U+2029) and bidi format controls (U+202A–U+202E, U+2066–U+2069) sit at code points `>= 0xA0` and sail through a naive "keep `>= 0xA0`" allowance, re-enabling the fake-line / display-spoof. Exclude them explicitly.
+3. **Spoofing isn't the only failure — the surface must also never *crash*.** A trust/approval gate that tracebacks on malformed input is as broken as one that's spoofed: the human never gets their go/no-go. The same fields and env inputs that carry escapes can also be *malformed* — non-UTF-8 bytes, an embedded NUL (`Path(...)` raises `ValueError`), or a YAML value of the wrong type (a list where a string is expected → `TypeError` on a set-membership test). Every external read that feeds the surface must **degrade, never raise**: catch the structural errors (`OSError`, `UnicodeDecodeError`, `ValueError`, `TypeError`) and fall back to a safe placeholder / "validation skipped", exactly as the escape-sanitizer falls back to inert text. In PR #21 this one surface drew a spoof finding *and* three independent crash findings (malformed `convergence`, a non-UTF-8 palette, a NUL in a path) — one each from the persona review, the cross-model pass, and the PR bots.
 
 ### Draw the boundary at config-vs-content
 
@@ -81,4 +84,5 @@ Test the control, not just the formatter: assert that an ESC/CR in a field canno
 
 - `docs/solutions/security-issues/empty-toolset-collapsed-to-all-tools.md` — another case where an attacker-controlled boundary in the same surface bypassed a stated control.
 - `docs/solutions/design-patterns/fail-closed-allowlist-for-capability-gates.md` — the config-level gate the preview visually represents.
+- `docs/solutions/design-patterns/enumerate-consumers-when-a-new-value-aliases-a-load-bearing-state.md` — the same "grep for every reader/consumer and treat them as one unit" discipline, applied to a result field instead of a render surface.
 - GitHub issue #5 — the deferred security pass (a non-forgeable, preview-bound approval artifact; live toolset verification).
