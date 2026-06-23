@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,25 @@ from fleet_engine.cli import run_command, validate_command
 from fleet_engine.model_client import AgentResult
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
+
+# A real run now streams [cadre] progress breadcrumbs to sys.stderr — the same
+# stream unittest uses for its own dots/summary. No test in this module asserts on
+# stderr, so silence it module-wide to keep the suite output clean. Tests that need
+# to inspect progress pass an explicit progress_stream (cli) or redirect_stderr
+# locally (skill). The runner captured the real stderr before setUpModule ran, so
+# failure output is unaffected.
+_REAL_STDERR = None
+
+
+def setUpModule():
+    global _REAL_STDERR
+    _REAL_STDERR = sys.stderr
+    sys.stderr = io.StringIO()
+
+
+def tearDownModule():
+    if _REAL_STDERR is not None:
+        sys.stderr = _REAL_STDERR
 
 
 def _tmp_yaml(text):
@@ -661,6 +681,131 @@ class TestSkillArbitraryFleet(unittest.TestCase):
                 ])
         self.assertEqual(code, 0)
         self.assertTrue((run_dir / "manifest.json").exists())
+
+
+# ---------------------------------------------------------------------------
+# U4: live progress wiring — stream split (R9), edge events, full-folder integration
+# ---------------------------------------------------------------------------
+
+
+class TestRunCommandProgressStreamSplit(unittest.TestCase):
+    """run_command puts the report on stdout (the returned output) and every [cadre]
+    progress line on the injected progress_stream (stderr) — cleanly separable (R9)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_report_clean_of_progress_and_progress_has_breadcrumbs(self):
+        # Covers AE1.
+        prog = io.StringIO()
+        client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
+        code, output = run_command(
+            EXAMPLE, "find tools", client=client,
+            run_dir=self.tmp / "r", progress_stream=prog,
+        )
+        self.assertEqual(code, 0)
+        # Report (stdout) carries the synthesis and NO breadcrumbs.
+        self.assertIn("THE REPORT", output)
+        self.assertNotIn("[cadre]", output)
+        # Progress (stderr) carries the breadcrumbs and NOT the synthesis body.
+        prog_text = prog.getvalue()
+        self.assertIn("[cadre] validated fleet", prog_text)
+        self.assertIn("[cadre] lane ", prog_text)
+        self.assertIn("[cadre] done in", prog_text)
+        self.assertNotIn("THE REPORT", prog_text)
+
+    def test_validated_and_run_folder_emitted_before_lanes(self):
+        prog = io.StringIO()
+        client = FakeClient({"synthesizer": ("ok", "S")})
+        run_command(EXAMPLE, "task", client=client, run_dir=self.tmp / "r", progress_stream=prog)
+        text = prog.getvalue()
+        first_lane_at = text.index("[cadre] lane ")
+        self.assertLess(text.index("validated fleet"), first_lane_at, "validated before any lane")
+        self.assertLess(text.index("run folder:"), first_lane_at, "run folder before any lane")
+
+    def test_completion_shows_total_and_run_folder(self):
+        prog = io.StringIO()
+        run_dir = self.tmp / "r"
+        run_command(EXAMPLE, "task", client=FakeClient({"synthesizer": ("ok", "S")}),
+                    run_dir=run_dir, progress_stream=prog)
+        text = prog.getvalue()
+        self.assertRegex(text, r"\[cadre\] done in \d+\.\d+s")
+        self.assertIn(str(run_dir), text)  # completion names the run folder
+
+    def test_no_capture_narrates_without_paths(self):
+        # Covers AE5.
+        prog = io.StringIO()
+        code, _out = run_command(
+            EXAMPLE, "task", client=FakeClient({"synthesizer": ("ok", "S")}),
+            capture=False, progress_stream=prog,
+        )
+        self.assertEqual(code, 0)
+        text = prog.getvalue()
+        self.assertIn("[cadre] lane ", text)        # lanes still narrated
+        self.assertNotIn("run folder", text)         # but no run-folder line (R13)
+        self.assertNotIn("-> specialist-", text)     # and no per-lane artifact path
+
+
+class TestRunCommandWritesCompleteFolder(unittest.TestCase):
+    """U4 reconnects the per-lane writes U3 moved to the edge: a captured run now
+    produces the COMPLETE folder — prompt.txt up front + per-lane files written
+    incrementally + synthesis.md + manifest.json."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_full_folder_written(self):
+        run_dir = self.tmp / "run"
+        code, _out = run_command(
+            EXAMPLE, "find best tools", client=FakeClient({"synthesizer": ("ok", "SYNTH")}),
+            run_dir=run_dir, progress_stream=io.StringIO(),
+        )
+        self.assertEqual(code, 0)
+        for fname in ("prompt.txt", "specialist-social.md", "specialist-web.md",
+                      "specialist-analysis.md", "synthesis.md", "manifest.json"):
+            self.assertTrue((run_dir / fname).exists(), f"missing artifact: {fname}")
+
+    def test_prompt_txt_written_up_front_with_task(self):
+        run_dir = self.tmp / "run2"
+        run_command(EXAMPLE, "my exact task", client=FakeClient({"synthesizer": ("ok", "S")}),
+                    run_dir=run_dir, progress_stream=io.StringIO())
+        self.assertEqual((run_dir / "prompt.txt").read_text(encoding="utf-8"), "my exact task")
+
+    def test_no_leaked_heartbeat_thread(self):
+        run_dir = self.tmp / "run3"
+        run_command(EXAMPLE, "task", client=FakeClient({"synthesizer": ("ok", "S")}),
+                    run_dir=run_dir, progress_stream=io.StringIO())
+        alive = [t for t in threading.enumerate() if t.name == "cadre-heartbeat" and t.is_alive()]
+        self.assertEqual(alive, [], "heartbeat timer thread must be stopped after the run")
+
+
+class TestSkillProgressStreamSplit(unittest.TestCase):
+    """The skill entry (run.py) puts the report on stdout and [cadre] progress on
+    stderr, and writes the complete run folder — via the by-path skill loader."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_mod = _load_skill_module()
+
+    def test_report_stdout_progress_stderr_and_full_folder(self):
+        fake = FakeClient({"synthesizer": ("ok", "SKILL REPORT")})
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.tmp)}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "what is best?"])
+        self.assertEqual(code, 0)
+        # Report on stdout, breadcrumbs on stderr — cleanly separated.
+        self.assertIn("SKILL REPORT", out_buf.getvalue())
+        self.assertNotIn("[cadre]", out_buf.getvalue())
+        self.assertIn("[cadre]", err_buf.getvalue())
+        self.assertNotIn("SKILL REPORT", err_buf.getvalue())
+        # Complete folder written (prompt up front + per-lane + synth + manifest).
+        for fname in ("prompt.txt", "specialist-web.md", "synthesis.md", "manifest.json"):
+            self.assertTrue((self.tmp / fname).exists(), f"missing: {fname}")
 
 
 if __name__ == "__main__":

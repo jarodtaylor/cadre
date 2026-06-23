@@ -17,8 +17,8 @@ from pathlib import Path
 
 from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
-from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import ModelClient
+from fleet_engine.progress_runner import run_with_progress
 from fleet_engine.render import render_result
 
 
@@ -43,6 +43,7 @@ def run_command(
     *,
     run_dir: Path | None = None,
     capture: bool = True,
+    progress_stream=None,
 ) -> tuple[int, str]:
     """Load the fleet spec and run it on ``task``.
 
@@ -77,7 +78,13 @@ def run_command(
                 "Use --no-capture to bypass run capture.",
             )
 
-    result = run_fleet(cfg, task, client or ModelClient())
+    result = run_with_progress(
+        cfg,
+        task,
+        client or ModelClient(),
+        run_dir=run_dir if capture else None,
+        progress_stream=progress_stream,
+    )
     output = render_result(result)
     exit_code = 0 if result.ok else 1
 

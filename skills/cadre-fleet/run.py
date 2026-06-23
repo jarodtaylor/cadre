@@ -20,8 +20,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
-from fleet_engine.engine import run_fleet  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
+from fleet_engine.progress_runner import run_with_progress  # noqa: E402
 from fleet_engine.render import render_fleet_preview, render_result  # noqa: E402
 
 
@@ -96,7 +96,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    result = run_fleet(cfg, args.task, ModelClient())
+    result = run_with_progress(
+        cfg,
+        args.task,
+        ModelClient(),
+        run_dir=run_dir if capture else None,
+    )
     output = render_result(result)
 
     if capture:

@@ -225,6 +225,18 @@ def lane_filename_map(roles: list[str]) -> dict[str, str]:
     return result
 
 
+def save_prompt(run_dir: Path, task: str) -> None:
+    """Write ``prompt.txt`` (the run's task) into ``run_dir``, owner-only (0o600).
+
+    Called by the edge BEFORE lanes launch (R2) — moved out of ``save_run`` in the
+    U3 split so the run folder carries the task from the very start of a run, even
+    if the run later crashes before ``save_run`` writes the manifest. Mirrors
+    ``save_lane``'s mkdir so it lands whether or not the folder exists yet.
+    """
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write(run_dir / "prompt.txt", task)
+
+
 def save_lane(lane, filename: str, run_dir: Path) -> None:  # lane: AgentResult
     """Write one specialist's ``.md`` the moment its lane finishes (R11).
 
