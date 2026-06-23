@@ -9,11 +9,11 @@ The palette (``~/.cadre/palette.yaml``) is a timestamped snapshot of verified
 (provider, model) pairs and safe toolsets on the host. An absent pair may still
 resolve at runtime — this module warns, never blocks.
 
-U6 seam: ``render_preview_warnings`` is structured so focus-lint warnings
-(``check_focus_grounding``, to be added in U6) can be appended into the SAME
-``⚠ fleet validation`` header block. The U6 hook runs even when the palette is
-None (focus lint is palette-independent). See the comment in
-``render_preview_warnings`` marking the seam.
+Focus lint (``check_focus_grounding``) is palette-independent: it checks
+retrieval-toolset lanes for the absence of a sourcing directive. A focus that
+demands sources grounds the lane even when anti-grounding phrasing is also
+present (e.g. "breadth over depth" + "cite a primary source with a link" → no
+warn). See ``docs/solutions/design-patterns/specialist-focus-grounding-control.md``.
 """
 
 from __future__ import annotations
@@ -169,6 +169,78 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Focus-grounding lint (pure, no I/O) — U6
+# ---------------------------------------------------------------------------
+
+# Toolsets that perform live retrieval; a lane with these is subject to focus
+# grounding checks. Names are Hermes toolset identifiers (verified against
+# hermes-agent's toolsets.py and SAFE_TOOLSETS in config.py).
+RETRIEVAL_TOOLSETS = frozenset({"web", "search", "x_search", "exa", "firecrawl"})
+
+# Substrings that indicate a sourcing directive is present in the focus text.
+# Matched against the lowercased focus. "attribut" catches both "attribution"
+# and "attribute"; "source" catches "sources"/"unsourced"; "cite" catches
+# "cited"/"cites"/"citation" (but not "citation" via "cite" — include both).
+# Note: "source" also matches "resource"; acceptable given the conservative
+# direction (false-negative warn is worse than false-positive silence here).
+_SOURCING_TERMS = ("cite", "citation", "source", "link", "url", "primary source", "reference", "attribut")
+
+# Substrings that indicate anti-grounding intent (breadth/speed framing that
+# suppresses deep retrieval). Only consulted when NO sourcing term is present,
+# to choose the more specific warning copy.
+_ANTI_GROUNDING_TERMS = ("fast", "broad", "quick scan", "breadth over depth")
+
+# Appended to every focus-lint warning: the profile-scoped-tool caveat (KTD6).
+# Even a well-written focus runs ungrounded if the toolset isn't provisioned
+# in the active Hermes profile. See docs/RUNBOOK.md and
+# docs/solutions/integration-issues/hermes-tools-are-profile-scoped.md.
+_PROFILE_CAVEAT = (
+    "also ensure the toolset is provisioned in the active Hermes profile "
+    "(tools are profile-scoped — see docs/RUNBOOK.md)"
+)
+
+
+def check_focus_grounding(config: "FleetConfig") -> list[str]:
+    """Return warnings for retrieval-toolset lanes whose focus lacks sourcing language.
+
+    Pure (no I/O). A retrieval lane is any specialist whose toolset intersects
+    ``RETRIEVAL_TOOLSETS``. Lanes outside that set are not checked.
+
+    Warn logic (priority order):
+    1. If the lane's focus contains any ``_SOURCING_TERMS`` substring → grounded,
+       no warn (even when anti-grounding phrasing is also present).
+    2. If the lane's focus contains any ``_ANTI_GROUNDING_TERMS`` substring →
+       warn with the anti-grounding-specific copy (more urgent).
+    3. Otherwise → warn with the generic "no sourcing directive" copy.
+
+    Each warning includes an actionable fix and the profile-scoped-tool caveat.
+    Warn-never-block (KTD5): always returns a list, never raises.
+    """
+    warnings: list[str] = []
+    for spec in config.specialists:
+        if not (set(spec.toolset) & RETRIEVAL_TOOLSETS):
+            continue  # not a retrieval lane → skip
+        focus = (spec.focus or "").lower()
+        if any(t in focus for t in _SOURCING_TERMS):
+            continue  # sourcing directive present → grounded → no warn
+        # Retrieval lane with NO sourcing directive.
+        if any(t in focus for t in _ANTI_GROUNDING_TERMS):
+            msg = (
+                f"specialist '{spec.role}': retrieval toolset + anti-grounding phrasing "
+                f"(breadth/speed framing) but no sourcing directive — "
+                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+            )
+        else:
+            msg = (
+                f"specialist '{spec.role}': retrieval toolset but focus does not request "
+                f"sources or citations — "
+                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+            )
+        warnings.append(msg)
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # Wiring helper: load + format (used by run.py and cli.py)
 # ---------------------------------------------------------------------------
 
@@ -185,10 +257,9 @@ def render_preview_warnings(
     When the palette is absent/unreadable, returns a "validation skipped" note
     so the operator knows to run ``write_palette`` before a production run.
 
-    Structure note (U6 seam): focus-lint warnings (``check_focus_grounding``)
-    will be added here in U6. They belong in the SAME ``⚠ fleet validation``
-    block and run regardless of whether the palette loaded. The seam is the
-    ``focus_warnings`` list below — U6 populates it before the header is built.
+    Structure: focus-lint warnings (``check_focus_grounding``) are merged into
+    the SAME ``⚠ fleet validation`` block as palette warnings and run regardless
+    of whether the palette loaded (focus lint is palette-independent).
     """
     # Resolve the path (for the "skipped" note — the user sees the path we tried).
     if palette_path is None:
@@ -199,9 +270,7 @@ def render_preview_warnings(
 
     palette = load_palette(palette_path)
 
-    # --- U6 seam: populate focus_warnings here when check_focus_grounding is added ---
-    focus_warnings: list[str] = []
-    # focus_warnings = check_focus_grounding(config)  # U6 adds this line
+    focus_warnings: list[str] = check_focus_grounding(config)
 
     if palette is None:
         skipped_line = (

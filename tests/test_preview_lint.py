@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/preview_lint.py — palette validation (U5).
+"""Tests for fleet_engine/preview_lint.py — palette validation (U5) and focus lint (U6).
 
 All tests are hermetic: palette files are written to tempfile.mkdtemp() (never
 ~/.cadre), and CADRE_PALETTE is patched via patch.dict so tests don't leak env
@@ -10,8 +10,13 @@ Coverage:
   keys, malformed entries, valid round-trip, CADRE_PALETTE env override.
 - check_palette: off-palette model warning, off-palette toolset warning, all
   on-palette → empty list, synthesizer check (synthesize vs. collect convergence).
+- check_focus_grounding: retrieval lane with bare focus → warn; anti-grounding
+  focus → warn (anti-grounding copy); "After" focus (grounding-control doc) → no
+  warn (critical non-false-positive); per-claim sourcing focus → no warn;
+  non-retrieval lane → no warn; multi-lane partial grounding → exactly one warn.
 - render_preview_warnings: missing palette → skipped note; valid palette with
-  warnings → ⚠ block; all clean → ✓ line; warn-never-block (no exception).
+  warnings → ⚠ block; all clean → ✓ line; warn-never-block (no exception);
+  palette=None + focus-lint-failing fleet → ⚠ block + skipped note (U6 path).
 """
 
 from __future__ import annotations
@@ -26,7 +31,9 @@ from unittest.mock import patch
 from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
 from fleet_engine.preview_lint import (
     DEFAULT_PALETTE_PATH,
+    RETRIEVAL_TOOLSETS,
     Palette,
+    check_focus_grounding,
     check_palette,
     load_palette,
     render_preview_warnings,
@@ -77,6 +84,7 @@ def _make_config(
     specialist_provider="xai",
     specialist_model="grok-4.3",
     specialist_toolset=None,
+    specialist_focus="",
     synth_provider="openrouter",
     synth_model="google/gemini-3-flash",
 ) -> FleetConfig:
@@ -86,6 +94,7 @@ def _make_config(
             role="web",
             provider=specialist_provider,
             model=specialist_model,
+            focus=specialist_focus,
             toolset=specialist_toolset if specialist_toolset is not None else ["web"],
         )
     ]
@@ -605,9 +614,11 @@ class TestRenderPreviewWarningsAllOnPalette(unittest.TestCase):
             ],
             toolsets=["web"],
         )
+        # Focus must include a sourcing directive so focus-lint is also clean.
         cfg = _make_config(
             specialist_provider="xai", specialist_model="grok-4.3",
             specialist_toolset=["web"],
+            specialist_focus="Cite a primary source with a link for every claim.",
             synth_provider="openrouter", synth_model="google/gemini-3-flash",
         )
         result = render_preview_warnings(cfg, palette_path=palette_path)
@@ -658,14 +669,357 @@ class TestRenderPreviewWarningsWarnNeverBlock(unittest.TestCase):
                     {"provider": "openrouter", "model": "google/gemini-3-flash"}],
             toolsets=["web"],
         )
+        # Focus must include a sourcing directive so focus-lint is also clean.
         cfg = _make_config(
             specialist_provider="xai", specialist_model="grok-4.3",
             specialist_toolset=["web"],
+            specialist_focus="Cite a primary source with a link for every claim.",
             synth_provider="openrouter", synth_model="google/gemini-3-flash",
         )
         with patch.dict(os.environ, {"CADRE_PALETTE": str(palette_path)}):
             result = render_preview_warnings(cfg)  # no palette_path param
         self.assertIn("✓", result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: check_focus_grounding — U6
+#
+# Fixtures from docs/solutions/design-patterns/specialist-focus-grounding-control.md:
+#   BEFORE focus: "Fast, broad coverage — enumerate the full landscape of options
+#     so nothing obvious is missed. Breadth over depth."
+#   AFTER focus: BEFORE + " Cite a real, current primary source (with a link)
+#     for every item; if you can't find one, mark the item as unsourced rather
+#     than asserting it."
+# The AFTER example is the critical non-false-positive: it has anti-grounding
+# phrasing AND a sourcing directive → must NOT warn.
+# ---------------------------------------------------------------------------
+
+_BEFORE_FOCUS = (
+    "Fast, broad coverage — enumerate the full landscape of options so nothing "
+    "obvious is missed. Breadth over depth."
+)
+_AFTER_FOCUS = (
+    "Fast, broad coverage — enumerate the full landscape of options so nothing "
+    "obvious is missed. Breadth over depth. Cite a real, current primary source "
+    "(with a link) for every item; if you can't find one, mark the item as "
+    "unsourced rather than asserting it."
+)
+
+
+def _make_focus_config(
+    *,
+    role="scan",
+    toolset=None,
+    focus="",
+    convergence="synthesize",
+) -> FleetConfig:
+    """Build a FleetConfig with a single specialist for focus-lint tests."""
+    if toolset is None:
+        toolset = ["web"]
+    specialists = [
+        SpecialistSpec(role=role, provider="xai", model="grok-4.3",
+                       focus=focus, toolset=toolset)
+    ]
+    synthesis = None
+    if convergence == "synthesize":
+        synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
+    return FleetConfig(
+        name="test-fleet",
+        specialists=specialists,
+        synthesis=synthesis,
+        convergence=convergence,
+    )
+
+
+class TestCheckFocusGroundingRetrievalWarn(unittest.TestCase):
+    """check_focus_grounding warns for retrieval lanes with no sourcing directive."""
+
+    def test_bare_topical_focus_warns(self):
+        """Retrieval lane with a bare topical focus and no sourcing language → warn."""
+        cfg = _make_focus_config(
+            focus="Deep structured analysis and extraction; cross-check the other lanes.",
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("scan", warnings[0])  # role named
+
+    def test_bare_topical_focus_warning_mentions_sourcing_fix(self):
+        """Bare-focus warning tells the operator to add a sourcing directive."""
+        cfg = _make_focus_config(
+            focus="Deep structured analysis and extraction; cross-check the other lanes.",
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertTrue(any("cite" in w.lower() for w in warnings),
+                        f"warning should mention cite directive, got: {warnings}")
+
+    def test_before_focus_anti_grounding_warns(self):
+        """Grounding-control 'Before' focus (anti-grounding, no sourcing) → warn."""
+        cfg = _make_focus_config(focus=_BEFORE_FOCUS, toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1)
+
+    def test_before_focus_uses_anti_grounding_copy(self):
+        """Anti-grounding phrasing triggers the more specific warning message."""
+        cfg = _make_focus_config(focus=_BEFORE_FOCUS, toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        # The anti-grounding branch message contains breadth/speed framing mention.
+        self.assertTrue(any("anti-grounding" in w for w in warnings),
+                        f"expected anti-grounding copy, got: {warnings}")
+
+    def test_empty_focus_warns(self):
+        """An empty focus on a retrieval lane → warn (no sourcing directive)."""
+        cfg = _make_focus_config(focus="", toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1)
+
+    def test_warning_includes_profile_caveat(self):
+        """Every focus warning includes the profile-scoped-tool caveat."""
+        cfg = _make_focus_config(focus=_BEFORE_FOCUS, toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertTrue(any("profile" in w.lower() for w in warnings),
+                        f"warning should include profile caveat, got: {warnings}")
+
+    def test_warning_includes_runbook_reference(self):
+        """Every focus warning points to docs/RUNBOOK.md."""
+        cfg = _make_focus_config(focus=_BEFORE_FOCUS, toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertTrue(any("RUNBOOK" in w for w in warnings),
+                        f"warning should mention RUNBOOK.md, got: {warnings}")
+
+
+class TestCheckFocusGroundingRetrievalNoWarn(unittest.TestCase):
+    """check_focus_grounding is silent for grounded retrieval lanes."""
+
+    def test_after_focus_no_warn(self):
+        """Grounding-control 'After' focus has sourcing despite anti-grounding → NO warn.
+
+        This is the critical non-false-positive: 'breadth over depth' is present
+        but 'cite a real, current primary source (with a link)' overrides it.
+        """
+        cfg = _make_focus_config(focus=_AFTER_FOCUS, toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [],
+                         f"'After' focus must not warn, got: {warnings}")
+
+    def test_per_claim_sources_no_warn(self):
+        """A focus demanding per-claim sources/links with an unsourced fallback → no warn."""
+        cfg = _make_focus_config(
+            focus=(
+                "Enumerate all relevant frameworks. Cite a primary source with a link "
+                "for every item; mark as unsourced if none is found."
+            ),
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_focus_with_url_term_no_warn(self):
+        """Focus containing 'url' counts as a sourcing directive → no warn."""
+        cfg = _make_focus_config(
+            focus="Return each finding with a url to the source document.",
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_focus_with_reference_term_no_warn(self):
+        """Focus containing 'reference' counts as a sourcing directive → no warn."""
+        cfg = _make_focus_config(
+            focus="Primary sources, papers, docs — include references for each claim.",
+            toolset=["x_search"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_focus_with_attribution_term_no_warn(self):
+        """Focus containing 'attribution' (matched by 'attribut') → no warn."""
+        cfg = _make_focus_config(
+            focus="Real-time X / social — full attribution for each post or thread.",
+            toolset=["x_search"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_focus_with_source_in_unsourced_context_no_warn(self):
+        """'source' in 'mark as unsourced' still counts — the term is present → no warn."""
+        cfg = _make_focus_config(
+            focus="Cover the landscape. Mark anything you can't verify as unsourced.",
+            toolset=["web"],
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+
+class TestCheckFocusGroundingNonRetrieval(unittest.TestCase):
+    """check_focus_grounding does not check non-retrieval lanes."""
+
+    def test_empty_toolset_no_warn(self):
+        """A specialist with no toolset is not a retrieval lane → no warn."""
+        cfg = _make_focus_config(focus="Deep structured analysis.", toolset=[])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_non_retrieval_toolset_no_warn(self):
+        """A lane with only 'vision' toolset is not retrieval → no warn."""
+        cfg = _make_focus_config(focus="Describe what you see.", toolset=["vision"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+    def test_synthesize_convergence_no_warn_on_synthesis(self):
+        """check_focus_grounding only checks specialists, not the synthesizer."""
+        # Synthesize fleet: specialist is non-retrieval; synthesizer has no toolset.
+        cfg = _make_focus_config(
+            focus="Bare topical focus with no sourcing.",
+            toolset=["vision"],
+            convergence="synthesize",
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [])
+
+
+class TestCheckFocusGroundingMultiLane(unittest.TestCase):
+    """check_focus_grounding produces exactly one warning per ungrounded retrieval lane."""
+
+    def test_one_grounded_one_ungrounded_returns_exactly_one_warning(self):
+        """Multi-lane fleet: grounded lane + ungrounded lane → exactly one warning."""
+        specialists = [
+            SpecialistSpec(
+                role="scan",
+                provider="xai", model="grok-4.3",
+                focus=_BEFORE_FOCUS,  # ungrounded: anti-grounding, no sourcing
+                toolset=["web"],
+            ),
+            SpecialistSpec(
+                role="depth",
+                provider="openrouter", model="google/gemini-3-flash",
+                focus=_AFTER_FOCUS,  # grounded: has citation directive
+                toolset=["web"],
+            ),
+        ]
+        synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
+        cfg = FleetConfig(
+            name="multi-lane",
+            specialists=specialists,
+            synthesis=synthesis,
+            convergence="synthesize",
+        )
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("scan", warnings[0])
+        self.assertNotIn("depth", warnings[0])
+
+    def test_all_retrieval_ungrounded_returns_one_per_lane(self):
+        """All retrieval lanes ungrounded → one warning per lane."""
+        specialists = [
+            SpecialistSpec(role="lane1", provider="xai", model="grok-4.3",
+                           focus="Scan broadly.", toolset=["web"]),
+            SpecialistSpec(role="lane2", provider="xai", model="grok-4.3",
+                           focus="Scan socials.", toolset=["x_search"]),
+        ]
+        synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
+        cfg = FleetConfig(name="multi", specialists=specialists,
+                          synthesis=synthesis, convergence="synthesize")
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 2)
+
+
+class TestCheckFocusGroundingWarnNeverBlock(unittest.TestCase):
+    """check_focus_grounding never raises regardless of focus content."""
+
+    def test_none_focus_does_not_raise(self):
+        """A specialist with focus=None (coerced) must not raise."""
+        spec = SpecialistSpec(role="scan", provider="xai", model="grok",
+                              focus="", toolset=["web"])
+        # Manually set focus to None to test the defensive coerce.
+        spec.focus = None  # type: ignore[assignment]
+        synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
+        cfg = FleetConfig(name="t", specialists=[spec],
+                          synthesis=synthesis, convergence="synthesize")
+        try:
+            check_focus_grounding(cfg)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"check_focus_grounding raised on None focus: {exc}")
+
+
+class TestRenderPreviewWarningsWithFocusLint(unittest.TestCase):
+    """render_preview_warnings integrates focus-lint into the validation output (U6)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_palette_none_with_focus_failing_fleet_returns_warning_block(self):
+        """palette=None + ungrounded retrieval lane → ⚠ block with focus warning AND skipped note.
+
+        This confirms the U6 None-palette branch fires: focus lint runs even when
+        the palette is absent, and the output is the ⚠ block (not just the skipped note).
+        """
+        cfg = _make_config(
+            specialist_toolset=["web"],
+            specialist_focus=_BEFORE_FOCUS,  # anti-grounding, no sourcing → warn
+        )
+        missing_palette = self.tmp / "no_palette.yaml"
+        result = render_preview_warnings(cfg, palette_path=missing_palette)
+        # Must have the warning block header.
+        self.assertIn("⚠", result)
+        self.assertIn("fleet validation", result)
+        # Must still tell the operator about the missing palette.
+        self.assertIn("skipped", result.lower())
+        # Must contain the focus warning.
+        self.assertTrue(
+            any(term in result.lower() for term in ("anti-grounding", "sourcing", "cite")),
+            f"expected focus warning in output, got: {result}",
+        )
+
+    def test_palette_none_grounded_fleet_returns_plain_skipped_note(self):
+        """palette=None + grounded retrieval lane → plain skipped note (no ⚠ block)."""
+        cfg = _make_config(
+            specialist_toolset=["web"],
+            specialist_focus=_AFTER_FOCUS,  # has sourcing → no focus warning
+        )
+        missing_palette = self.tmp / "no_palette.yaml"
+        result = render_preview_warnings(cfg, palette_path=missing_palette)
+        # No ⚠ block (no focus warnings, no palette warnings).
+        self.assertNotIn("⚠", result)
+        self.assertIn("skipped", result.lower())
+
+    def test_focus_warning_merged_with_palette_warnings_in_same_block(self):
+        """Focus warnings and palette warnings appear in the same ⚠ block."""
+        # Palette with no matching models/toolsets → palette warns.
+        palette_path = _write_palette(self.tmp, models=[], toolsets=[])
+        cfg = _make_config(
+            specialist_provider="xai", specialist_model="grok-4.3",
+            specialist_toolset=["web"],
+            specialist_focus=_BEFORE_FOCUS,  # no sourcing → focus warns too
+            synth_provider="openrouter", synth_model="google/gemini-3-flash",
+        )
+        result = render_preview_warnings(cfg, palette_path=palette_path)
+        # Single ⚠ block containing both palette and focus warnings.
+        self.assertIn("⚠", result)
+        self.assertIn("fleet validation", result)
+        self.assertRegex(result, r"\d+ warning")
+        # The focus warning and palette warning are both present.
+        self.assertTrue(
+            any(term in result.lower() for term in ("anti-grounding", "sourcing", "cite")),
+            "focus warning should be in the block",
+        )
+        self.assertTrue(any("not in palette" in result for _ in [1]),
+                        "palette warning should also be in the block")
+
+    def test_focus_lint_fires_with_collect_fleet_no_palette(self):
+        """Focus lint works for collect-convergence fleets (synthesis=None) with no palette."""
+        cfg = _make_config(
+            convergence="collect",
+            specialist_toolset=["web"],
+            specialist_focus="Enumerate the landscape, fast and broad.",  # no sourcing
+        )
+        missing_palette = self.tmp / "no_palette.yaml"
+        result = render_preview_warnings(cfg, palette_path=missing_palette)
+        # Focus warning fires.
+        self.assertIn("⚠", result)
+        self.assertIn("skipped", result.lower())
 
 
 # ---------------------------------------------------------------------------
