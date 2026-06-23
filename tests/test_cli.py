@@ -781,6 +781,68 @@ class TestRunCommandWritesCompleteFolder(unittest.TestCase):
         self.assertEqual(alive, [], "heartbeat timer thread must be stopped after the run")
 
 
+class _BrokenStream:
+    """A progress stream whose write() always raises — models a closed/broken pipe
+    (e.g. the supervising agent stopped draining the subprocess's stderr)."""
+
+    def write(self, _s):
+        raise BrokenPipeError("pipe closed")
+
+    def flush(self):
+        pass
+
+
+class TestRunCommandStreamFailureResilience(unittest.TestCase):
+    """A dead progress stream mid-run must NOT discard the synthesized report — the
+    breadcrumbs are auxiliary, the FleetResult is the deliverable (R9)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_broken_progress_stream_still_returns_report(self):
+        client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
+        code, output = run_command(
+            EXAMPLE, "task", client=client,
+            run_dir=self.tmp / "r", progress_stream=_BrokenStream(),
+        )
+        self.assertEqual(code, 0, "run must still succeed despite the dead progress pipe")
+        self.assertIn("THE REPORT", output, "the synthesized report survives a broken stream")
+        self.assertTrue((self.tmp / "r" / "manifest.json").exists(), "capture still completed")
+
+
+class TestRunCommandLaneCaptureFailure(unittest.TestCase):
+    """A per-lane artifact write failure degrades (warns on the stream) and never
+    crashes the run; other lanes still capture and the report is intact."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_save_lane_failure_warns_and_run_succeeds(self):
+        from fleet_engine.capture import save_lane as real_save_lane
+
+        def flaky(lane, filename, run_dir):
+            if lane.role == "web":
+                raise OSError("disk full")
+            return real_save_lane(lane, filename, run_dir)
+
+        prog = io.StringIO()
+        run_dir = self.tmp / "r"
+        client = FakeClient({"synthesizer": ("ok", "SYNTH")})
+        with patch("fleet_engine.progress_runner.save_lane", flaky):
+            code, output = run_command(
+                EXAMPLE, "task", client=client, run_dir=run_dir, progress_stream=prog,
+            )
+        self.assertEqual(code, 0, "run succeeds despite a per-lane write failure")
+        self.assertIn("SYNTH", output)
+        self.assertFalse((run_dir / "specialist-web.md").exists(), "the failed lane's file is absent")
+        self.assertTrue((run_dir / "specialist-social.md").exists(), "other lanes still captured")
+        prog_text = prog.getvalue()
+        self.assertIn("[cadre] warn:", prog_text, "the failure is warned on the [cadre] stream")
+        self.assertIn("web", prog_text)
+
+
 class TestSkillProgressStreamSplit(unittest.TestCase):
     """The skill entry (run.py) puts the report on stdout and [cadre] progress on
     stderr, and writes the complete run folder — via the by-path skill loader."""

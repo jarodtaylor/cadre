@@ -135,6 +135,20 @@ def _start_lane(
     return time.monotonic()
 
 
+def _timed_out_result(role: str, provider: str, model: str, timeout: float) -> AgentResult:
+    """Build the fabricated timeout failure for a wedged call.
+
+    The single place the ``timed out after {t:g}s`` error string is constructed —
+    shared by the synth join (``_collect``) and the specialist drainer (``_fan_out``),
+    which both fabricate this result for a call that never returned by the deadline.
+    ``elapsed_s`` and ``toolset`` are stamped by the caller (they differ per lane).
+    """
+    return AgentResult(
+        role=role, provider=provider, model=model, ok=False,
+        error=f"timed out after {timeout:g}s", timed_out=True,
+    )
+
+
 def _collect(
     started: tuple[threading.Thread, list[AgentResult], float],
     deadline: float | None,
@@ -163,8 +177,7 @@ def _collect(
         # call did not time out, regardless of what the client left on the field.
         result.timed_out = False
     else:
-        result = AgentResult(role=role, provider=provider, model=model, ok=False,
-                             error=f"timed out after {timeout:g}s", timed_out=True)
+        result = _timed_out_result(role, provider, model, timeout)
     result.elapsed_s = now - launched_at
     result.toolset = list(toolset)
     return result
@@ -241,10 +254,7 @@ def _fan_out(
     for idx, spec in enumerate(config.specialists):
         if idx in collected:
             continue
-        timed = AgentResult(
-            role=spec.role, provider=spec.provider, model=spec.model, ok=False,
-            error=f"timed out after {call_timeout:g}s", timed_out=True,
-        )
+        timed = _timed_out_result(spec.role, spec.provider, spec.model, call_timeout)
         timed.elapsed_s = fabricated_at - launched_at[idx]
         timed.toolset = list(spec.toolset)
         collected[idx] = timed

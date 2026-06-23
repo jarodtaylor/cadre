@@ -221,6 +221,11 @@ class ProgressRenderer:
         self._filename_for = filename_for
         self._interval_s = interval_s
 
+        # Latched True on the first failed write (e.g. the supervising agent stops
+        # draining stderr -> BrokenPipeError). Breadcrumbs are auxiliary; the run
+        # must survive a dead progress pipe — see _write.
+        self._stream_dead = False
+
         # Serialises every write to self._stream and every tally mutation.
         # The heartbeat thread acquires this same lock before reading the tally
         # or writing its line — one lock, one critical section.
@@ -259,6 +264,18 @@ class ProgressRenderer:
             # is accurate for anything that reads back the stream.
             self._update_tally(event)
             self._write(line)
+
+    def note(self, text: str) -> None:
+        """Write an out-of-band ``[cadre] warn: …`` breadcrumb (best-effort, locked).
+
+        For edge warnings that are not lifecycle events (a failed artifact write)
+        but should still ride the same parseable stream an agent reads — so a
+        supervisor sees that capture degraded, the line carries the stable
+        ``[cadre]`` prefix, and a dead pipe still can't crash the run (shares
+        ``emit``'s lock and the guarded ``_write``).
+        """
+        with self._lock:
+            self._write(f"[cadre] warn: {_sanitize(text)}")
 
     def start_heartbeat(self) -> None:
         """Start the daemon heartbeat timer.
@@ -302,9 +319,23 @@ class ProgressRenderer:
         Must be called under ``self._lock``.  A single ``write()`` of the full
         ``line + "\\n"`` is important: two separate ``write()`` calls would let
         a concurrent heartbeat interleave between them and garble the output.
+
+        Best-effort by design. The progress stream is auxiliary — the run's
+        deliverable is the FleetResult, rendered to stdout by the caller. If the
+        stream dies mid-run (the supervising agent stops draining stderr ->
+        ``BrokenPipeError``; a closed stream -> ``ValueError``), we must NOT let
+        that raise out of the hook and unwind ``run_with_progress`` before it can
+        ``return result`` — that would discard completed model work. Latch on the
+        first failure (this is the single chokepoint every emit AND the heartbeat
+        funnel through, so one guard covers them all) and skip further writes.
         """
-        self._stream.write(line + "\n")
-        self._stream.flush()
+        if self._stream_dead:
+            return
+        try:
+            self._stream.write(line + "\n")
+            self._stream.flush()
+        except (OSError, ValueError):
+            self._stream_dead = True
 
     def _update_tally(self, event: ProgressEvent) -> None:
         """Update the active/done/failed tally from an event.

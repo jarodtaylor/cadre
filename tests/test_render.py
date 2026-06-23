@@ -777,6 +777,12 @@ class TestProgressRendererLineFormats(unittest.TestCase):
         lines = self._emit_and_get(LaneDone(result=result))
         self.assertEqual(lines[0], "[cadre] lane scan failed 3.7s")
 
+    def test_lane_done_unknown_elapsed_renders_placeholder(self):
+        """A lane with elapsed_s=None (defensive guard) renders '?.?s', not a crash."""
+        result = make_lane(role="web", ok=True, elapsed_s=None)
+        lines = self._emit_and_get(LaneDone(result=result))
+        self.assertEqual(lines[0], "[cadre] lane web ok ?.?s")
+
     def test_lane_done_timed_out_label(self):
         result = make_lane(role="analysis", ok=False, timed_out=True, elapsed_s=600.0)
         lines = self._emit_and_get(LaneDone(result=result))
@@ -876,7 +882,6 @@ class TestProgressRendererHeartbeat(unittest.TestCase):
         hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
         self.assertGreater(len(hb_lines), 0, "at least one heartbeat line must appear")
         # Shape: [cadre] heartbeat mm:ss active=A/T done=D failed=F
-        import re
         pattern = r"^\[cadre\] heartbeat \d{2}:\d{2} active=\d+/\d+ done=\d+ failed=\d+$"
         for ln in hb_lines:
             self.assertRegex(ln, pattern, f"heartbeat line has wrong shape: {ln!r}")
@@ -1052,6 +1057,49 @@ class TestProgressRendererNoSurvivors(unittest.TestCase):
         self.assertEqual(done, 0)
         self.assertEqual(failed, 2)
         self.assertEqual(active, 0)
+
+
+class _BrokenStream:
+    """A stream whose write() always raises — models a closed/broken progress pipe."""
+
+    def __init__(self, exc=None):
+        self.exc = exc if exc is not None else BrokenPipeError("pipe closed")
+        self.writes = 0
+
+    def write(self, _s):
+        self.writes += 1
+        raise self.exc
+
+    def flush(self):  # pragma: no cover - never reached (write raises first)
+        pass
+
+
+class TestProgressRendererStreamFailure(unittest.TestCase):
+    """A dead progress stream must never raise out of emit/note — the run owns the
+    deliverable (the FleetResult), and breadcrumbs are auxiliary (best-effort writes)."""
+
+    def test_emit_and_note_do_not_raise_on_broken_stream(self):
+        r = ProgressRenderer(stream=_BrokenStream(), interval_s=_HB_INTERVAL)
+        # None of these may propagate the write failure out of the renderer.
+        r.emit(Validated(fleet="f", specialists=1))
+        r.emit(LaneLaunched(roles=["web"]))
+        r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=1.0)))
+        r.note("artifact write failed")  # warnings are best-effort too
+
+    def test_latches_after_first_failure(self):
+        broken = _BrokenStream()
+        r = ProgressRenderer(stream=broken, interval_s=_HB_INTERVAL)
+        r.emit(Validated(fleet="f", specialists=1))
+        r.emit(LaneLaunched(roles=["web"]))
+        # After the first failed write the renderer stops trying — no repeated raises.
+        self.assertEqual(broken.writes, 1, "should stop writing after the first failure")
+
+    def test_heartbeat_survives_broken_stream(self):
+        r = ProgressRenderer(stream=_BrokenStream(), interval_s=_HB_INTERVAL)
+        r.start_heartbeat()
+        time.sleep(_HB_INTERVAL * 2)  # let a tick fire against the broken stream
+        r.stop_heartbeat()
+        # Reaching here without an unhandled daemon exception is the assertion.
 
 
 if __name__ == "__main__":

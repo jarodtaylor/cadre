@@ -19,6 +19,7 @@ from fleet_engine.capture import (
     prepare_run_dir,
     resolve_run_dir,
     save_lane,
+    save_prompt,
     save_run,
 )
 from fleet_engine.config import FleetConfig
@@ -961,6 +962,36 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
 
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
+
+
+# ---------------------------------------------------------------------------
+# save_prompt (U4): prompt.txt is written by the edge up front, owner-only.
+# (Replaces the coverage of the removed save_run prompt.txt write.)
+# ---------------------------------------------------------------------------
+
+
+class TestSavePrompt(unittest.TestCase):
+    """save_prompt writes prompt.txt with the task, 0o600, creating run_dir if missing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_writes_task_content(self):
+        save_prompt(self.tmp, "my exact task")
+        self.assertEqual((self.tmp / "prompt.txt").read_text(encoding="utf-8"), "my exact task")
+
+    def test_prompt_txt_is_0o600(self):
+        save_prompt(self.tmp, "task")
+        mode = stat.S_IMODE((self.tmp / "prompt.txt").stat().st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_creates_run_dir_if_missing(self):
+        nested = self.tmp / "nested" / "leaf"
+        self.assertFalse(nested.exists())
+        save_prompt(nested, "task")
+        self.assertTrue((nested / "prompt.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

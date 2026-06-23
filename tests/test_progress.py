@@ -138,6 +138,14 @@ class TestEventSequence(unittest.TestCase):
         run_fleet(_config(), "task", FakeClient({"synthesizer": ("fail", "rate limited")}), progress=rec)
         self.assertEqual(rec.of(SynthDone)[0].outcome, "failed")
 
+    def test_synth_done_outcome_timed_out(self):
+        # The third outcome_label value: a wedged synthesizer reports "timed-out",
+        # distinct from a plain "failed" (exercises the full label set through the hook).
+        rec = Recorder()
+        client = HangingClient(hang_roles={"synthesizer"})
+        run_fleet(_config(), "task", client, call_timeout=0.3, progress=rec)
+        self.assertEqual(rec.of(SynthDone)[0].outcome, "timed-out")
+
 
 class TestArrivalOrder(unittest.TestCase):
     """A slow lane never hides a fast one — lane-done is drained in arrival order."""

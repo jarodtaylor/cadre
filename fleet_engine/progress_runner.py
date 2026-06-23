@@ -75,7 +75,12 @@ def run_with_progress(
     renderer.emit(Validated(fleet=cfg.name, specialists=len(cfg.specialists)))
     if capture:
         renderer.emit(RunFolder(path=str(run_dir)))
-        save_prompt(run_dir, task)  # R2: prompt.txt written up front, at the edge
+        try:
+            save_prompt(run_dir, task)  # R2: prompt.txt written up front, at the edge
+        except OSError as exc:
+            # Symmetric with save_lane/save_run: a capture write failure degrades
+            # (warn, continue), never aborts the run before any model call.
+            renderer.note(f"failed to write prompt.txt: {exc}")
 
     start = time.monotonic()
     renderer.start_heartbeat()
@@ -91,7 +96,9 @@ def run_with_progress(
         )
     )
 
+    # Route warnings through the renderer's guarded [cadre] stream so they ride
+    # the same parseable, best-effort channel a supervising agent reads.
     for role, exc in capture_errors:
-        print(f"Warning: failed to write artifact for lane '{role}': {exc}", file=stream)
+        renderer.note(f"failed to write artifact for lane '{role}': {exc}")
 
     return result
