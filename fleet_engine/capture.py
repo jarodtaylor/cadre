@@ -208,7 +208,8 @@ def lane_filename_map(roles: list[str]) -> dict[str, str]:
         ``{"web": "specialist-web.md", "a/b": "specialist-a-b.md", ...}``
     """
     used_stems: set[str] = set()
-    result: dict[str, str] = {}
+    # Local name avoids the module's `result` (a FleetResult) convention.
+    mapping: dict[str, str] = {}
     for role in roles:
         stem = f"specialist-{_safe_role(role)}"
         if stem not in used_stems:
@@ -221,8 +222,8 @@ def lane_filename_map(roles: list[str]) -> dict[str, str]:
             stem = f"{stem}-{counter}"
             used_stems.add(stem)
             filename = f"{stem}.md"
-        result[role] = filename
-    return result
+        mapping[role] = filename
+    return mapping
 
 
 def save_prompt(run_dir: Path, task: str) -> None:
