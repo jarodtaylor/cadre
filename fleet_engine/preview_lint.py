@@ -237,7 +237,7 @@ def check_focus_grounding(config: "FleetConfig") -> list[str]:
     for spec in config.specialists:
         if not (set(spec.toolset) & RETRIEVAL_TOOLSETS):
             continue  # not a retrieval lane → skip
-        focus = (spec.focus or "").lower()
+        focus = (spec.effective_instruction or "").lower()
         if any(re.search(r"\b" + re.escape(t), focus) for t in _SOURCING_TERMS):
             continue  # sourcing directive present → grounded → no warn
         # Retrieval lane with NO sourcing directive. Role is _sanitize()d — these

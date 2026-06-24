@@ -29,6 +29,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
+from fleet_engine.personas import resolve
 from fleet_engine.preview_lint import (
     DEFAULT_PALETTE_PATH,
     RETRIEVAL_TOOLSETS,
@@ -104,12 +105,14 @@ def _make_config(
             provider=synth_provider,
             model=synth_model,
         )
-    return FleetConfig(
+    cfg = FleetConfig(
         name="test-fleet",
         specialists=specialists,
         synthesis=synthesis,
         convergence=convergence,
     )
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -722,12 +725,14 @@ def _make_focus_config(
     synthesis = None
     if convergence == "synthesize":
         synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
-    return FleetConfig(
+    cfg = FleetConfig(
         name="test-fleet",
         specialists=specialists,
         synthesis=synthesis,
         convergence=convergence,
     )
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class TestCheckFocusGroundingRetrievalWarn(unittest.TestCase):
@@ -921,6 +926,7 @@ class TestCheckFocusGroundingMultiLane(unittest.TestCase):
             synthesis=synthesis,
             convergence="synthesize",
         )
+        resolve(cfg, "/unused")
         warnings = check_focus_grounding(cfg)
         self.assertEqual(len(warnings), 1)
         self.assertIn("scan", warnings[0])
@@ -937,6 +943,7 @@ class TestCheckFocusGroundingMultiLane(unittest.TestCase):
         synthesis = SynthesisSpec(provider="openrouter", model="google/gemini-3-flash")
         cfg = FleetConfig(name="multi", specialists=specialists,
                           synthesis=synthesis, convergence="synthesize")
+        resolve(cfg, "/unused")
         warnings = check_focus_grounding(cfg)
         self.assertEqual(len(warnings), 2)
 
@@ -957,6 +964,94 @@ class TestCheckFocusGroundingWarnNeverBlock(unittest.TestCase):
             check_focus_grounding(cfg)
         except Exception as exc:  # noqa: BLE001
             self.fail(f"check_focus_grounding raised on None focus: {exc}")
+
+
+class TestCheckFocusGroundingReadsPersonaInstruction(unittest.TestCase):
+    """KTD3: check_focus_grounding reads effective_instruction (which is the persona
+    body for persona specs), not raw focus.
+
+    This is the discriminating test for U3: before the change,
+    check_focus_grounding read spec.focus directly; a persona spec has
+    focus="" so it would always skip the grounding check (false-no-warn).
+    After the change, the resolver populates effective_instruction with the
+    persona body, and check_focus_grounding reads that.
+    """
+
+    def setUp(self):
+        import tempfile, shutil
+        self._tmp = tempfile.mkdtemp()
+        self.pool = os.path.realpath(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp)
+
+    def _write_persona(self, name: str, body: str) -> None:
+        with open(os.path.join(self.pool, name + ".md"), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def _persona_config(self, name: str, toolset=None) -> FleetConfig:
+        """Build a single-specialist collect config using a named persona."""
+        from fleet_engine.personas import resolve as _resolve
+        if toolset is None:
+            toolset = ["web"]
+        cfg = FleetConfig(
+            name="test-fleet",
+            specialists=[
+                SpecialistSpec(
+                    role="scan",
+                    provider="xai",
+                    model="grok-4.3",
+                    persona=name,
+                    toolset=toolset,
+                )
+            ],
+            synthesis=None,
+            convergence="collect",
+        )
+        _resolve(cfg, self.pool)
+        return cfg
+
+    def test_persona_with_anti_grounding_body_warns(self):
+        """A retrieval-toolset persona whose body has no sourcing directive → warn.
+
+        This proves the lint reads effective_instruction (the persona body),
+        not raw focus (which would be empty for a persona spec).
+        """
+        self._write_persona(
+            "ungrounded-persona",
+            "Fast, broad coverage. Breadth over depth. No sourcing required.",
+        )
+        cfg = self._persona_config("ungrounded-persona", toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(len(warnings), 1,
+                         f"persona without sourcing directive must warn; got: {warnings}")
+
+    def test_persona_with_sourcing_directive_no_warn(self):
+        """A retrieval-toolset persona whose body demands citations → no warn.
+
+        Discriminating complement: same persona mechanism but grounded body.
+        """
+        self._write_persona(
+            "grounded-persona",
+            "Cite a primary source with a link for every claim. "
+            "Mark as unsourced if no source is found.",
+        )
+        cfg = self._persona_config("grounded-persona", toolset=["web"])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [],
+                         f"persona with sourcing directive must not warn; got: {warnings}")
+
+    def test_persona_on_empty_toolset_not_checked(self):
+        """Persona with toolset=[] is not a retrieval lane — grounding check is skipped."""
+        self._write_persona(
+            "no-tools-persona",
+            "Analyze the inputs. No tools, no sourcing needed.",
+        )
+        cfg = self._persona_config("no-tools-persona", toolset=[])
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(warnings, [],
+                         "empty-toolset persona lane must not be grounding-checked")
 
 
 class TestRenderPreviewWarningsWithFocusLint(unittest.TestCase):

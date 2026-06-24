@@ -19,6 +19,7 @@ from pathlib import Path
 from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
 from fleet_engine.model_client import ModelClient
+from fleet_engine.personas import default_pool_dir, resolve
 from fleet_engine.preview_lint import render_preview_warnings
 from fleet_engine.progress_runner import run_with_progress
 from fleet_engine.render import _sanitize, render_result
@@ -27,6 +28,7 @@ from fleet_engine.render import _sanitize, render_result
 def validate_command(path: str) -> tuple[int, str]:
     try:
         cfg = FleetConfig.load(path)
+        resolve(cfg, default_pool_dir())
     except ConfigError as err:
         return 1, str(err)
     except FileNotFoundError:
@@ -77,6 +79,7 @@ def run_command(
     """
     try:
         cfg = FleetConfig.load(path)
+        resolve(cfg, default_pool_dir())
     except ConfigError as err:
         return 1, str(err)
     except FileNotFoundError:

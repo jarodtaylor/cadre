@@ -23,6 +23,20 @@ import os
 
 from fleet_engine.config import ConfigError, FleetConfig
 
+# Default persona pool location — mirrors the CADRE_PALETTE / CADRE_RUN_DIR
+# pattern.  Override in tests via CADRE_PERSONAS_DIR to avoid touching home.
+DEFAULT_PERSONAS_DIR = "~/.cadre/personas"
+
+
+def default_pool_dir() -> str:
+    """Return the resolved persona pool directory.
+
+    Resolution order: CADRE_PERSONAS_DIR env var → DEFAULT_PERSONAS_DIR.
+    Does NOT expand or realpath — resolve() handles that at load time.
+    Focus-only fleets never reach the pool, so a missing directory is fine.
+    """
+    return os.environ.get("CADRE_PERSONAS_DIR") or DEFAULT_PERSONAS_DIR
+
 
 def resolve(config: FleetConfig, pool_dir: str | os.PathLike) -> FleetConfig:
     """Populate ``spec.effective_instruction`` for every specialist.

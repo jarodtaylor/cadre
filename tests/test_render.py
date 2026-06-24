@@ -18,6 +18,7 @@ from pathlib import Path
 from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import resolve
 from fleet_engine.progress import (
     Completion,
     LaneDone,
@@ -381,7 +382,7 @@ def _make_config(
                 toolset=["web", "search"],
             ),
         ]
-    return FleetConfig(
+    cfg = FleetConfig(
         name=name,
         synthesis=SynthesisSpec(
             provider=synth_provider,
@@ -391,6 +392,8 @@ def _make_config(
         specialists=specialists,
         allow_privileged_tools=allow_privileged_tools,
     )
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class TestRenderFleetPreviewSynthesizer(unittest.TestCase):
@@ -539,6 +542,7 @@ class TestRenderFleetPreviewSanitization(unittest.TestCase):
         """No false positives: an all-printable fleet renders unchanged — legit
         punctuation, the multi-line prompt, and the cost ⚠ all survive."""
         cfg = FleetConfig.load(_EXAMPLE_FLEET)
+        resolve(cfg, "/unused")  # focus-only fleet: sets effective_instruction = focus, zero I/O
         rendered = render_fleet_preview(cfg)
         # Every fleet-controlled field appears verbatim.
         self.assertIn("xai/grok-4.3", rendered)
@@ -602,13 +606,149 @@ class TestRenderFleetPreviewSanitization(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# New tests: persona-lane preview format (U3)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderFleetPreviewPersonaLane(unittest.TestCase):
+    """render_fleet_preview renders persona lanes differently from focus lanes.
+
+    Persona lane: two-line block — "persona: <name>" + indented body.
+    Focus lane:   single-line "focus: <text>".
+    persona name passes through _sanitize like every other fleet-controlled field.
+    """
+
+    def setUp(self):
+        import tempfile, os, shutil
+        from fleet_engine.config import SpecialistSpec
+        self._tmp = tempfile.mkdtemp()
+        self.pool = os.path.realpath(self._tmp)
+        # Write a minimal persona file.
+        persona_body = "You are a coherence reviewer.\n\nCheck for internal consistency.\n"
+        with open(os.path.join(self.pool, "coherence-reviewer.md"), "w", encoding="utf-8") as f:
+            f.write(persona_body)
+        self.persona_body = persona_body
+
+        cfg = FleetConfig(
+            name="test-persona-fleet",
+            synthesis=SynthesisSpec(
+                provider="openrouter",
+                model="google/gemini-2-flash",
+                prompt="Synthesize.",
+            ),
+            specialists=[
+                SpecialistSpec(
+                    role="coherence",
+                    provider="openrouter",
+                    model="anthropic/claude-sonnet-4.6",
+                    persona="coherence-reviewer",
+                    toolset=[],
+                ),
+                SpecialistSpec(
+                    role="breadth",
+                    provider="xai",
+                    model="grok-4.3",
+                    focus="Scan broadly.",
+                    toolset=["web"],
+                ),
+            ],
+        )
+        resolve(cfg, self.pool)
+        self.cfg = cfg
+        self.rendered = render_fleet_preview(cfg)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp)
+
+    def test_persona_name_label_present(self):
+        """Persona lane renders 'persona: <name>' as its label."""
+        self.assertIn("persona: coherence-reviewer", self.rendered)
+
+    def test_persona_body_present_in_output(self):
+        """The resolved persona text appears in the preview output."""
+        self.assertIn("You are a coherence reviewer.", self.rendered)
+        self.assertIn("Check for internal consistency.", self.rendered)
+
+    def test_focus_lane_still_renders_focus_label(self):
+        """Focus lane still renders 'focus: <text>', unchanged."""
+        self.assertIn("focus: Scan broadly.", self.rendered)
+
+    def test_persona_lane_no_focus_label(self):
+        """Persona lane must NOT render a 'focus:' label for the coherence specialist."""
+        # The coherence specialist has no focus, only a persona — no focus label.
+        # We check the rendered block for the coherence role specifically.
+        lines = self.rendered.split("\n")
+        coherence_block_start = next(
+            (i for i, ln in enumerate(lines) if "coherence" in ln and "[coherence]" in ln),
+            None,
+        )
+        if coherence_block_start is not None:
+            # Find the next specialist block or end.
+            block_lines = []
+            for ln in lines[coherence_block_start + 1:]:
+                if ln.startswith("  ["):  # next specialist
+                    break
+                block_lines.append(ln)
+            block_text = "\n".join(block_lines)
+            self.assertNotIn("focus:", block_text,
+                             "persona lane must not render a 'focus:' label")
+
+    def test_persona_name_is_sanitized(self):
+        """persona name passes through _sanitize — same guarantee as focus/role/provider."""
+        # We can't build a config with an illegal name (config validator rejects it),
+        # so we verify the sanitize call by checking a clean name renders intact
+        # (no over-stripping) — the _sanitize wrapper is exercised by the persona name path.
+        self.assertIn("coherence-reviewer", self.rendered)
+        # No control bytes crept in from the name.
+        self.assertNotIn("\x1b", self.rendered)
+
+    def test_esc_in_persona_body_stripped(self):
+        """Terminal ESC bytes in persona file body are stripped in preview output.
+
+        The resolver stores raw bytes; the render layer sanitizes (KTD6).
+        """
+        import os, tempfile, shutil
+        from fleet_engine.config import SpecialistSpec
+        tmp = tempfile.mkdtemp()
+        pool = os.path.realpath(tmp)
+        try:
+            evil_body = "Safe text\x1b[2Jevil override\n"
+            with open(os.path.join(pool, "evil-persona.md"), "w", encoding="utf-8") as f:
+                f.write(evil_body)
+            cfg2 = FleetConfig(
+                name="evil-fleet",
+                synthesis=SynthesisSpec(
+                    provider="openrouter",
+                    model="google/gemini-2-flash",
+                    prompt="S",
+                ),
+                specialists=[
+                    SpecialistSpec(
+                        role="r",
+                        provider="openrouter",
+                        model="google/gemini-2-flash",
+                        persona="evil-persona",
+                        toolset=[],
+                    ),
+                ],
+            )
+            resolve(cfg2, pool)
+            rendered2 = render_fleet_preview(cfg2)
+            self.assertNotIn("\x1b", rendered2, "ESC byte must be stripped from persona body in preview")
+            self.assertIn("Safe text", rendered2)
+        finally:
+            shutil.rmtree(tmp)
+
+
+# ---------------------------------------------------------------------------
 # New tests: collect-convergence in render_fleet_preview (U3)
 # ---------------------------------------------------------------------------
 
 
 def _make_collect_config(allow_privileged_tools=False):
     """Build a collect FleetConfig (synthesis=None) for preview tests."""
-    return FleetConfig(
+    cfg = FleetConfig(
         name="test-collect-fleet",
         synthesis=None,
         convergence="collect",
@@ -630,6 +770,8 @@ def _make_collect_config(allow_privileged_tools=False):
         ],
         allow_privileged_tools=allow_privileged_tools,
     )
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class TestRenderFleetPreviewCollect(unittest.TestCase):

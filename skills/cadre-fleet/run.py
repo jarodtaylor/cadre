@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
+from fleet_engine.personas import default_pool_dir, resolve  # noqa: E402
 from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
 from fleet_engine.render import _sanitize, render_fleet_preview, render_result  # noqa: E402
@@ -53,10 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Load + validate the fleet. ConfigError and any OSError (missing file, a
-    # directory path, bad perms) both produce a clean message and exit 1.
+    # Load + validate the fleet, then resolve persona instructions.
+    # ConfigError and any OSError (missing file, a directory path, bad perms)
+    # both produce a clean message and exit 1.
     try:
         cfg = FleetConfig.load(args.fleet)
+        resolve(cfg, default_pool_dir())
     except ConfigError as err:
         print(str(err))
         return 1

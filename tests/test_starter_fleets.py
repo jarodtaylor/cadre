@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from fleet_engine.config import FleetConfig
+from fleet_engine.personas import resolve
 from fleet_engine.preview_lint import check_focus_grounding
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -122,6 +123,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
     def test_research_swarm_focus_lint_clean(self):
         """research-swarm has zero check_focus_grounding warnings."""
         cfg = FleetConfig.load(_RESEARCH_SWARM)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
         warnings = check_focus_grounding(cfg)
         self.assertEqual(
             warnings,
@@ -137,6 +139,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
         reviewer lane without the corresponding sourcing directive.
         """
         cfg = FleetConfig.load(_CODE_REVIEW)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
         warnings = check_focus_grounding(cfg)
         self.assertEqual(
             warnings,
@@ -172,6 +175,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
         without the corresponding sourcing directive.
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
         warnings = check_focus_grounding(cfg)
         self.assertEqual(
             warnings,

@@ -87,7 +87,7 @@ class FleetResult:
 
 
 def _specialist_prompt(spec: SpecialistSpec, task: str) -> str:
-    focus = f"\nFocus: {spec.focus}" if spec.focus else ""
+    focus = f"\nFocus: {spec.effective_instruction}" if spec.effective_instruction else ""
     return f"You are the '{spec.role}' specialist.{focus}\n\nTask: {task}"
 
 

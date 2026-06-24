@@ -8,6 +8,7 @@ from pathlib import Path
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import resolve
 from fleet_engine.progress import LaneDone
 
 
@@ -25,7 +26,9 @@ def _config(**overrides):
         ],
     }
     data.update(overrides)
-    return FleetConfig.from_dict(data)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class FakeClient:
@@ -74,6 +77,61 @@ class TestHappyPath(unittest.TestCase):
         self.assertEqual(sorted(roles[:3]), ["analysis", "social", "web"])
         self.assertEqual(roles[3], "synthesizer")
         self.assertEqual(len(client.calls), 4)
+
+
+class TestPersonaPrompt(unittest.TestCase):
+    """Engine reads effective_instruction for specialist prompts.
+
+    After U3, _specialist_prompt reads spec.effective_instruction, not spec.focus.
+    For a persona spec, effective_instruction is the full persona body (set by resolve()).
+    The engine must pass that body through to the model — never the empty raw focus.
+    """
+
+    def setUp(self):
+        import tempfile, os, shutil
+        from fleet_engine.config import FleetConfig
+        from fleet_engine.personas import resolve
+        self._tmp = tempfile.mkdtemp()
+        self.pool = os.path.realpath(self._tmp)
+        persona_body = "You are a coherence reviewer. Look for internal contradictions.\n"
+        with open(os.path.join(self.pool, "coherence.md"), "w", encoding="utf-8") as f:
+            f.write(persona_body)
+        self.persona_body = persona_body
+
+        data = {
+            "name": "t",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "coherence", "provider": "openrouter", "model": "m/m",
+                 "persona": "coherence", "toolset": []},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, self.pool)
+        self.cfg = cfg
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp)
+
+    def test_persona_body_in_specialist_prompt(self):
+        """effective_instruction (persona body) appears in the prompt sent to the model."""
+        client = FakeClient()
+        run_fleet(self.cfg, "test task", client)
+        prompt = client.prompt_for("coherence")
+        self.assertIn("You are a coherence reviewer.", prompt,
+                      "persona body must appear in the specialist prompt")
+        self.assertIn("Look for internal contradictions.", prompt)
+
+    def test_empty_focus_not_in_persona_specialist_prompt(self):
+        """A persona spec has focus=''. The empty focus must not appear in the prompt
+        (confirms we read effective_instruction, not raw focus, which would show 'Focus: ')."""
+        client = FakeClient()
+        run_fleet(self.cfg, "test task", client)
+        prompt = client.prompt_for("coherence")
+        # With effective_instruction set (truthy), the prompt carries "Focus: <body>".
+        # If the engine had read raw focus (empty string), no Focus: line would appear.
+        self.assertIn("Focus:", prompt, "effective_instruction must appear under Focus: label")
 
 
 class TestProvenance(unittest.TestCase):
@@ -263,6 +321,7 @@ class TestCaptureFields(unittest.TestCase):
             ],
         }
         cfg = FleetConfig.from_dict(cfg_data)
+        resolve(cfg, "/unused")
         client = FakeClient({"synthesizer": ("ok", "x")})
         result = run_fleet(cfg, "task", client)
         lane = result.specialists[0]
@@ -356,7 +415,9 @@ def _collect_config(**overrides):
         ],
     }
     data.update(overrides)
-    return FleetConfig.from_dict(data)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class TestCollectConvergence(unittest.TestCase):

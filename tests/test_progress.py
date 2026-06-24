@@ -16,6 +16,7 @@ import fleet_engine.model_client as model_client_mod
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import resolve
 from fleet_engine.progress import (
     LaneDone,
     LaneLaunched,
@@ -40,7 +41,9 @@ def _config(**overrides):
         ],
     }
     data.update(overrides)
-    return FleetConfig.from_dict(data)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
 
 
 class FakeClient:
@@ -287,7 +290,7 @@ class TestEnginePurity(unittest.TestCase):
     def test_engine_core_has_no_output_sinks(self):
         for mod in (engine_mod, model_client_mod):
             src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-            for forbidden in ("print(", "open(", "sys.stdout", "sys.stderr"):
+            for forbidden in ("print(", "open(", "sys.stdout", "sys.stderr", "persona", "Path("):
                 self.assertNotIn(
                     forbidden, src, f"{mod.__name__} must not contain {forbidden!r}"
                 )
@@ -311,7 +314,7 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
         return prog.getvalue()
 
     def _collect_config(self):
-        return FleetConfig.from_dict({
+        cfg = FleetConfig.from_dict({
             "name": "collect-fleet",
             "convergence": "collect",
             "specialists": [
@@ -319,9 +322,11 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
                  "focus": "web research"},
             ],
         })
+        resolve(cfg, "/unused")
+        return cfg
 
     def _synthesize_config(self):
-        return FleetConfig.from_dict({
+        cfg = FleetConfig.from_dict({
             "name": "synth-fleet",
             "convergence": "synthesize",
             "synthesis": {"provider": "openrouter", "model": "synth/model"},
@@ -330,6 +335,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
                  "focus": "web research"},
             ],
         })
+        resolve(cfg, "/unused")
+        return cfg
 
     def test_collect_validated_breadcrumb_reports_zero_synthesizers(self):
         """A collect fleet's Validated breadcrumb reports 0 synthesizer(s)."""

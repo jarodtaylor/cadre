@@ -10,9 +10,10 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from fleet_engine.config import ConfigError, FleetConfig, SpecialistSpec
-from fleet_engine.personas import resolve
+from fleet_engine.personas import DEFAULT_PERSONAS_DIR, default_pool_dir, resolve
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +307,29 @@ class TestNonUtf8AndUnreadable(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             resolve(cfg, self.pool)
         self.assertTrue(any("not-a-file" in e for e in ctx.exception.errors))
+
+
+class TestDefaultPoolDir(unittest.TestCase):
+    """default_pool_dir() returns CADRE_PERSONAS_DIR env var first, then DEFAULT_PERSONAS_DIR."""
+
+    def test_no_env_returns_default(self):
+        """Without CADRE_PERSONAS_DIR set, default_pool_dir returns DEFAULT_PERSONAS_DIR."""
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_PERSONAS_DIR"}
+        with patch.dict(os.environ, env_without, clear=True):
+            result = default_pool_dir()
+        self.assertEqual(result, DEFAULT_PERSONAS_DIR)
+
+    def test_env_override_returned(self):
+        """CADRE_PERSONAS_DIR env var is used when set, regardless of DEFAULT_PERSONAS_DIR."""
+        with patch.dict(os.environ, {"CADRE_PERSONAS_DIR": "/custom/personas"}):
+            result = default_pool_dir()
+        self.assertEqual(result, "/custom/personas")
+
+    def test_empty_env_falls_through_to_default(self):
+        """An empty CADRE_PERSONAS_DIR string behaves the same as unset — falls through."""
+        with patch.dict(os.environ, {"CADRE_PERSONAS_DIR": ""}):
+            result = default_pool_dir()
+        self.assertEqual(result, DEFAULT_PERSONAS_DIR)
 
 
 class TestEngineIsolation(unittest.TestCase):
