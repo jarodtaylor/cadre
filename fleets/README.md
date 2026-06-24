@@ -6,10 +6,11 @@ library to use it:
 ```bash
 cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
 cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
+cp fleets/doc-review.example.yaml ~/.cadre/fleets/doc-review.yaml
 # then set provider/model strings to your host-verified values (see ~/.cadre/palette.yaml)
 ```
 
-Both starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
+All three starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
 `.example` from the filename) so they are ready to configure without copying
 manually.
 
@@ -31,26 +32,77 @@ calls out conflicts.
 Shape: **fan-out → synthesize**. `convergence` is absent (defaults to
 `synthesize`), so every existing fleet that omits the field parses identically.
 
-### `code-review.example.yaml` — collect shape
+---
 
-A four-model code review swarm: security, architecture, performance, and
-correctness lenses run in **parallel**, each on a different provider/model for
-independent perspective. No synthesizer runs — the fleet returns **attributed
-specialist outputs** on stdout for the caller to review.
+## Review catalog — collect-shape review fleets
 
-Pass the code or diff you want reviewed as the `--task` argument. All four
-lanes use `toolset: []` (fail-closed zero tools) because code reviewers reason
-over the provided context, not live retrieval.
+Two of the seeded starters review your work by fanning a set of **lenses**
+across different models in parallel and returning each lane's raw, attributed
+critique (collect shape — no synthesizer). They share one design, so the
+guidance below applies to both.
 
-Prefer **reasoning models** for `toolset: []` review lanes. Agentic, tool-happy
-models may try to emit tool calls (to read files or run commands) even when no
-tools are available — under `toolset: []` those calls no-op and the lane can
-return **no review at all**. Each lane's `focus` therefore states "you have no
-tools — review only from the provided diff" to steer the model to answer inline;
-choosing a model that reasons over given context rather than reaching for tools
-makes this robust.
+**Cross-model beats all-Claude.** The whole point is independent perspective: a
+lane on Grok, one on Gemini, one on GPT, one on DeepSeek, one on Claude will
+disagree — and the disagreement is the signal, because one model catches what
+another's training blind spots miss. The example assignments use diverse
+providers to demonstrate this, but they are example strings you swap for your
+verified palette, not a requirement: you can run fewer lanes or even all-same
+model — you just give up the cross-model edge that is the reason these fleets
+exist.
 
-Shape: **fan-out → collect**. `convergence: collect` is explicit in the spec.
+**Prefer reasoning/completion models, not agentic ones.** Every review lane is
+`toolset: []` (fail-closed zero tools): reviewers reason over the code or
+document you supply in `--task`, not live retrieval. Agentic, tool-happy models
+may try to emit tool calls even when none are available — under `toolset: []`
+those calls no-op and the lane can return **no review at all**. Each lane's
+`focus` opens with "you have no tools — review only from the provided artifact"
+to steer the model to answer inline; choosing a model that reasons over given
+context makes this robust.
+
+**The empty toolset is intentional — do not add a retrieval toolset.** Review
+lenses read the artifact in the task; they do not fetch. Adding a `web` (or any
+retrieval) toolset to a review lane buys nothing and risks a silently
+ungrounded lane if that tool isn't provisioned in your Hermes profile (tools
+are profile-scoped — see `docs/RUNBOOK.md`). `[]` is also the load-bearing
+security control: it keeps prompt-injection in the reviewed content from
+escalating to actions.
+
+### `code-review.example.yaml` — four lenses
+
+Reviews the code or diff you pass as `--task`. Lenses, each on a different
+provider/model:
+
+- **security** — injection (SQL/command/prompt), auth/authz gaps, insecure defaults, exposed secrets, OWASP patterns
+- **architecture** — coupling, separation-of-concerns violations, abstraction leaks, dead code
+- **performance** — algorithmic complexity, unnecessary I/O, blocking calls, allocation pressure
+- **correctness** — logic errors, off-by-one, edge-case handling, error-propagation failures
+
+### `doc-review.example.yaml` — five lenses
+
+Reviews a **planning document** — a requirements doc or a plan — that you paste
+as `--task`. The lenses are ported from the `ce-doc-review` personas and are
+**doc-type-agnostic**: they apply to either artifact, so name the type in the
+task when it matters (e.g. "Review this PLAN: …" vs "Review these
+REQUIREMENTS: …"). Lenses, each on a different provider/model:
+
+- **coherence** — internal contradictions, terminology drift, broken cross-references, structural gaps
+- **feasibility** — can it be built as described? stack conflicts, unaddressed nil/empty/error paths, hand-waved migrations
+- **scope-guardian** — right-sized for its goals? scope creep, speculative abstractions, framework-ahead-of-need
+- **product** — building the wrong thing well? premise challenge, orphan requirements, simpler alternatives
+- **adversarial** — falsify it: unstated assumptions, load-bearing decisions on thin evidence, omitted alternatives
+
+Each focus demands the lane **cite the exact passage** it flags and blesses
+"no finding" as an honest result, steering a weak model away from fabricating
+plausible-but-empty structural critiques.
+
+**Optional add-on lanes.** `doc-review` ships two extra lenses commented-out in
+the example — **design** (information architecture, interaction states, user
+flows, AI-slop risk) and **security** (plan-level attack surface, auth/authz,
+data exposure, secrets). Uncomment them for UI-heavy or security-sensitive
+documents and assign each a palette model.
+
+Shape for both: **fan-out → collect**. `convergence: collect` is explicit in
+each spec.
 
 ---
 
