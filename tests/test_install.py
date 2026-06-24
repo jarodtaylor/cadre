@@ -266,6 +266,12 @@ class TestEnsureCadreDirs(unittest.TestCase):
         rv.ensure_cadre_dirs(str(home))
         self.assertTrue((home / "fleets").exists())
 
+    def test_personas_subdir_created(self):
+        """The personas subdir is created inside home."""
+        home = Path(self.tmp) / "cadre"
+        rv.ensure_cadre_dirs(str(home))
+        self.assertTrue((home / "personas").exists())
+
     def test_home_permissions_0o700(self):
         """Home dir is owner-only (0o700)."""
         home = Path(self.tmp) / "cadre"
@@ -278,6 +284,13 @@ class TestEnsureCadreDirs(unittest.TestCase):
         home = Path(self.tmp) / "cadre"
         rv.ensure_cadre_dirs(str(home))
         mode = stat.S_IMODE((home / "fleets").stat().st_mode)
+        self.assertEqual(mode, 0o700, f"expected 0o700, got 0o{mode:03o}")
+
+    def test_personas_permissions_0o700(self):
+        """Personas subdir is owner-only (0o700)."""
+        home = Path(self.tmp) / "cadre"
+        rv.ensure_cadre_dirs(str(home))
+        mode = stat.S_IMODE((home / "personas").stat().st_mode)
         self.assertEqual(mode, 0o700, f"expected 0o700, got 0o{mode:03o}")
 
     def test_returns_resolved_home_path(self):
@@ -327,16 +340,19 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with unittest.mock.patch.object(rv, "seed_starter_fleets") as seed_mock:
-                    with contextlib.redirect_stdout(stdout_buf):
-                        with contextlib.redirect_stderr(stderr_buf):
-                            code = rv.main(["--venv-python", "/some/python"])
+                with unittest.mock.patch.object(rv, "seed_starter_fleets") as fleet_mock:
+                    with unittest.mock.patch.object(rv, "seed_personas") as persona_mock:
+                        with contextlib.redirect_stdout(stdout_buf):
+                            with contextlib.redirect_stderr(stderr_buf):
+                                code = rv.main(["--venv-python", "/some/python"])
 
         self.assertEqual(code, 0)
         self.assertEqual(stdout_buf.getvalue(), "/some/python\n",
                          "stdout must be EXACTLY the path + newline (nothing else)")
-        # Guard the call site: if main() stops seeding, this fails (the patch alone wouldn't).
-        seed_mock.assert_called_once_with(Path(rv.__file__).resolve().parents[1], Path("/fake/cadre"))
+        # Guard both seeding call sites.
+        repo_root = Path(rv.__file__).resolve().parents[1]
+        fleet_mock.assert_called_once_with(repo_root, Path("/fake/cadre"))
+        persona_mock.assert_called_once_with(repo_root, Path("/fake/cadre"))
 
     def test_diagnostics_go_to_stderr_not_stdout(self):
         """Scaffold confirmations appear on stderr, not stdout."""
@@ -345,16 +361,19 @@ class TestMainStdoutContract(unittest.TestCase):
 
         with unittest.mock.patch.object(rv, "ensure_cadre_dirs", return_value=Path("/fake/cadre")):
             with unittest.mock.patch.object(rv, "write_config"):
-                with unittest.mock.patch.object(rv, "seed_starter_fleets") as seed_mock:
-                    with contextlib.redirect_stdout(stdout_buf):
-                        with contextlib.redirect_stderr(stderr_buf):
-                            rv.main(["--venv-python", "/some/python"])
+                with unittest.mock.patch.object(rv, "seed_starter_fleets") as fleet_mock:
+                    with unittest.mock.patch.object(rv, "seed_personas") as persona_mock:
+                        with contextlib.redirect_stdout(stdout_buf):
+                            with contextlib.redirect_stderr(stderr_buf):
+                                rv.main(["--venv-python", "/some/python"])
 
         # stdout has only the path; stderr has the diagnostic messages
         self.assertEqual(stdout_buf.getvalue().strip(), "/some/python")
         # Diagnostics (scaffold/config lines) go to stderr
         self.assertIn("cadre", stderr_buf.getvalue())
-        seed_mock.assert_called_once_with(Path(rv.__file__).resolve().parents[1], Path("/fake/cadre"))
+        repo_root = Path(rv.__file__).resolve().parents[1]
+        fleet_mock.assert_called_once_with(repo_root, Path("/fake/cadre"))
+        persona_mock.assert_called_once_with(repo_root, Path("/fake/cadre"))
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +465,96 @@ class TestSeedStarterFleets(unittest.TestCase):
         # Must not raise; must not write to stdout
         with contextlib.redirect_stdout(stdout_buf):
             rv.seed_starter_fleets(self.repo_root, bad_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+
+class TestSeedPersonas(unittest.TestCase):
+    """seed_personas seeds persona files idempotently, owner-only, without stdout."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cadre_home = Path(self.tmp) / "cadre"
+        self.cadre_home.mkdir(mode=0o700)
+        # Real repo root: scripts/resolve_venv.py → parents[1] is the repo root
+        self.repo_root = Path(rv.__file__).resolve().parents[1]
+
+    def test_clean_dir_seeds_all_five_personas(self):
+        """All five persona files are seeded with names unchanged (no .example strip)."""
+        rv.seed_personas(self.repo_root, self.cadre_home)
+        for name in (
+            "coherence-reviewer.md",
+            "feasibility-reviewer.md",
+            "scope-guardian-reviewer.md",
+            "product-reviewer.md",
+            "adversarial-document-reviewer.md",
+        ):
+            self.assertTrue(
+                (self.cadre_home / "personas" / name).exists(),
+                f"expected {name} to be seeded",
+            )
+
+    def test_seeded_file_permissions_0o600(self):
+        """Freshly seeded persona files are owner-only (0o600)."""
+        rv.seed_personas(self.repo_root, self.cadre_home)
+        for name in (
+            "coherence-reviewer.md",
+            "feasibility-reviewer.md",
+            "scope-guardian-reviewer.md",
+            "product-reviewer.md",
+            "adversarial-document-reviewer.md",
+        ):
+            path = self.cadre_home / "personas" / name
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, 0o600, f"{name}: expected 0o600, got 0o{mode:03o}")
+
+    def test_idempotent_preserves_operator_edits(self):
+        """A pre-existing persona file is NOT overwritten (operator edits preserved)."""
+        personas_dir = self.cadre_home / "personas"
+        personas_dir.mkdir(mode=0o700, exist_ok=True)
+        sentinel_path = personas_dir / "coherence-reviewer.md"
+        sentinel_path.write_text("OPERATOR EDIT", encoding="utf-8")
+
+        rv.seed_personas(self.repo_root, self.cadre_home)
+
+        self.assertEqual(sentinel_path.read_text(encoding="utf-8"), "OPERATOR EDIT")
+
+    def test_symlink_at_destination_not_followed(self):
+        """A symlink planted at the destination is not followed/overwritten (O_EXCL/O_NOFOLLOW)."""
+        personas_dir = self.cadre_home / "personas"
+        personas_dir.mkdir(mode=0o700, exist_ok=True)
+        sentinel = self.cadre_home / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET")
+        (personas_dir / "coherence-reviewer.md").symlink_to(sentinel)
+        rv.seed_personas(self.repo_root, self.cadre_home)  # must not raise
+        # The symlink target is untouched — seeding refused to follow the link and write through.
+        self.assertEqual(sentinel.read_text(), "OPERATOR SECRET")
+
+    def test_non_utf8_source_warned_and_skipped_no_raise(self):
+        """A non-UTF-8 source persona is warned-and-skipped, never raised (never-raises contract)."""
+        repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(repo))
+        (repo / "personas").mkdir()
+        (repo / "personas" / "coherence-reviewer.md").write_bytes(b"\xff\xfe not utf-8 \x80")
+        # Must not raise even though the source is undecodable.
+        rv.seed_personas(repo, self.cadre_home)
+        # The undecodable source was skipped — no destination written.
+        self.assertFalse((self.cadre_home / "personas" / "coherence-reviewer.md").exists())
+
+    def test_stdout_silence(self):
+        """seed_personas writes NOTHING to stdout."""
+        stdout_buf = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buf):
+            rv.seed_personas(self.repo_root, self.cadre_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+    def test_never_raises_on_bad_cadre_home(self):
+        """seed_personas does NOT raise when cadre_home is unwritable/nonexistent."""
+        bad_home = Path("/nonexistent/unwritable/xyz")
+        stdout_buf = io.StringIO()
+        # Must not raise; must not write to stdout
+        with contextlib.redirect_stdout(stdout_buf):
+            rv.seed_personas(self.repo_root, bad_home)
         self.assertEqual(stdout_buf.getvalue(), "")
 
 

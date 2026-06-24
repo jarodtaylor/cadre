@@ -3,11 +3,12 @@
 This script is the ONLY unit-tested piece of the U4 install. It is pure stdlib,
 importable on the dev machine (no hermes-agent, no fleet_engine import needed).
 
-Four exported functions:
+Five exported functions:
   resolve_venv(override, *, probe_paths, env)  — pure resolver, no I/O
   ensure_cadre_dirs(home)                       — owner-only dir scaffolding
   write_config(python_path, config_path)        — owner-only config writer
   seed_starter_fleets(repo_root, cadre_home)    — idempotent fleet seeding, never raises
+  seed_personas(repo_root, cadre_home)          — idempotent persona seeding, never raises
 
 main(argv) — argparse entry; prints ONLY the resolved python path to stdout;
              all diagnostics go to stderr. Designed for:
@@ -37,40 +38,57 @@ _STARTER_FLEETS = (
     "doc-review.example.yaml",
 )
 
+# Explicit allowlist of persona files to seed. Personas have no .example infix —
+# names copy unchanged (coherence-reviewer.md → coherence-reviewer.md).
+_STARTER_PERSONAS = (
+    "coherence-reviewer.md",
+    "feasibility-reviewer.md",
+    "scope-guardian-reviewer.md",
+    "product-reviewer.md",
+    "adversarial-document-reviewer.md",
+)
 
-def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
-    """Copy starter fleets from <repo_root>/fleets/ to <cadre_home>/fleets/ at install time.
 
-    Each source file has a ``.example`` infix that is stripped on copy
-    (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
+def _seed_files(
+    src_dir: Path,
+    dest_dir: Path,
+    names: tuple,
+    dest_name_fn,
+) -> None:
+    """Seed a set of files from src_dir into dest_dir, owner-only and idempotent.
+
+    Shared implementation for seed_starter_fleets and seed_personas. The two
+    callers differ only in their source dir, dest dir, file list, and the
+    dest-name transform (fleet strips ``.example`` infix; personas copy as-is).
 
     Idempotent: existing destination files are NOT overwritten (operator edits preserved).
-    Owner-only: the fleets dir is created 0o700 and each file written 0o600 under umask 0o077.
+    Owner-only: dest_dir is created 0o700 and each file written 0o600 under umask 0o077.
     Never raises: all I/O errors are caught, warned to stderr, and skipped.
     Never writes to stdout: all messages go to sys.stderr.
 
     Args:
-        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
-        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+        src_dir: Directory containing the source files.
+        dest_dir: Destination directory (created 0o700 if absent).
+        names: Ordered tuple of source filenames to seed.
+        dest_name_fn: Maps a source filename to its destination filename.
     """
     old_umask = os.umask(0o077)
     try:
-        fleets_dir = cadre_home / "fleets"
         try:
-            fleets_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            dest_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError as exc:
-            print(f"[cadre] warning: could not create {fleets_dir}: {exc}", file=sys.stderr)
+            print(f"[cadre] warning: could not create {dest_dir}: {exc}", file=sys.stderr)
             return
 
-        for name in _STARTER_FLEETS:
-            dest_name = name.replace(".example.yaml", ".yaml")
-            src = repo_root / "fleets" / name
-            dest = fleets_dir / dest_name
+        for name in names:
+            dest_name = dest_name_fn(name)
+            src = src_dir / name
+            dest = dest_dir / dest_name
             try:
                 content = src.read_text(encoding="utf-8")
                 # Atomic preserve-existing: O_EXCL fails if the destination already exists,
                 # closing the TOCTOU window a separate exists()-then-open had (which could
-                # truncate an operator-edited fleet); O_NOFOLLOW refuses to follow a symlink
+                # truncate an operator-edited file); O_NOFOLLOW refuses to follow a symlink
                 # planted at the destination. Mirrors capture.prepare_run_dir's atomic
                 # reservation idiom.
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -90,6 +108,52 @@ def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
                 continue
     finally:
         os.umask(old_umask)
+
+
+def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
+    """Copy starter fleets from <repo_root>/fleets/ to <cadre_home>/fleets/ at install time.
+
+    Each source file has a ``.example`` infix that is stripped on copy
+    (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
+
+    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
+    Owner-only: the fleets dir is created 0o700 and each file written 0o600 under umask 0o077.
+    Never raises: all I/O errors are caught, warned to stderr, and skipped.
+    Never writes to stdout: all messages go to sys.stderr.
+
+    Args:
+        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
+        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+    """
+    _seed_files(
+        src_dir=repo_root / "fleets",
+        dest_dir=cadre_home / "fleets",
+        names=_STARTER_FLEETS,
+        dest_name_fn=lambda name: name.replace(".example.yaml", ".yaml"),
+    )
+
+
+def seed_personas(repo_root: Path, cadre_home: Path) -> None:
+    """Copy persona files from <repo_root>/personas/ to <cadre_home>/personas/ at install time.
+
+    Personas have no ``.example`` infix — names copy unchanged
+    (e.g. ``coherence-reviewer.md`` → ``coherence-reviewer.md``).
+
+    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
+    Owner-only: the personas dir is created 0o700 and each file written 0o600 under umask 0o077.
+    Never raises: all I/O errors are caught, warned to stderr, and skipped.
+    Never writes to stdout: all messages go to sys.stderr.
+
+    Args:
+        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
+        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+    """
+    _seed_files(
+        src_dir=repo_root / "personas",
+        dest_dir=cadre_home / "personas",
+        names=_STARTER_PERSONAS,
+        dest_name_fn=lambda name: name,
+    )
 
 
 def resolve_venv(
@@ -175,6 +239,7 @@ def ensure_cadre_dirs(home: str = "~/.cadre") -> Path:
     try:
         home_path.mkdir(mode=0o700, parents=True, exist_ok=True)
         (home_path / "fleets").mkdir(mode=0o700, parents=True, exist_ok=True)
+        (home_path / "personas").mkdir(mode=0o700, parents=True, exist_ok=True)
     finally:
         os.umask(old_umask)
     return home_path
@@ -259,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         home = ensure_cadre_dirs()
         print(f"scaffolded {home}", file=sys.stderr)
         seed_starter_fleets(Path(__file__).resolve().parents[1], home)
+        seed_personas(Path(__file__).resolve().parents[1], home)
         write_config(python_path)
         print(f"wrote ~/.cadre/config: CADRE_HERMES_PYTHON={python_path}", file=sys.stderr)
     except OSError as exc:
