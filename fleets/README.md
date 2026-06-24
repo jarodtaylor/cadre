@@ -42,6 +42,14 @@ Pass the code or diff you want reviewed as the `--task` argument. All four
 lanes use `toolset: []` (fail-closed zero tools) because code reviewers reason
 over the provided context, not live retrieval.
 
+Prefer **reasoning models** for `toolset: []` review lanes. Agentic, tool-happy
+models may try to emit tool calls (to read files or run commands) even when no
+tools are available — under `toolset: []` those calls no-op and the lane can
+return **no review at all**. Each lane's `focus` therefore states "you have no
+tools — review only from the provided diff" to steer the model to answer inline;
+choosing a model that reasons over given context rather than reaching for tools
+makes this robust.
+
 Shape: **fan-out → collect**. `convergence: collect` is explicit in the spec.
 
 ---

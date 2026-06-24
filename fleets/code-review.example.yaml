@@ -35,7 +35,9 @@ specialists:
     model: grok-4.3
     toolset: []
     focus: >-
-      Review the code or diff for security vulnerabilities: injection risks
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for security vulnerabilities: injection risks
       (SQL, command, prompt), auth/authz gaps, insecure defaults, exposed
       secrets or credentials, unsafe deserialization, and OWASP Top 10
       patterns. For each finding state the risk level (high/medium/low),
@@ -46,7 +48,9 @@ specialists:
     model: google/gemini-3-flash
     toolset: []
     focus: >-
-      Review the code or diff for architectural concerns: coupling between
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for architectural concerns: coupling between
       modules, violation of separation of concerns, abstraction leaks, naming
       that misrepresents intent, dead or unreachable code, and patterns that
       will resist change. Distinguish genuine structural debt from acceptable
@@ -57,7 +61,9 @@ specialists:
     model: anthropic/claude-opus-4.8
     toolset: []
     focus: >-
-      Review the code or diff for performance concerns: algorithmic complexity
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for performance concerns: algorithmic complexity
       (O(n²) or worse in hot paths), unnecessary I/O or repeated computation,
       blocking calls in async contexts, memory allocation patterns that could
       cause pressure or leaks, and missing caching opportunities. Flag only
@@ -68,7 +74,9 @@ specialists:
     model: anthropic/claude-sonnet-4.6
     toolset: []
     focus: >-
-      Review the code or diff for correctness: logic errors, off-by-one
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for correctness: logic errors, off-by-one
       mistakes, incorrect handling of edge cases (empty input, zero, nil/None,
       overflow), error propagation failures (swallowed exceptions, wrong error
       types), and intent-vs-implementation mismatches. Flag anything that would

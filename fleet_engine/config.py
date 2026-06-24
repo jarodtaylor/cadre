@@ -61,7 +61,7 @@ class SynthesisSpec:
     prompt: str = ""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class FleetConfig:
     name: str
     specialists: list[SpecialistSpec]
@@ -110,7 +110,10 @@ class FleetConfig:
         else:
             convergence = conv_raw
 
-        description = str(data.get("description", ""))
+        # An explicit but empty `description:` parses as YAML null (None); str(None)
+        # would render the literal "None" in the preview, so map null -> "".
+        desc_raw = data.get("description", "")
+        description = "" if desc_raw is None else str(desc_raw)
 
         syn_raw = data.get("synthesis")
         synthesis: SynthesisSpec | None = None
