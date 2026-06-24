@@ -16,9 +16,12 @@ def _config(**overrides):
         "name": "t",
         "synthesis": {"provider": "openrouter", "model": "synth/model", "prompt": "SYNTH:"},
         "specialists": [
-            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"]},
-            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"]},
-            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"],
+             "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"],
+             "focus": "social scan"},
+            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"],
+             "focus": "deep analysis"},
         ],
     }
     data.update(overrides)
@@ -209,8 +212,8 @@ cfg = FleetConfig.from_dict({
     "name": "t",
     "synthesis": {"provider": "openrouter", "model": "s/m", "prompt": "S:"},
     "specialists": [
-        {"role": "web", "provider": "openrouter", "model": "w/m"},
-        {"role": "social", "provider": "xai", "model": "grok"},
+        {"role": "web", "provider": "openrouter", "model": "w/m", "focus": "web research"},
+        {"role": "social", "provider": "xai", "model": "grok", "focus": "social scan"},
     ],
 })
 run_fleet(cfg, "task", HangingClient(), call_timeout=0.3)
@@ -256,7 +259,7 @@ class TestCaptureFields(unittest.TestCase):
             "name": "t",
             "synthesis": {"provider": "openrouter", "model": "synth/model", "prompt": "S:"},
             "specialists": [
-                {"role": "notool", "provider": "openrouter", "model": "m/m"},
+                {"role": "notool", "provider": "openrouter", "model": "m/m", "focus": "analysis only"},
             ],
         }
         cfg = FleetConfig.from_dict(cfg_data)
@@ -344,9 +347,12 @@ def _collect_config(**overrides):
         "name": "t",
         "convergence": "collect",
         "specialists": [
-            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"]},
-            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"]},
-            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"],
+             "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"],
+             "focus": "social scan"},
+            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"],
+             "focus": "deep analysis"},
         ],
     }
     data.update(overrides)

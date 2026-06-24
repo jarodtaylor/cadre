@@ -9,6 +9,7 @@ the first — and malformed inputs become errors, never tracebacks.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,11 @@ SAFE_TOOLSETS = frozenset({
     "safe",                           # Hermes's own safe composite (web + vision + image_gen)
 })
 
+# Persona-name allowlist (KTD4 / R10): must start with an alphanumeric char so bare `.`,
+# `..`, leading-dot hidden names, separators (`/`, `\`), absolute paths, spaces, and NUL
+# are all rejected. Validated at parse time (NO file I/O) in ``from_dict``.
+_PERSONA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 class ConfigError(Exception):
     """Raised when a fleet spec is invalid. Carries every error found, not just the first."""
@@ -52,6 +58,8 @@ class SpecialistSpec:
     model: str
     focus: str = ""
     toolset: list[str] = field(default_factory=list)
+    persona: str = ""
+    effective_instruction: str = ""
 
 
 @dataclass
@@ -182,13 +190,49 @@ class FleetConfig:
                         "`allow_privileged_tools: true` on the fleet to permit them."
                     )
 
+                # Parse persona and focus; validate the XOR invariant (KTD5) and
+                # name allowlist (KTD4 / R10). Both checks accumulate — don't fail-fast.
+                persona_raw = raw.get("persona", "")
+                if not isinstance(persona_raw, str):
+                    errors.append(f"{label}.persona must be a string")
+                    persona_raw = ""
+                persona = persona_raw
+
+                focus_raw = raw.get("focus", "")
+                focus = str(focus_raw) if focus_raw is not None else ""
+
+                # persona XOR non-empty focus: empty-string focus counts as absent,
+                # matching the engine's existing `if spec.focus` convention.
+                has_persona = bool(persona)
+                has_focus = bool(focus)
+                if has_persona and has_focus:
+                    errors.append(
+                        f"{label} specifies both `persona` and `focus` — exactly one "
+                        "instruction source is permitted; remove one."
+                    )
+                elif not has_persona and not has_focus:
+                    errors.append(
+                        f"{label} specifies neither `persona` nor `focus` — at least one "
+                        "instruction source is required."
+                    )
+
+                # Persona-name allowlist (R10 / KTD4): see module-level ``_PERSONA_NAME_RE``.
+                # NO file I/O here — validation is parse-time only.
+                if has_persona and not _PERSONA_NAME_RE.fullmatch(persona):
+                    errors.append(
+                        f"{label}.persona name {persona!r} is not a valid pool name — "
+                        "must match [A-Za-z0-9][A-Za-z0-9._-]* (no path separators, "
+                        "spaces, leading dots, or absolute paths)."
+                    )
+
                 specialists.append(
                     SpecialistSpec(
                         role=str(role) if role else "",
                         provider=str(raw.get("provider", "")),
                         model=str(raw.get("model", "")),
-                        focus=str(raw.get("focus", "")),
+                        focus=focus,
                         toolset=[str(t) for t in toolset],
+                        persona=persona,
                     )
                 )
 

@@ -72,7 +72,7 @@ class TestValidate(unittest.TestCase):
             "description: A catalog blurb for this fleet\n"
             "synthesis: {provider: openrouter, model: m}\n"
             "specialists:\n"
-            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: [], focus: analysis}\n"
         )
         self.addCleanup(os.unlink, path)
         code, out = validate_command(path)
@@ -86,7 +86,7 @@ class TestValidate(unittest.TestCase):
             'description: "blurb\\u001b[2Kevil"\n'
             "synthesis: {provider: openrouter, model: m}\n"
             "specialists:\n"
-            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: [], focus: analysis}\n"
         )
         self.addCleanup(os.unlink, path)
         code, out = validate_command(path)
@@ -965,10 +965,12 @@ specialists:
     provider: openrouter
     model: google/gemini-3-flash
     toolset: [web]
+    focus: web research
   - role: social
     provider: xai
     model: grok-4.3
     toolset: [x_search]
+    focus: social scan
 """
 
 

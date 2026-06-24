@@ -31,9 +31,12 @@ def _config(**overrides):
         "name": "t",
         "synthesis": {"provider": "openrouter", "model": "synth/model", "prompt": "SYNTH:"},
         "specialists": [
-            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"]},
-            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"]},
-            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"],
+             "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"],
+             "focus": "social scan"},
+            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"],
+             "focus": "deep analysis"},
         ],
     }
     data.update(overrides)
@@ -312,7 +315,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
             "name": "collect-fleet",
             "convergence": "collect",
             "specialists": [
-                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+                 "focus": "web research"},
             ],
         })
 
@@ -322,7 +326,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
             "convergence": "synthesize",
             "synthesis": {"provider": "openrouter", "model": "synth/model"},
             "specialists": [
-                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+                 "focus": "web research"},
             ],
         })
 
