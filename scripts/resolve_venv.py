@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 # Known Hermes venv python paths, probed in order when no override is given.
@@ -52,8 +53,8 @@ _STARTER_PERSONAS = (
 def _seed_files(
     src_dir: Path,
     dest_dir: Path,
-    names: tuple,
-    dest_name_fn,
+    names: tuple[str, ...],
+    dest_name_fn: Callable[[str], str],
 ) -> None:
     """Seed a set of files from src_dir into dest_dir, owner-only and idempotent.
 

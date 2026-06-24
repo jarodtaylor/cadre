@@ -1,5 +1,8 @@
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -88,9 +91,6 @@ class TestPersonaPrompt(unittest.TestCase):
     """
 
     def setUp(self):
-        import tempfile, os, shutil
-        from fleet_engine.config import FleetConfig
-        from fleet_engine.personas import resolve
         self._tmp = tempfile.mkdtemp()
         self.pool = os.path.realpath(self._tmp)
         persona_body = "You are a coherence reviewer. Look for internal contradictions.\n"
@@ -111,7 +111,6 @@ class TestPersonaPrompt(unittest.TestCase):
         self.cfg = cfg
 
     def tearDown(self):
-        import shutil
         shutil.rmtree(self._tmp)
 
     def test_persona_body_in_specialist_prompt(self):
@@ -132,6 +131,24 @@ class TestPersonaPrompt(unittest.TestCase):
         # With effective_instruction set (truthy), the prompt carries "Focus: <body>".
         # If the engine had read raw focus (empty string), no Focus: line would appear.
         self.assertIn("Focus:", prompt, "effective_instruction must appear under Focus: label")
+
+    def test_run_fleet_rejects_unresolved_instruction(self):
+        """KTD8 defense-in-depth: run_fleet fails loud when a spec was never resolved
+        (effective_instruction empty) rather than silently dropping the instruction and
+        running a no-instruction lane. A persona spec has focus='' by XOR, so without
+        the guard an unresolved persona lane is indistinguishable from a valid one."""
+        unresolved = FleetConfig.from_dict({
+            "name": "t",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "coherence", "provider": "p", "model": "m", "persona": "coherence"},
+            ],
+        })  # deliberately NOT resolve()'d — effective_instruction stays ""
+        with self.assertRaises(ValueError) as ctx:
+            run_fleet(unresolved, "task", FakeClient())
+        msg = str(ctx.exception)
+        self.assertIn("resolve", msg.lower())
+        self.assertIn("coherence", msg, "the error must name the offending specialist role")
 
 
 class TestProvenance(unittest.TestCase):
@@ -254,6 +271,7 @@ import sys, threading
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import resolve
 
 hang = sys.argv[1]
 never = threading.Event()
@@ -274,6 +292,7 @@ cfg = FleetConfig.from_dict({
         {"role": "social", "provider": "xai", "model": "grok", "focus": "social scan"},
     ],
 })
+resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O (mirrors prod callers)
 run_fleet(cfg, "task", HangingClient(), call_timeout=0.3)
 print("EXITED_CLEANLY")
 """

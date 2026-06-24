@@ -1038,5 +1038,68 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class _PromptCapturingClient(FakeClient):
+    """FakeClient that also records the prompt each specialist received."""
+
+    def __init__(self, behavior=None):
+        super().__init__(behavior)
+        self.prompts = {}
+
+    def run(self, *, role, provider, model, prompt, toolset=()):
+        self.prompts[role] = prompt
+        return super().run(role=role, provider=provider, model=model, prompt=prompt, toolset=toolset)
+
+
+class TestPersonaResolutionViaCLI(unittest.TestCase):
+    """The CLI validate/run path resolves personas via default_pool_dir() (KTD8).
+
+    Guards the CLI<->resolver wiring. Every other CLI test uses focus-only fleets,
+    so resolve() short-circuits with zero I/O and these call sites are otherwise
+    unexercised — deleting resolve() from validate_command/run_command would stay
+    green without this. The pool is redirected via CADRE_PERSONAS_DIR (the test seam).
+    """
+
+    def setUp(self):
+        self._pool = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._pool)
+        self._body = "You are a reviewer. Cite the exact passage. Say 'no finding' if sound.\n"
+        with open(os.path.join(self._pool, "rev.md"), "w", encoding="utf-8") as f:
+            f.write(self._body)
+        self._fleet = _tmp_yaml(
+            "name: p\n"
+            "convergence: collect\n"
+            "specialists:\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: [], persona: rev}\n"
+        )
+        self.addCleanup(os.unlink, self._fleet)
+
+    def test_validate_resolves_persona_against_pool(self):
+        """validate exits 0 for a persona fleet whose persona resolves in the pool."""
+        with patch.dict(os.environ, {"CADRE_PERSONAS_DIR": self._pool}):
+            code, out = validate_command(self._fleet)
+        self.assertEqual(code, 0, f"persona fleet should validate cleanly; got: {out}")
+
+    def test_validate_missing_persona_errors(self):
+        """A persona absent from the pool fails validate — proves validate resolves."""
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty)
+        with patch.dict(os.environ, {"CADRE_PERSONAS_DIR": empty}):
+            code, out = validate_command(self._fleet)
+        self.assertEqual(code, 1, "a persona absent from the pool must fail validate")
+        self.assertIn("rev", out)
+
+    def test_run_builds_prompt_from_persona(self):
+        """run resolves the persona and the body reaches the specialist prompt end-to-end."""
+        client = _PromptCapturingClient()
+        with patch.dict(os.environ, {"CADRE_PERSONAS_DIR": self._pool}):
+            code, out = run_command(self._fleet, "review this", client=client, capture=False)
+        self.assertEqual(code, 0, f"persona fleet should run; got: {out}")
+        self.assertIn(
+            "Cite the exact passage.",
+            client.prompts.get("r", ""),
+            "the resolved persona body must reach the specialist prompt",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

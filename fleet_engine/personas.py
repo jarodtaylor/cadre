@@ -50,9 +50,11 @@ def resolve(config: FleetConfig, pool_dir: str | os.PathLike) -> FleetConfig:
     references a persona (R4). A focus-only fleet resolves cleanly even
     when no personas pool exists on the host.
 
-    Accumulates every error and raises a single ``ConfigError`` at the end
-    (mirrors the config loader pattern). Never tracebacks — every failure
-    mode produces a clear error string.
+    Per-specialist errors accumulate and raise a single ``ConfigError`` at the
+    end (mirrors the config loader pattern). A missing/invalid ``pool_dir`` is
+    the one exception — it raises immediately, since every per-spec error would
+    stem from the same missing root. Never tracebacks — every failure mode
+    produces a clear error string.
 
     Args:
         config: Loaded and validated ``FleetConfig``.

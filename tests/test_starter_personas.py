@@ -44,20 +44,11 @@ _CITE_PHRASE = "cite"
 _NO_FINDING_PHRASE = "no finding"
 
 # Provider / model tokens that must NOT appear (R1 — no binding in persona).
-# Checked case-insensitively as substrings.
-_BANNED_MODEL_TOKENS = [
-    "haiku",
-    "sonnet",
-    "opus",
-    "gpt-",
-    "grok",
-    "gemini",
-    "deepseek",
-    "openrouter",
-    "anthropic",
-    "openai",
-    "xai",
-]
+# Natural-language-risky words are matched on word boundaries so ordinary prose
+# ("magnum opus", "grok the spec", "a haiku") cannot spuriously trip the guard;
+# unambiguous provider/slug tokens that never occur in prose stay plain substrings.
+_BANNED_MODEL_WORDS = ["haiku", "sonnet", "opus", "grok", "gemini"]
+_BANNED_MODEL_SLUGS = ["gpt-", "deepseek", "openrouter", "anthropic", "openai", "xai"]
 
 # Structural binding indicators that must NOT appear (R1 — no YAML frontmatter,
 # no model/tools keys).
@@ -220,13 +211,16 @@ class TestStarterPersonasNoModelBinding(unittest.TestCase):
             )
 
     def _check_no_model_tokens(self, name: str) -> None:
-        """No model or provider name tokens (case-insensitive substring)."""
+        """No model/provider binding (words on \\b boundaries; unambiguous slugs as substrings)."""
         text = _read(name).lower()
-        for token in _BANNED_MODEL_TOKENS:
+        for word in _BANNED_MODEL_WORDS:
+            self.assertIsNone(
+                re.search(r"\b" + re.escape(word) + r"\b", text),
+                f"{name} must not contain the model token {word!r} as a word",
+            )
+        for slug in _BANNED_MODEL_SLUGS:
             self.assertNotIn(
-                token.lower(),
-                text,
-                f"{name} must not contain model/provider token {token!r}",
+                slug, text, f"{name} must not contain the provider/model slug {slug!r}"
             )
 
     def test_coherence_reviewer_no_binding(self):

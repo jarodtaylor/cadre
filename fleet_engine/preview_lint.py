@@ -246,13 +246,13 @@ def check_focus_grounding(config: "FleetConfig") -> list[str]:
             msg = (
                 f"specialist '{_sanitize(spec.role)}': retrieval toolset + anti-grounding phrasing "
                 f"(breadth/speed framing) but no sourcing directive — "
-                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+                f"add \"cite a primary source with a link per claim\" to the specialist's instruction; {_PROFILE_CAVEAT}"
             )
         else:
             msg = (
-                f"specialist '{_sanitize(spec.role)}': retrieval toolset but focus does not request "
+                f"specialist '{_sanitize(spec.role)}': retrieval toolset but its instruction does not request "
                 f"sources or citations — "
-                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+                f"add \"cite a primary source with a link per claim\" to the specialist's instruction; {_PROFILE_CAVEAT}"
             )
         warnings.append(msg)
     return warnings
