@@ -229,7 +229,8 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
         layer (None enables every Hermes toolset; [] is fail-closed zero tools),
         so assert the explicit empty list here. Note config.py normalizes
         ``toolset: null`` -> [], so this passes even on a null authoring slip;
-        the explicit ``toolset: []`` in the YAML is the authored guarantee.
+        the explicit ``toolset: []`` in the YAML is the authored guarantee, which
+        ``test_yaml_authors_explicit_empty_toolset_per_lane`` guards directly.
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
         for spec in cfg.specialists:
@@ -242,6 +243,40 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
                 spec.toolset,
                 list,
                 f"doc-review lane '{spec.role}' toolset must be a list, not None",
+            )
+
+    def test_yaml_authors_explicit_empty_toolset_per_lane(self):
+        """KTD4 (authored guarantee): every active lane declares the literal ``toolset: []``.
+
+        ``config.py`` normalizes ``toolset: null`` / a missing key both to ``[]``,
+        so the parsed-config assertion above passes even if a lane were authored
+        with ``toolset: null``. That would silently weaken the security posture:
+        ``null`` reads to a human as "default" and is one careless edit away from
+        being dropped, whereas the explicit ``[]`` is the deliberate fail-closed
+        statement. This test reads the raw YAML and requires every non-comment
+        toolset declaration to be exactly ``toolset: []`` — and that there are
+        exactly five (one per active lane; the commented-out optional design/
+        security lanes are excluded as comments).
+        """
+        lines = _DOC_REVIEW.read_text(encoding="utf-8").splitlines()
+        toolset_lines = [
+            stripped
+            for line in lines
+            for stripped in [line.strip()]
+            if stripped.startswith("toolset:")  # comment lines start with '#', so excluded
+        ]
+        self.assertEqual(
+            len(toolset_lines),
+            len(_DOC_REVIEW_ROLES),
+            f"expected one authored toolset per active lane ({len(_DOC_REVIEW_ROLES)}), "
+            f"got {len(toolset_lines)}: {toolset_lines}",
+        )
+        for decl in toolset_lines:
+            self.assertEqual(
+                decl,
+                "toolset: []",
+                f"every active doc-review lane must author the literal 'toolset: []' "
+                f"(fail-closed, not 'toolset: null'); got {decl!r}",
             )
 
 
