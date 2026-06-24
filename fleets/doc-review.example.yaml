@@ -19,18 +19,22 @@
 # independently and decide what to act on.
 #
 # Usage: pass the planning document you want reviewed as the --task argument
-# (paste the requirements or plan text). The focuses are doc-type-agnostic —
+# (paste the requirements or plan text). The personas are doc-type-agnostic —
 # they apply to a requirements doc or a plan — so name the document type in the
 # task when it matters (e.g. "Review this PLAN: ..." vs "Review these
 # REQUIREMENTS: ...").
 #
-# toolset: [] on every lane — review lenses reason over the document you supply
-# in the task (provided context). They need no live retrieval tools. [] is
-# fail-closed zero tools (not unset), preserving the SAFE_TOOLSETS gate and
-# keeping prompt-injection in the reviewed document from escalating to actions.
+# toolset: [] on every active lane — each specialist reasons over the document
+# you supply in the task (provided context only). [] is fail-closed zero tools
+# (not unset), preserving the SAFE_TOOLSETS gate and keeping prompt-injection
+# in the reviewed document from escalating to actions.
 #
 # Prefer reasoning/completion models, not agentic ones: under toolset: [] a
 # tool-happy model may emit no-op tool calls and return no review at all.
+#
+# Active lanes use rich persona files from the shared personas/ pool — the full
+# persona text (not a one-line focus) is what each lane runs. Persona files
+# contain the lens's full instruction, grounding controls, and citation guidance.
 
 name: doc-review
 description: >-
@@ -45,104 +49,40 @@ specialists:
     provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
     model: google/gemini-3-flash
     toolset: []
-    focus: >-
-      You have NO tools available: review strictly from the document in the
-      task — do not emit tool calls, fetch, or run anything; output your review
-      as text. Review for internal consistency — where the document disagrees
-      with itself: contradictions between sections (scope excludes X but a
-      requirement includes it), terminology drift (one concept under several
-      names, or one term meaning different things), broken internal references
-      (cites a section that is absent or says something different), and
-      structural gaps (forward references to undefined things, a header count
-      that does not match the list it heads). You are not judging whether the
-      plan is good, feasible, or complete — only whether it is self-consistent.
-      Cite the exact section or passage you flag. If the document is sound on
-      this lens, say "no finding" — do not invent issues to appear thorough; if
-      you cannot tell from the document alone, say so. For each finding give:
-      what, where in the document, why it matters, and a suggested fix.
+    persona: coherence-reviewer
 
   - role: feasibility
     provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
     model: anthropic/claude-opus-4.8
     toolset: []
-    focus: >-
-      You have NO tools available: review strictly from the document in the
-      task — do not emit tool calls, fetch, or run anything; output your review
-      as text. Review for feasibility — whether this can be built as described
-      and an implementer could start without making architectural decisions the
-      document should have made: approaches that conflict with the existing
-      stack, assumptions that a service or capability exists, data flows that
-      address only the happy path and not the missing/empty/error cases,
-      unidentified dependencies, and migrations waved at rather than specified.
-      Flag a gap only when it would block implementation, not when detail is
-      merely deferred. Cite the exact section or passage you flag. If the
-      document is sound on this lens, say "no finding" — do not invent issues to
-      appear thorough; if you cannot tell from the document alone, say so. For
-      each finding give: what, where in the document, why it matters, and a
-      suggested fix.
+    persona: feasibility-reviewer
 
   - role: scope-guardian
     provider: xai              # OAuth provider -> bare model id; swap to your palette
     model: grok-4.3
     toolset: []
-    focus: >-
-      You have NO tools available: review strictly from the document in the
-      task — do not emit tool calls, fetch, or run anything; output your review
-      as text. Review for scope discipline — whether the work is right-sized for
-      its stated goals and every abstraction earns its keep: scope that serves
-      no stated goal, goals no scope item delivers, speculative abstractions
-      with a single consumer, frameworks built ahead of need, and units that
-      quietly include work the document defers. Prefer the smallest change that
-      delivers the stated outcome; flag complexity that is disproportionate to
-      the goal. Cite the exact section or passage you flag. If the document is
-      sound on this lens, say "no finding" — do not invent issues to appear
-      thorough; if you cannot tell from the document alone, say so. For each
-      finding give: what, where in the document, why it matters, and a suggested
-      fix.
+    persona: scope-guardian-reviewer
 
   - role: product
     provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    # Cost-efficiency comparison lane: swap this to a cheaper/smaller model on your palette
+    # (e.g. anthropic/claude-haiku-4-5) to compare rich-persona output vs. the old
+    # compressed focus at a fixed cost point — the host dogfood controlled comparison.
     model: openai/gpt-5.5
     toolset: []
-    focus: >-
-      You have NO tools available: review strictly from the document in the
-      task — do not emit tool calls, fetch, or run anything; output your review
-      as text. Review as a senior product leader — the failure mode is building
-      the wrong thing well, so challenge the premise before the execution: is
-      this the right problem or a proxy for it, does the proposed work trace a
-      direct path to the intended user outcome, are there orphan requirements
-      serving no stated goal or goals no requirement serves, and what are the
-      second-order consequences (trajectory, identity, adoption, opportunity
-      cost). Name any concrete simpler alternative that would deliver most of
-      the value at a fraction of the cost. Cite the exact section or passage you
-      flag. If the document is sound on this lens, say "no finding" — do not
-      invent issues to appear thorough; if you cannot tell from the document
-      alone, say so. For each finding give: what, where in the document, why it
-      matters, and a suggested fix.
+    persona: product-reviewer
 
   - role: adversarial
     provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
     model: deepseek/deepseek-v3.2
     toolset: []
-    focus: >-
-      You have NO tools available: review strictly from the document in the
-      task — do not emit tool calls, fetch, or run anything; output your review
-      as text. Review by trying to falsify the document — surface unstated
-      assumptions and stress-test decisions rather than checking style:
-      environmental, scale, and temporal assumptions the work depends on but
-      never states (and the consequence if each is wrong), load-bearing
-      decisions whose reversal would be expensive and whose supporting evidence
-      is thin, and obvious alternatives the document never considered ("we chose
-      X" with no "why not Y"). For each, give the concrete scenario under which
-      the document's approach fails. Cite the exact section or passage you flag.
-      If the document is sound on this lens, say "no finding" — do not invent
-      issues to appear thorough; if you cannot tell from the document alone, say
-      so. For each finding give: what, where in the document, why it matters,
-      and a suggested fix.
+    persona: adversarial-document-reviewer
 
   # ---------------------------------------------------------------------------
   # Optional add-on lanes — uncomment for UI-heavy or security-sensitive
   # documents. Each adds a lens; assign a model from your verified palette.
+  # These lanes retain inline focus: (no persona files exist for design/security
+  # yet); replace with persona: references once those files are authored.
   # ---------------------------------------------------------------------------
   #
   # - role: design

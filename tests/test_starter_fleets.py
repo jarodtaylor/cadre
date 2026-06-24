@@ -31,11 +31,6 @@ _DOC_REVIEW = _REPO / "fleets" / "doc-review.example.yaml"
 # The five review lenses doc-review ports from ce-doc-review, in fleet order.
 _DOC_REVIEW_ROLES = ["coherence", "feasibility", "scope-guardian", "product", "adversarial"]
 
-# The exact no-tools declaration every review lane's focus must carry (AE6). It
-# is the same anchor code-review uses; asserting the literal phrase keeps the
-# security-relevant "you have no tools" instruction from silently regressing.
-_NO_TOOLS_DECLARATION = "You have NO tools available"
-
 
 # ---------------------------------------------------------------------------
 # Schema validity: both fleets load without raising ConfigError
@@ -169,13 +164,16 @@ class TestStarterFleetsLintClean(unittest.TestCase):
     def test_doc_review_focus_lint_clean(self):
         """doc-review has zero check_focus_grounding warnings.
 
-        Every lane uses toolset: [] (non-retrieval), so the grounding lint
-        checks none of them — the warning list is trivially empty. This guards
-        against a future maintainer adding a retrieval toolset to a review lane
-        without the corresponding sourcing directive.
+        Every active lane uses toolset: [] (non-retrieval), so the grounding
+        lint checks none of them — the warning list is trivially empty. This
+        guards against a future maintainer adding a retrieval toolset to a
+        review lane without the corresponding sourcing directive.
+
+        Post-U6: doc-review lanes carry personas, so resolution must succeed
+        against the real repo pool (not /unused — that would raise).
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
-        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+        resolve(cfg, str(_REPO / "personas"))
         warnings = check_focus_grounding(cfg)
         self.assertEqual(
             warnings,
@@ -202,27 +200,6 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
             _DOC_REVIEW_ROLES,
             f"doc-review must have the five lenses in order, got: {roles}",
         )
-
-    def test_every_focus_declares_no_tools(self):
-        """AE6: each lane's focus is non-empty and carries the no-tools declaration.
-
-        ``check_focus_grounding`` skips ``toolset: []`` lanes, so it does NOT
-        cover this — every doc-review lane is empty-toolset, so the grounding
-        lint never inspects their focus text. This custom assertion is the only
-        guard that each review lens actually tells its model it has no tools.
-        """
-        cfg = FleetConfig.load(_DOC_REVIEW)
-        for spec in cfg.specialists:
-            self.assertTrue(
-                spec.focus.strip(),
-                f"doc-review lane '{spec.role}' must have a non-empty focus",
-            )
-            self.assertIn(
-                _NO_TOOLS_DECLARATION,
-                spec.focus,
-                f"doc-review lane '{spec.role}' focus must declare it has no tools "
-                f"(missing {_NO_TOOLS_DECLARATION!r})",
-            )
 
     def test_every_toolset_is_empty_list_not_none(self):
         """KTD4: each parsed toolset is [] (an empty list), never None.
@@ -282,6 +259,58 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
                 f"every active doc-review lane must author the literal 'toolset: []' "
                 f"(fail-closed, not 'toolset: null'); got {decl!r}",
             )
+
+
+    def test_doc_review_personas_resolve_end_to_end(self):
+        """All five doc-review lanes resolve their persona against the repo pool.
+
+        After U6 migration each active lane carries a ``persona`` reference
+        (not a ``focus``). This test verifies end-to-end resolution: resolve()
+        must not raise, each lane must have a non-empty ``persona`` name, an
+        empty ``focus``, ``toolset == []``, and a non-empty
+        ``effective_instruction`` populated from the persona file.
+        """
+        cfg = FleetConfig.load(_DOC_REVIEW)
+        # Must not raise — pool exists and all five persona files are present.
+        resolve(cfg, str(_REPO / "personas"))
+        for spec in cfg.specialists:
+            self.assertTrue(
+                spec.persona,
+                f"doc-review lane '{spec.role}' must carry a persona name post-U6",
+            )
+            self.assertEqual(
+                spec.focus,
+                "",
+                f"doc-review lane '{spec.role}' must have empty focus post-U6 "
+                f"(persona XOR focus); got: {spec.focus!r}",
+            )
+            self.assertEqual(
+                spec.toolset,
+                [],
+                f"doc-review lane '{spec.role}' toolset must be [] post-U6",
+            )
+            self.assertTrue(
+                spec.effective_instruction and spec.effective_instruction.strip(),
+                f"doc-review lane '{spec.role}' must have a non-empty "
+                f"effective_instruction after persona resolution",
+            )
+
+    def test_doc_review_cross_model_spread_preserved(self):
+        """doc-review lanes are not all on the same model (cross-model spread intact).
+
+        The fleet ships with five distinct provider/model families to illustrate
+        cross-model review. This guards against accidentally collapsing all lanes
+        onto a single model during future edits.
+        """
+        cfg = FleetConfig.load(_DOC_REVIEW)
+        models = [spec.model for spec in cfg.specialists]
+        unique_models = set(models)
+        self.assertGreater(
+            len(unique_models),
+            1,
+            f"doc-review must use more than one model (cross-model spread); "
+            f"got all lanes on: {models}",
+        )
 
 
 if __name__ == "__main__":
