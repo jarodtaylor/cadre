@@ -367,5 +367,45 @@ class TestEngineIsolation(unittest.TestCase):
         )
 
 
+class TestPoolDirTildeExpansion(unittest.TestCase):
+    """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).
+
+    The default pool is the literal "~/.cadre/personas" (from default_pool_dir);
+    os.path.realpath does NOT expand ~, so without an expanduser step the default
+    would canonicalize to <cwd>/~/.cadre/personas and never match the
+    install-seeded pool — every CLI/skill run of a persona fleet would raise.
+    The other tests pass already-absolute pool_dirs, which mask this; these use a
+    ~-relative pool with HOME patched at a tmp dir.
+    """
+
+    def test_tilde_pool_dir_is_expanded(self):
+        """A literal "~/..." pool_dir resolves against the expanded home."""
+        with tempfile.TemporaryDirectory() as home:
+            home = os.path.realpath(home)
+            pool = os.path.join(home, ".cadre", "personas")
+            os.makedirs(pool)
+            with open(os.path.join(pool, "p.md"), "w", encoding="utf-8") as f:
+                f.write("persona body text\n")
+            cfg = _make_collect_config([_persona_spec("p")])
+            with patch.dict(os.environ, {"HOME": home}):
+                resolve(cfg, "~/.cadre/personas")  # ~ must expand to <home>/.cadre/personas
+            self.assertEqual(
+                cfg.specialists[0].effective_instruction, "persona body text\n"
+            )
+
+    def test_tilde_in_env_pool_dir_is_expanded(self):
+        """A ~-containing CADRE_PERSONAS_DIR (via default_pool_dir) also expands."""
+        with tempfile.TemporaryDirectory() as home:
+            home = os.path.realpath(home)
+            pool = os.path.join(home, "custom", "personas")
+            os.makedirs(pool)
+            with open(os.path.join(pool, "p.md"), "w", encoding="utf-8") as f:
+                f.write("body\n")
+            cfg = _make_collect_config([_persona_spec("p")])
+            with patch.dict(os.environ, {"HOME": home, "CADRE_PERSONAS_DIR": "~/custom/personas"}):
+                resolve(cfg, default_pool_dir())
+            self.assertEqual(cfg.specialists[0].effective_instruction, "body\n")
+
+
 if __name__ == "__main__":
     unittest.main()

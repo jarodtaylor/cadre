@@ -84,8 +84,13 @@ def resolve(config: FleetConfig, pool_dir: str | os.PathLike) -> FleetConfig:
         return config
 
     # At least one persona is referenced: the pool must exist.
-    # os.path.realpath does NOT raise on a missing path — it returns the
-    # canonicalized nonexistent path — so we must check explicitly.
+    # expanduser FIRST — os.path.realpath does NOT expand ``~``, so the default
+    # "~/.cadre/personas" (and any ~-containing CADRE_PERSONAS_DIR) would
+    # canonicalize to <cwd>/~/.cadre/personas and never match the install-seeded
+    # pool. expanduser → realpath preserves the confinement ordering.
+    # realpath does NOT raise on a missing path — it returns the canonicalized
+    # nonexistent path — so we check isdir explicitly.
+    pool_dir = os.path.expanduser(os.fspath(pool_dir))
     pool_real = os.path.realpath(pool_dir)
     if not os.path.isdir(pool_real):
         errors.append(
