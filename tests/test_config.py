@@ -394,11 +394,15 @@ class TestPersonaXORFocus(unittest.TestCase):
         ))
         self.assertEqual(cfg.specialists[0].persona, "adversarial-document-reviewer")
 
-    def test_effective_instruction_defaults_empty_after_parse(self):
-        # U1 adds the field; U2 populates it. After parse (no resolver run), it's "".
+    def test_focus_only_effective_instruction_populated_at_parse(self):
+        # A focus-only spec carries effective_instruction = focus straight from parse —
+        # no resolver run needed, so a focus-only fleet runs from FleetConfig.load() alone.
+        # (A persona spec stays empty until the resolver reads the file — see
+        # test_persona_only_parses.)
         cfg = FleetConfig.from_dict(make_data())
         for spec in cfg.specialists:
-            self.assertEqual(spec.effective_instruction, "")
+            self.assertTrue(spec.focus, "make_data builds focus-only specs")
+            self.assertEqual(spec.effective_instruction, spec.focus)
 
     def test_non_string_persona_accumulates_error(self):
         # isinstance-guard: a list value for persona must not TypeError through re.fullmatch.

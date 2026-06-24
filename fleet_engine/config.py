@@ -233,6 +233,12 @@ class FleetConfig:
                         focus=focus,
                         toolset=[str(t) for t in toolset],
                         persona=persona,
+                        # Focus is a complete, no-I/O instruction — populate the carrier at
+                        # parse so a focus-only fleet runs straight from FleetConfig.load()
+                        # with no resolve() step (preserving the pre-persona engine API). A
+                        # persona has focus="" here, so its carrier stays empty until the
+                        # caller-layer resolver reads the file.
+                        effective_instruction=focus,
                     )
                 )
 

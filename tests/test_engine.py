@@ -150,6 +150,25 @@ class TestPersonaPrompt(unittest.TestCase):
         self.assertIn("resolve", msg.lower())
         self.assertIn("coherence", msg, "the error must name the offending specialist role")
 
+    def test_run_fleet_accepts_focus_only_without_resolve(self):
+        """Codex [high] regression: a focus-only fleet runs straight from FleetConfig
+        load/from_dict with NO resolve() — effective_instruction is populated from focus
+        at parse, so the pre-persona engine API (load -> run_fleet) keeps working."""
+        cfg = FleetConfig.from_dict({
+            "name": "t",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "web", "provider": "p", "model": "m", "toolset": [], "focus": "find sources"},
+            ],
+        })  # deliberately NOT resolve()'d
+        client = FakeClient()
+        result = run_fleet(cfg, "task", client)  # must not raise
+        self.assertTrue(result.ok)
+        self.assertIn(
+            "find sources", client.prompt_for("web"),
+            "focus must reach the prompt via parse-time effective_instruction",
+        )
+
 
 class TestProvenance(unittest.TestCase):
     def test_each_specialist_labeled(self):

@@ -102,6 +102,25 @@ def resolve(config: FleetConfig, pool_dir: str | os.PathLike) -> FleetConfig:
         # errors that all stem from the same missing root.
         raise ConfigError(errors)
 
+    # The pool's CONTENTS are read verbatim as model instructions, so the pool dir
+    # itself must be a private operator directory. Reject one owned by another user or
+    # writable by group/other — where a local attacker could plant a <name>.md to inject
+    # instructions (O_NOFOLLOW guards the leaf open against symlinks, but not regular-file
+    # replacement inside a loose directory). Surfaced by Codex adversarial review.
+    try:
+        st = os.stat(pool_real)
+    except OSError as exc:
+        errors.append(f"persona pool directory could not be inspected: {exc}")
+        raise ConfigError(errors)
+    getuid = getattr(os, "getuid", None)
+    if (getuid is not None and st.st_uid != getuid()) or (st.st_mode & 0o022):
+        errors.append(
+            "persona pool directory has unsafe ownership or permissions — it must be "
+            "owned by you and not group/other-writable (its files are trusted as model "
+            f"instructions): {pool_dir!r}"
+        )
+        raise ConfigError(errors)
+
     # Pass 2: resolve each persona spec.
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     for spec in persona_specs:

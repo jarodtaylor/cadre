@@ -407,5 +407,36 @@ class TestPoolDirTildeExpansion(unittest.TestCase):
             self.assertEqual(cfg.specialists[0].effective_instruction, "body\n")
 
 
+class TestPoolPermissions(unittest.TestCase):
+    """The pool dir is trusted as a model-instruction source, so it must be private
+    (owned by the current user, not group/other-writable). Surfaced by Codex review."""
+
+    def test_group_or_other_writable_pool_rejected(self):
+        """A pool writable by group/other is refused — a local attacker could plant a file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.realpath(tmp)
+            with open(os.path.join(pool, "p.md"), "w", encoding="utf-8") as f:
+                f.write("persona body\n")
+            os.chmod(pool, 0o777)  # group/other writable → unsafe
+            cfg = _make_collect_config([_persona_spec("p")])
+            with self.assertRaises(ConfigError) as ctx:
+                resolve(cfg, pool)
+            self.assertTrue(
+                any("unsafe" in e.lower() for e in ctx.exception.errors),
+                f"expected an unsafe-pool error; got: {ctx.exception.errors}",
+            )
+
+    def test_owner_only_pool_accepted(self):
+        """A 0o700 owner-only pool resolves normally — the safe default must not false-positive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.realpath(tmp)
+            os.chmod(pool, 0o700)
+            with open(os.path.join(pool, "p.md"), "w", encoding="utf-8") as f:
+                f.write("persona body\n")
+            cfg = _make_collect_config([_persona_spec("p")])
+            resolve(cfg, pool)  # must not raise
+            self.assertEqual(cfg.specialists[0].effective_instruction, "persona body\n")
+
+
 if __name__ == "__main__":
     unittest.main()
