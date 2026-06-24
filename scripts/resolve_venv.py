@@ -31,7 +31,11 @@ KNOWN_PROBE_PATHS = [
 
 # Explicit allowlist — NEVER glob fleets/*.yaml: palette.example.yaml lives there
 # and is not a fleet (it would break FleetConfig.load if seeded as a fleet).
-_STARTER_FLEETS = ("research-swarm.example.yaml", "code-review.example.yaml")
+_STARTER_FLEETS = (
+    "research-swarm.example.yaml",
+    "code-review.example.yaml",
+    "doc-review.example.yaml",
+)
 
 
 def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
