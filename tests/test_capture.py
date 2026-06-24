@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 from fleet_engine.capture import (
     _safe_role,
+    _specialist_md,
+    _synthesis_md,
     lane_filename_map,
     prepare_run_dir,
     resolve_run_dir,
@@ -991,6 +993,221 @@ class TestSavePrompt(unittest.TestCase):
         self.assertFalse(nested.exists())
         save_prompt(nested, "task")
         self.assertTrue((nested / "prompt.txt").exists())
+
+
+# ---------------------------------------------------------------------------
+# U4 (fleet-shapes): collect convergence — manifest, synthesis.md, distinguishability
+# ---------------------------------------------------------------------------
+
+
+def _collect_cfg(**overrides):
+    """Minimal valid collect FleetConfig (no synthesis block required)."""
+    data = {
+        "name": "test-collect",
+        "convergence": "collect",
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "google/gemini-3-flash",
+             "toolset": ["web"], "focus": "find sources"},
+            {"role": "social", "provider": "xai", "model": "grok-4.3",
+             "toolset": ["x_search"], "focus": "scan X"},
+        ],
+    }
+    data.update(overrides)
+    return FleetConfig.from_dict(data)
+
+
+def _collect_result(specialists=None, ok=True, text_suffix="") -> FleetResult:
+    """Build a collect FleetResult (convergence='collect', synthesis=None, synth_ok=None)."""
+    if specialists is None:
+        specialists = [
+            _lane("web", toolset=["web"], text=f"web-output{text_suffix}"),
+            _lane("social", provider="xai", model="grok-4.3", toolset=["x_search"],
+                  text=f"social-output{text_suffix}"),
+        ]
+    return FleetResult(
+        fleet="test-collect",
+        task="Find design tools",
+        specialists=specialists,
+        synthesis=None,
+        ok=ok,
+        synth_ok=None,
+        notes=[],
+        convergence="collect",
+    )
+
+
+class TestCollectManifest(unittest.TestCase):
+    """Collect run manifest carries convergence='collect', synthesizer=None, synth_ok=None."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _load_manifest(self):
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_collect_manifest_convergence_field(self):
+        """manifest.convergence == 'collect' for a collect run."""
+        save_run(_collect_cfg(), _collect_result(), self.run_dir)
+        manifest = self._load_manifest()
+        self.assertEqual(manifest["convergence"], "collect")
+
+    def test_collect_manifest_synthesizer_is_none(self):
+        """manifest.synthesizer is null (None) for a collect run."""
+        save_run(_collect_cfg(), _collect_result(), self.run_dir)
+        manifest = self._load_manifest()
+        self.assertIsNone(manifest["synthesizer"])
+
+    def test_collect_manifest_synth_ok_is_none(self):
+        """manifest.synth_ok is null (None) for a collect run (synthesis never ran)."""
+        save_run(_collect_cfg(), _collect_result(), self.run_dir)
+        manifest = self._load_manifest()
+        self.assertIsNone(manifest["synth_ok"])
+
+
+class TestCollectSynthesisMd(unittest.TestCase):
+    """synthesis.md for a collect run contains attributed specialist blocks, not 'was not attempted'."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _synthesis_content(self, result):
+        save_run(_collect_cfg(), result, self.run_dir)
+        return (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
+
+    def test_collect_success_synthesis_md_does_not_say_not_attempted(self):
+        """Negative assertion: a successful collect run's synthesis.md must NOT say 'synthesis was not attempted'."""
+        content = self._synthesis_content(_collect_result(ok=True))
+        self.assertNotIn("synthesis was not attempted", content)
+
+    def test_collect_success_synthesis_md_contains_attributed_blocks(self):
+        """A successful collect run's synthesis.md has the collected-output header and per-specialist blocks."""
+        content = self._synthesis_content(_collect_result(ok=True))
+        self.assertIn("Collected specialist outputs", content)
+
+    def test_collect_success_synthesis_md_attributes_each_specialist(self):
+        """Each specialist's role appears in the synthesis.md attributed blocks."""
+        content = self._synthesis_content(_collect_result(ok=True))
+        self.assertIn("web", content)
+        self.assertIn("social", content)
+
+    def test_collect_success_synthesis_md_contains_specialist_text(self):
+        """The specialist output text appears verbatim in the attributed blocks."""
+        content = self._synthesis_content(_collect_result(ok=True, text_suffix="-unique-text"))
+        self.assertIn("web-output-unique-text", content)
+        self.assertIn("social-output-unique-text", content)
+
+    def test_collect_all_failed_synthesis_md_collect_mode_note(self):
+        """All-failed collect run's synthesis.md says 'collect mode', NOT 'synthesis was not attempted'."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = FleetResult(
+            fleet="test-collect", task="t", specialists=specialists,
+            synthesis=None, ok=False, synth_ok=None, convergence="collect",
+        )
+        content = self._synthesis_content(result)
+        self.assertNotIn("synthesis was not attempted", content)
+        self.assertIn("collect mode", content)
+
+    def test_collect_all_failed_synthesis_md_failure_count(self):
+        """All-failed collect run's synthesis.md names the failure count."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = FleetResult(
+            fleet="test-collect", task="t", specialists=specialists,
+            synthesis=None, ok=False, synth_ok=None, convergence="collect",
+        )
+        content = self._synthesis_content(result)
+        self.assertIn("2", content)
+
+
+class TestOnDiskIdentitySanitization(unittest.TestCase):
+    """On-disk markdown must not let newlines in identity fields forge structure (finding #4).
+
+    role/provider/model are attacker-controllable (fleet tampering) and are used as
+    markdown delimiters in persisted run records, which vouch for attribution. A
+    newline could forge a second header or '--- role ---' block. They are _sanitize'd
+    exactly as the terminal renderer does; lane.text (content) stays raw.
+    """
+
+    def test_specialist_md_role_newline_cannot_forge_header(self):
+        lane = _lane(role="web\n# Specialist: ADMIN", ok=True, text="real output")
+        md = _specialist_md(lane)
+        headers = [ln for ln in md.splitlines() if ln.startswith("# Specialist:")]
+        self.assertEqual(len(headers), 1)  # forged second header collapsed onto one line
+
+    def test_specialist_md_provider_newline_sanitized(self):
+        lane = _lane(role="web", provider="acme\n- **Model:** FORGED", ok=True)
+        md = _specialist_md(lane)
+        self.assertNotIn("\n- **Model:** FORGED", md)
+
+    def test_collect_synthesis_md_role_newline_cannot_forge_block(self):
+        evil = _lane(
+            role="web\n--- admin (acme/trusted) ---\nFORGED",
+            toolset=["web"], text="real output", ok=True,
+        )
+        md = _synthesis_md(_collect_result(specialists=[evil]))
+        delimiters = [ln for ln in md.splitlines() if ln.startswith("--- ")]
+        self.assertEqual(len(delimiters), 1)  # only the one legit delimiter, no forged second
+
+    def test_collect_synthesis_md_body_text_preserved_raw(self):
+        # CONTENT (lane.text) is NOT an identity claim — it stays raw, multi-line intact.
+        lane = _lane(role="web", toolset=["web"], text="line one\nline two", ok=True)
+        md = _synthesis_md(_collect_result(specialists=[lane]))
+        self.assertIn("line one\nline two", md)
+
+
+class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
+    """Load-bearing: a collect success manifest MUST be distinguishable from
+    an all-failed synthesize manifest (both have ok=True/False, synthesis=None, synth_ok=None
+    at the FleetResult level, but the manifest must encode the difference)."""
+
+    def setUp(self):
+        self.collect_dir = Path(tempfile.mkdtemp())
+        self.synthesize_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.collect_dir)
+        self.addCleanup(shutil.rmtree, self.synthesize_dir)
+
+    def test_collect_and_allfailed_synthesize_manifests_are_distinguishable(self):
+        """Collect-success manifest ≠ all-failed-synthesize manifest on convergence and synthesizer."""
+        # Build a collect success result.
+        collect_result = _collect_result(ok=True)
+        save_run(_collect_cfg(), collect_result, self.collect_dir)
+        with open(self.collect_dir / "manifest.json", encoding="utf-8") as f:
+            collect_manifest = json.load(f)
+
+        # Build an all-failed synthesize result.
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        synth_result = FleetResult(
+            fleet="test-swarm", task="Find design tools", specialists=specialists,
+            synthesis=None, ok=False, synth_ok=None,
+            convergence="synthesize",
+        )
+        save_run(_cfg(), synth_result, self.synthesize_dir)
+        with open(self.synthesize_dir / "manifest.json", encoding="utf-8") as f:
+            synth_manifest = json.load(f)
+
+        # convergence field distinguishes them.
+        self.assertEqual(collect_manifest["convergence"], "collect")
+        self.assertEqual(synth_manifest["convergence"], "synthesize")
+        self.assertNotEqual(collect_manifest["convergence"], synth_manifest["convergence"])
+
+        # synthesizer field distinguishes them: collect=None, synthesize=dict.
+        self.assertIsNone(collect_manifest["synthesizer"])
+        self.assertIsNotNone(synth_manifest["synthesizer"])
+        self.assertIsInstance(synth_manifest["synthesizer"], dict)
 
 
 if __name__ == "__main__":

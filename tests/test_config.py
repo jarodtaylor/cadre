@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from fleet_engine.config import ConfigError, FleetConfig, SynthesisSpec
+from fleet_engine.config import ConfigError, FleetConfig, SpecialistSpec, SynthesisSpec
 
 
 def make_data(**overrides):
@@ -200,6 +200,109 @@ class TestPrivilegedGateTypeSafety(unittest.TestCase):
                               "toolset": ["code_execution"]}],
             ))
         self.assertTrue(any("boolean" in e for e in ctx.exception.errors))
+
+
+class TestConvergenceField(unittest.TestCase):
+    def test_absent_convergence_defaults_to_synthesize(self):
+        cfg = FleetConfig.from_dict(make_data())
+        self.assertEqual(cfg.convergence, "synthesize")
+
+    def test_existing_fleet_parses_unchanged(self):
+        # Back-compat: make_data() has no convergence key; all other fields identical.
+        cfg = FleetConfig.from_dict(make_data())
+        self.assertEqual(cfg.name, "test-swarm")
+        self.assertIsInstance(cfg.synthesis, SynthesisSpec)
+        self.assertEqual(len(cfg.specialists), 2)
+        self.assertFalse(cfg.allow_privileged_tools)
+
+    def test_collect_with_no_synthesis_is_valid(self):
+        data = make_data(convergence="collect")
+        del data["synthesis"]
+        cfg = FleetConfig.from_dict(data)
+        self.assertIsNone(cfg.synthesis)
+        self.assertEqual(cfg.convergence, "collect")
+
+    def test_synthesize_with_no_synthesis_still_errors(self):
+        data = make_data()
+        del data["synthesis"]
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(data)
+        self.assertTrue(any("synthesis" in e for e in ctx.exception.errors))
+
+    def test_synthesize_explicit_with_no_synthesis_errors(self):
+        data = make_data(convergence="synthesize")
+        del data["synthesis"]
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(data)
+        self.assertTrue(any("synthesis" in e for e in ctx.exception.errors))
+
+    def test_bogus_convergence_accumulates_error(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(convergence="bogus"))
+        self.assertTrue(any("convergence" in e for e in ctx.exception.errors))
+
+    def test_non_string_convergence_accumulates_error_not_typeerror(self):
+        # A non-str (unhashable) convergence must accumulate a ConfigError, never raise
+        # TypeError on the set-membership check (the loader's malformed-input contract).
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(convergence=["collect"]))
+        self.assertTrue(any("convergence" in e for e in ctx.exception.errors))
+
+    def test_collect_privileged_toolset_still_requires_optin(self):
+        data = {
+            "name": "collect-fleet",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "coder", "provider": "p", "model": "m", "toolset": ["code_execution"]},
+            ],
+        }
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(data)
+        self.assertTrue(any("privileged" in e for e in ctx.exception.errors))
+
+    def test_collect_empty_toolset_survives_as_empty_list(self):
+        data = {
+            "name": "collect-fleet",
+            "convergence": "collect",
+            "specialists": [
+                {"role": "scan", "provider": "p", "model": "m", "toolset": []},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        self.assertEqual(cfg.specialists[0].toolset, [])
+
+    def test_collect_with_synthesis_block_is_valid(self):
+        # A collect fleet that also carries a synthesis: block must not error.
+        cfg = FleetConfig.from_dict(make_data(convergence="collect"))
+        self.assertEqual(cfg.convergence, "collect")
+        # synthesis block was present in make_data(); it should be parsed, not errored
+        self.assertIsNotNone(cfg.synthesis)
+
+
+class TestDescriptionField(unittest.TestCase):
+    def test_description_parses_when_present(self):
+        cfg = FleetConfig.from_dict(make_data(description="A research fleet"))
+        self.assertEqual(cfg.description, "A research fleet")
+
+    def test_description_defaults_to_empty_string_when_absent(self):
+        cfg = FleetConfig.from_dict(make_data())
+        self.assertEqual(cfg.description, "")
+
+    def test_description_explicit_null_renders_empty_not_none(self):
+        # `description:` present but empty parses as YAML null (None); must map to
+        # "" not the literal string "None" (which str(None) would produce).
+        cfg = FleetConfig.from_dict(make_data(description=None))
+        self.assertEqual(cfg.description, "")
+
+
+class TestFleetConfigConstruction(unittest.TestCase):
+    def test_construction_is_keyword_only(self):
+        # FleetConfig is @dataclass(kw_only=True): positional construction must
+        # raise, so a future field-order change can't silently misassign at a
+        # call site. Every real construction site passes kwargs.
+        spec = SpecialistSpec(role="r", provider="p", model="m")
+        with self.assertRaises(TypeError):
+            FleetConfig("name", [spec])  # type: ignore[misc]
 
 
 class TestLoad(unittest.TestCase):

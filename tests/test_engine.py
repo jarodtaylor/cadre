@@ -8,6 +8,7 @@ from pathlib import Path
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import AgentResult
+from fleet_engine.progress import LaneDone
 
 
 def _config(**overrides):
@@ -335,6 +336,124 @@ class TestCleanExitOnHang(unittest.TestCase):
 
     def test_exits_with_hung_synthesizer(self):
         self._assert_exits("synthesizer")
+
+
+def _collect_config(**overrides):
+    """Build a collect-convergence FleetConfig (no synthesis block required)."""
+    data = {
+        "name": "t",
+        "convergence": "collect",
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"]},
+            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"]},
+            {"role": "analysis", "provider": "openrouter", "model": "ana/model", "toolset": ["web"]},
+        ],
+    }
+    data.update(overrides)
+    return FleetConfig.from_dict(data)
+
+
+class TestCollectConvergence(unittest.TestCase):
+    """Collect mode: fan-out without synthesis, convergence-aware ok."""
+
+    def test_collect_all_succeed_no_synthesizer_called(self):
+        """Synthesizer is never invoked when convergence=collect and all specialists succeed."""
+        client = FakeClient()
+        result = run_fleet(_collect_config(), "task", client)
+
+        # Synthesizer must never have been called
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("synthesizer", called_roles)
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+        self.assertEqual(result.convergence, "collect")
+        self.assertEqual(len(result.specialists), 3)
+        self.assertEqual(len(result.successes), 3)
+
+    def test_collect_partial_failure_ok_true(self):
+        """2 of 3 specialists succeed → ok=True, both success results returned, one failure note."""
+        client = FakeClient({"social": ("fail", "auth error")})
+        result = run_fleet(_collect_config(), "task", client)
+
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("synthesizer", called_roles)
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+        self.assertEqual(result.convergence, "collect")
+        self.assertEqual(len(result.successes), 2)
+        self.assertEqual(len(result.failures), 1)
+        self.assertTrue(any("social" in n and "failed" in n for n in result.notes))
+
+    def test_collect_all_fail_ok_false(self):
+        """All specialists fail → ok=False, synthesizer never called, convergence=collect."""
+        behavior = {r: ("fail", "down") for r in ("web", "social", "analysis")}
+        client = FakeClient(behavior)
+        result = run_fleet(_collect_config(), "task", client)
+
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("synthesizer", called_roles)
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+        self.assertEqual(result.convergence, "collect")
+        self.assertEqual(len(result.failures), 3)
+
+    def test_synthesize_fleet_carries_convergence_synthesize(self):
+        """Synthesize mode (default) carries convergence="synthesize" on the result (regression guard)."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL REPORT")})
+        result = run_fleet(_config(), "task", client)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.synthesis, "FINAL REPORT")
+        self.assertEqual(result.convergence, "synthesize")
+
+    def test_synthesize_all_fail_carries_convergence_synthesize(self):
+        """All-failed synthesize run carries convergence="synthesize" (distinguishable from collect all-fail)."""
+        behavior = {r: ("fail", "down") for r in ("web", "social", "analysis")}
+        client = FakeClient(behavior)
+        result = run_fleet(_config(), "task", client)
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.synthesis)
+        self.assertEqual(result.convergence, "synthesize")
+
+    def test_collect_slow_hook_does_not_cause_false_timeouts(self):
+        """Collect mode: a slow progress hook does not falsely time out completed lanes.
+
+        Mirrors TestSlowHookDoesNotCauseFalseTimeouts in test_progress.py.
+        The three-phase drain is preserved verbatim in collect mode — this test
+        guards that collect does not introduce a simplified drain that would
+        reintroduce the deadline-vs-callback-latency bug.
+        """
+        def slow_hook(event):
+            if isinstance(event, LaneDone):
+                time.sleep(0.25)  # > call_timeout; models stalled capture I/O
+
+        # All specialists return instantly; the hook (not the model) is slow.
+        client = FakeClient()
+        result = run_fleet(_collect_config(), "task", client, call_timeout=0.1, progress=slow_hook)
+
+        # Synthesizer never called in collect mode
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("synthesizer", called_roles)
+
+        # All lanes completed in time — none should be falsely marked timed_out
+        for lane in result.specialists:
+            self.assertFalse(lane.timed_out, f"{lane.role} completed but was marked timed_out")
+            self.assertTrue(lane.ok, f"{lane.role} should be a success")
+
+        self.assertEqual(len(result.successes), 3)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.convergence, "collect")
+
+        # elapsed is from the worker's completion stamp, not inflated by hook latency
+        for lane in result.specialists:
+            self.assertLess(lane.elapsed_s, 0.2, f"{lane.role} elapsed inflated by hook latency")
 
 
 if __name__ == "__main__":

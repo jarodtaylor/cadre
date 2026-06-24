@@ -1,0 +1,83 @@
+# Code review — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
+#
+# Replace provider/model values with the exact strings your Hermes resolves.
+# These are EXAMPLE assignments — swap each lane to a model from your verified
+# palette before running.
+#
+# Per-provider model-string format:
+#   - OpenRouter providers: model is the full "vendor/model" slug
+#   - OAuth providers (xai, openai-codex, nous): set provider explicitly + bare model id
+#
+# NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
+#
+# Convergence: COLLECT — no synthesizer runs. Each specialist returns an
+# attributed block on stdout; you (or a caller agent) review the four lenses
+# independently and decide what to act on. Pass the code or diff you want
+# reviewed as the --task argument when running.
+#
+# toolset: [] on every lane — code reviewers reason over the code/diff you
+# supply in the task (provided context). They need no live retrieval tools.
+# [] is fail-closed zero tools (not unset), preserving the SAFE_TOOLSETS gate.
+
+name: code-review
+description: >-
+  Four-model code review swarm: security, architecture, performance, and
+  correctness lenses run in parallel and return attributed specialist outputs
+  for the caller to review. Convergence: collect (no synthesizer).
+convergence: collect
+
+specialists:
+  - role: security
+    provider: xai              # OAuth provider -> bare model id; swap to your palette
+    model: grok-4.3
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for security vulnerabilities: injection risks
+      (SQL, command, prompt), auth/authz gaps, insecure defaults, exposed
+      secrets or credentials, unsafe deserialization, and OWASP Top 10
+      patterns. For each finding state the risk level (high/medium/low),
+      the exact location, and a concrete remediation.
+
+  - role: architecture
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: google/gemini-3-flash
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for architectural concerns: coupling between
+      modules, violation of separation of concerns, abstraction leaks, naming
+      that misrepresents intent, dead or unreachable code, and patterns that
+      will resist change. Distinguish genuine structural debt from acceptable
+      trade-offs given the apparent scope.
+
+  - role: performance
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: anthropic/claude-opus-4.8
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for performance concerns: algorithmic complexity
+      (O(n²) or worse in hot paths), unnecessary I/O or repeated computation,
+      blocking calls in async contexts, memory allocation patterns that could
+      cause pressure or leaks, and missing caching opportunities. Flag only
+      real risks, not hypothetical micro-optimizations.
+
+  - role: correctness
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: anthropic/claude-sonnet-4.6
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for correctness: logic errors, off-by-one
+      mistakes, incorrect handling of edge cases (empty input, zero, nil/None,
+      overflow), error propagation failures (swallowed exceptions, wrong error
+      types), and intent-vs-implementation mismatches. Flag anything that would
+      produce wrong results under normal or adversarial inputs.

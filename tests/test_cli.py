@@ -66,6 +66,33 @@ class FakeClient:
 
 
 class TestValidate(unittest.TestCase):
+    def test_description_shown_in_validate(self):
+        path = _tmp_yaml(
+            "name: d-fleet\n"
+            "description: A catalog blurb for this fleet\n"
+            "synthesis: {provider: openrouter, model: m}\n"
+            "specialists:\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+        )
+        self.addCleanup(os.unlink, path)
+        code, out = validate_command(path)
+        self.assertEqual(code, 0)
+        self.assertIn("A catalog blurb for this fleet", out)
+
+    def test_validate_output_sanitizes_fleet_fields(self):
+        """A terminal escape in a fleet field must not reach validate output (approval surface)."""
+        path = _tmp_yaml(
+            "name: d-fleet\n"
+            'description: "blurb\\u001b[2Kevil"\n'
+            "synthesis: {provider: openrouter, model: m}\n"
+            "specialists:\n"
+            "  - {role: r, provider: openrouter, model: m, toolset: []}\n"
+        )
+        self.addCleanup(os.unlink, path)
+        code, out = validate_command(path)
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b", out)
+
     def test_valid_example_passes(self):
         code, out = validate_command(EXAMPLE)
         self.assertEqual(code, 0)
@@ -924,6 +951,89 @@ class TestSkillProgressStreamSplit(unittest.TestCase):
         # Complete folder written (prompt up front + per-lane + synth + manifest).
         for fname in ("prompt.txt", "specialist-web.md", "synthesis.md", "manifest.json"):
             self.assertTrue((self.tmp / fname).exists(), f"missing: {fname}")
+
+
+# ---------------------------------------------------------------------------
+# U4 (fleet-shapes): collect fleet validate + exit-code tests
+# ---------------------------------------------------------------------------
+
+_COLLECT_FLEET_YAML = """\
+name: test-collect
+convergence: collect
+specialists:
+  - role: web
+    provider: openrouter
+    model: google/gemini-3-flash
+    toolset: [web]
+  - role: social
+    provider: xai
+    model: grok-4.3
+    toolset: [x_search]
+"""
+
+
+class TestValidateCollectFleet(unittest.TestCase):
+    """validate_command on a collect fleet (no synthesis) succeeds and mentions collect."""
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(_COLLECT_FLEET_YAML)
+        self.addCleanup(os.unlink, self.path)
+
+    def test_validate_collect_fleet_returns_zero(self):
+        """validate_command exits 0 for a valid collect fleet."""
+        code, _out = validate_command(self.path)
+        self.assertEqual(code, 0)
+
+    def test_validate_collect_fleet_no_crash(self):
+        """validate_command does not crash when cfg.synthesis is None (collect fleet)."""
+        # If this raises AttributeError on cfg.synthesis.provider, the test fails.
+        code, out = validate_command(self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("test-collect", out)
+
+    def test_validate_collect_fleet_mentions_collect_in_output(self):
+        """validate_command output mentions 'collect' for a collect fleet."""
+        _code, out = validate_command(self.path)
+        self.assertIn("collect", out)
+
+    def test_validate_collect_fleet_does_not_crash_on_synthesis_access(self):
+        """Regression: line 36 cfg.synthesis.provider must not AttributeError for collect."""
+        try:
+            validate_command(self.path)
+        except AttributeError as exc:
+            self.fail(f"validate_command raised AttributeError on collect fleet: {exc}")
+
+
+class TestRunCommandCollectExitCodes(unittest.TestCase):
+    """Collect run: >=1 success → exit 0; all-failed → exit 1."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        fd, self.fleet_path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(_COLLECT_FLEET_YAML)
+        self.addCleanup(os.unlink, self.fleet_path)
+
+    def test_collect_success_exits_zero(self):
+        """A collect run with >=1 specialist success exits 0 and renders the collect shape."""
+        # FakeClient defaults to ("ok", ...) for every role — both specialists succeed.
+        client = FakeClient()
+        code, out = run_command(self.fleet_path, "find tools", client=client, capture=False)
+        self.assertEqual(code, 0)
+        # Pin the integration render path: a successful collect run must NOT be framed as a
+        # failure (the load-bearing ok-aliasing — a regression routing it to the
+        # "partial result (no synthesis)" branch would be caught here, not just the exit code).
+        self.assertIn("collect result", out)
+        self.assertNotIn("synthesis was not attempted", out)
+
+    def test_collect_all_failed_exits_nonzero(self):
+        """A collect run with all specialists failed exits 1."""
+        client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
+        code, _out = run_command(self.fleet_path, "find tools", client=client, capture=False)
+        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ editing this repository. Product north star: `STRATEGY.md`. Human overview: `REA
 
 **What this is:** a provider‑neutral Python engine that runs ephemeral, multi‑model
 agent *fleets* — fan a task out across specialists (different models/providers),
-then synthesize one grounded, attributed report. All model calls go through one
-thin adapter over Hermes's `AIAgent` library.
+then **either** synthesize one grounded, attributed report (the default) **or**
+collect the raw, attributed specialist outputs for the caller to review (no
+synthesizer). All model calls go through one thin adapter over Hermes's `AIAgent` library.
 
 ## ⚠️ Verify Hermes/AIAgent behavior — do not guess
 
@@ -75,8 +76,25 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
     and the synthesis is consumed by a terminal-capable agent, so an SSRF/injection in a
     lane reaches beyond a tainted report. Owner-only `~/.cadre` perms guard other OS users,
     not the agent itself.
-- **Schema:** minimal — one primitive (fan‑out → synthesize). Don't add abstraction
-  for hypothetical second primitives.
+- **Schema:** minimal. One execution topology (parallel fan‑out) and an explicit
+  `convergence: synthesize|collect` field — **synthesize** (default; a strong model
+  blends the survivors) or **collect** (no synthesizer; return the raw attributed
+  outputs). `convergence` defaults to synthesize, so every pre‑existing fleet parses
+  unchanged. Don't add abstraction for the *deferred* axes (judge convergence,
+  sequential/iterative topology — see `CONCEPTS.md`) until a concrete one lands.
+- **Convergence‑aware consumers (`ok`‑aliasing — keep it):** a successful collect run
+  is `ok=True, synthesis=None, synth_ok=None`, which aliases the historical "synthesis
+  didn't happen" state. Every consumer — process exit code, `render` header + the
+  "synthesis was not attempted" preamble, the manifest + `synthesis.md`, the `Validated`
+  breadcrumb, `cli validate` — reads `result.convergence` to disambiguate. Do not add a
+  consumer that branches on `ok` / `synth_ok is None` / `synthesis is None` without also
+  reading `convergence`, or a successful collect run reads as a failure.
+- **Preview/validate is a trust surface:** `fleet_engine/preview_lint.py` (palette +
+  focus‑grounding validation) is caller‑layer — imported only by `run.py`/`cli.py`,
+  never by the engine — and warns, never blocks. Every fleet‑controlled string printed
+  by any preview/validate surface (the rendered fleet, the lint warnings, the validate
+  summary) goes through `render._sanitize`: the preview is the human‑okay control and
+  must not be spoofable by terminal escapes in a tampered fleet.
 
 ## Repo layout for reviewers
 

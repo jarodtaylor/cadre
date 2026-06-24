@@ -28,6 +28,15 @@ The single strong-model step that combines the specialists' successful outputs i
 ### Fan-out → synthesize
 The engine's one orchestration primitive: run every specialist concurrently (fan-out), then synthesize their successful outputs into one result. If some specialists fail, it synthesizes the survivors and reports the failures; it fails outright only when none succeed.
 
+### Convergence
+What a fleet does with its specialists' outputs, configured per fleet. Three modes span the space: **synthesize** — a strong model blends the survivors into one grounded report (the built mode; see Fan-out → synthesize); **collect** — return the raw, attributed outputs for the caller to review, with no blend; **judge** — an independent critic scores or ranks them (future). Convergence is one of a fleet's two shape axes; the other is topology.
+
+### Collect
+A convergence mode in which a fleet has no synthesizer: it fans out the specialists and returns their raw, attributed outputs (role, model, text) intact, leaving synthesis to the caller. The correct contract for review and adversarial fleets, where blending independent findings would destroy the signal the review exists to surface. A collect run succeeds when at least one specialist returns. (Shipped alongside synthesize.)
+
+### Topology
+How a fleet's lanes relate in time: **parallel** — independent and concurrent (the built topology, the basis of fan-out); **sequential** — each lane consumes the previous lane's output; **iterative** — lanes run in rounds and see each other's output. Distinct from convergence: topology is execution order, convergence is output handling. Only parallel is built; sequential and iterative are future primitives.
+
 ### Privileged toolset
 A toolset that lets an agent act beyond reading or searching — running shell commands, writing files, executing code, or driving a browser or computer. Because a specialist may process untrusted content, privileged toolsets are denied by default and require an explicit per-fleet opt-in; anything outside the known-safe set is treated as privileged.
 

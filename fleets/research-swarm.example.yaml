@@ -11,6 +11,9 @@
 # NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
 
 name: research-swarm
+description: >-
+  Multi-provider research swarm: fan out across social/web/analysis and synthesize
+  one grounded, attributed report. Convergence: synthesize (default).
 
 synthesis:
   provider: openrouter
@@ -51,4 +54,7 @@ specialists:
     provider: openrouter
     model: anthropic/claude-sonnet-4.6
     toolset: [web]
-    focus: Deep structured analysis and extraction; cross-check the other lanes.
+    focus: >-
+      Deep structured analysis on the task; cite a real, current primary source
+      (with a link) for each claim, and mark any item you can't source as
+      unsourced rather than asserting it.

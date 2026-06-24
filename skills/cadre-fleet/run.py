@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
+from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
 from fleet_engine.render import _sanitize, render_fleet_preview, render_result  # noqa: E402
 
@@ -78,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         # lands on the wrong (e.g. ungrounded) profile unnoticed.
         print(f"Profile (HERMES_HOME): {os.getenv('HERMES_HOME', DEFAULT_HERMES_HOME)}")
         print(render_fleet_preview(cfg))
+        # Palette + focus validation — warn-never-block (KTD5). Warnings go to
+        # stdout as part of the preview the human approves (no [cadre] stderr
+        # infra on the preview path).
+        print(render_preview_warnings(cfg))
         return 0
 
     # Real run: --task is required.

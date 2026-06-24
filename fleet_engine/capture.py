@@ -35,6 +35,7 @@ from pathlib import Path
 
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
+from fleet_engine.render import _sanitize
 
 # Default Hermes profile location — recorded in the manifest and shown in the
 # fleet preview when HERMES_HOME is unset.
@@ -328,10 +329,10 @@ def _write(path: Path, content: str) -> None:
 def _specialist_md(lane) -> str:  # lane: AgentResult
     """Markdown file for one specialist lane (success or failure)."""
     lines = [
-        f"# Specialist: {lane.role}",
+        f"# Specialist: {_sanitize(lane.role)}",
         "",
-        f"- **Provider:** {lane.provider}",
-        f"- **Model:** {lane.model}",
+        f"- **Provider:** {_sanitize(lane.provider)}",
+        f"- **Model:** {_sanitize(lane.model)}",
         f"- **OK:** {lane.ok}",
         f"- **Elapsed:** {lane.elapsed_s:.2f}s" if lane.elapsed_s is not None else "- **Elapsed:** n/a",
         f"- **Toolset:** {lane.toolset if lane.toolset else '(none)'}",
@@ -345,7 +346,30 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
 
 
 def _synthesis_md(result: FleetResult) -> str:
-    """Synthesis markdown: the synthesis text, or an accurate failure note."""
+    """Synthesis markdown: the synthesis text, a collect summary, or an accurate failure note."""
+    # Collect mode: synthesis never ran by design — produce attributed specialist output.
+    # Check convergence FIRST so synthesize mode falls through to its existing branches.
+    if result.convergence == "collect":
+        successes = result.successes
+        if successes:
+            # On-disk run records are themselves a trust surface: a persisted
+            # synthesis.md vouches for which model produced which block. A tampered
+            # fleet could embed newlines in role/provider/model to forge a fake
+            # "--- role ---" delimiter and misattribute output, so the identity
+            # fields are _sanitize'd here exactly as the terminal renderer does.
+            # lane.text (model-generated CONTENT, not an identity claim) stays raw;
+            # the two attributed-block renderers stay separate (terminal vs disk)
+            # but share this identity-sanitize invariant.
+            blocks = [
+                f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{lane.text or ''}"
+                for lane in successes
+            ]
+            return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
+        # All specialists failed in collect mode.
+        n = len(result.specialists)
+        return f"No specialist outputs — all {n} specialists failed (collect mode)."
+
+    # Synthesize mode: existing logic unchanged.
     if result.synthesis is not None:
         return result.synthesis
 
@@ -398,7 +422,11 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "task": result.task,
         "timestamp": datetime.now().isoformat(),
         "models": participating_models,
-        "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
+        # Null-guard: a collect fleet has no synthesizer (cfg.synthesis may be None).
+        # Key on convergence (KTD1) — not cfg.synthesis, which can be present in a
+        # collect fleet that carries a stray synthesis block.
+        "synthesizer": None if result.convergence == "collect" else {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
+        "convergence": result.convergence,
         "synth_ok": result.synth_ok,
         "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),
         "lanes": lanes,
