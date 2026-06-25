@@ -87,7 +87,7 @@ class FleetResult:
 
 
 def _specialist_prompt(spec: SpecialistSpec, task: str) -> str:
-    focus = f"\nFocus: {spec.focus}" if spec.focus else ""
+    focus = f"\nFocus: {spec.effective_instruction}" if spec.effective_instruction else ""
     return f"You are the '{spec.role}' specialist.{focus}\n\nTask: {task}"
 
 
@@ -322,6 +322,21 @@ def run_fleet(
     lifecycle hook (default no-op): the engine emits pure events through it and does
     no I/O of its own — the edge renders breadcrumbs and writes artifacts.
     """
+    # Defense-in-depth precondition (KTD8): every specialist must carry a resolved
+    # instruction before the run. The config layer forbids an empty-instruction lane,
+    # but effective_instruction is populated by the caller-layer resolver, not the
+    # parser — so a caller that skipped resolution would otherwise produce a SILENT
+    # no-instruction run (the Focus block just drops). Fail loud instead. Reads
+    # effective_instruction only — no file or fleet-domain knowledge; engine stays pure.
+    missing = [s.role for s in config.specialists if not s.effective_instruction.strip()]
+    if missing:
+        raise ValueError(
+            "specialist(s) "
+            + ", ".join(repr(r) for r in missing)
+            + " have no resolved instruction — the caller must resolve instructions "
+            "before run_fleet"
+        )
+
     specialist_results = _fan_out(config, task, client, call_timeout, progress)
 
     result = FleetResult(fleet=config.name, task=task, specialists=specialist_results, convergence=config.convergence)

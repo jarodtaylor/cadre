@@ -138,8 +138,16 @@ def render_fleet_preview(config: FleetConfig) -> str:
     for s in config.specialists:
         toolset_str = ", ".join(_sanitize(t) for t in s.toolset) if s.toolset else "(none)"
         out.append(f"  [{_sanitize(s.role)}]  {_sanitize(s.provider)}/{_sanitize(s.model)}  toolset={toolset_str}")
-        if s.focus:
-            out.append(f"    focus: {_sanitize(s.focus)}")
+        if s.effective_instruction:
+            if s.persona:
+                # Persona lane: multi-line label so the human sees the full instruction.
+                # persona name is sanitized like every other fleet-controlled field.
+                body = _sanitize(s.effective_instruction, multiline=True)
+                out.append(f"    persona: {_sanitize(s.persona)}")
+                out.append(f"      {body.replace(chr(10), chr(10) + '      ')}")
+            else:
+                # Focus lane: single-line (focus text is always a one-liner).
+                out.append(f"    focus: {_sanitize(s.effective_instruction)}")
 
     out.append("\n=== end preview ===")
     return "\n".join(out)

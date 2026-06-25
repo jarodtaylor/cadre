@@ -92,7 +92,8 @@ class TestPrivilegedToolsetGate(unittest.TestCase):
         cfg = FleetConfig.from_dict(make_data(
             allow_privileged_tools=True,
             specialists=[
-                {"role": "coder", "provider": "openrouter", "model": "m", "toolset": ["code_execution", "web"]},
+                {"role": "coder", "provider": "openrouter", "model": "m",
+                 "toolset": ["code_execution", "web"], "focus": "write code"},
             ],
         ))
         self.assertTrue(cfg.allow_privileged_tools)
@@ -110,7 +111,8 @@ class TestPrivilegedToolsetGate(unittest.TestCase):
     def test_browser_allowed_with_optin(self):
         cfg = FleetConfig.from_dict(make_data(
             allow_privileged_tools=True,
-            specialists=[{"role": "surf", "provider": "p", "model": "m", "toolset": ["browser"]}],
+            specialists=[{"role": "surf", "provider": "p", "model": "m",
+                          "toolset": ["browser"], "focus": "browse web"}],
         ))
         self.assertIn("browser", cfg.specialists[0].toolset)
 
@@ -137,8 +139,10 @@ class TestPrivilegedToolsetGate(unittest.TestCase):
         # without the privileged opt-in.
         cfg = FleetConfig.from_dict(make_data(
             specialists=[
-                {"role": "a", "provider": "p", "model": "m", "toolset": ["web", "search", "x_search"]},
-                {"role": "b", "provider": "p", "model": "m", "toolset": ["vision", "image_gen", "tts"]},
+                {"role": "a", "provider": "p", "model": "m",
+                 "toolset": ["web", "search", "x_search"], "focus": "web search"},
+                {"role": "b", "provider": "p", "model": "m",
+                 "toolset": ["vision", "image_gen", "tts"], "focus": "visual analysis"},
             ],
         ))
         self.assertFalse(cfg.allow_privileged_tools)
@@ -265,7 +269,7 @@ class TestConvergenceField(unittest.TestCase):
             "name": "collect-fleet",
             "convergence": "collect",
             "specialists": [
-                {"role": "scan", "provider": "p", "model": "m", "toolset": []},
+                {"role": "scan", "provider": "p", "model": "m", "toolset": [], "focus": "analysis only"},
             ],
         }
         cfg = FleetConfig.from_dict(data)
@@ -323,6 +327,159 @@ class TestLoad(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             FleetConfig.load(path)
         self.assertTrue(any("parse YAML" in e for e in ctx.exception.errors))
+
+
+def _make_specialist(**overrides):
+    """Minimal valid specialist dict with focus; override per test."""
+    spec = {"role": "web", "provider": "p", "model": "m", "focus": "find sources"}
+    spec.update(overrides)
+    return spec
+
+
+class TestPersonaXORFocus(unittest.TestCase):
+    """persona / focus XOR invariant: exactly one instruction source per specialist (R4, R5, KTD5)."""
+
+    def test_focus_only_parses(self):
+        # R4: existing focus-only specialists parse unchanged.
+        cfg = FleetConfig.from_dict(make_data())
+        for spec in cfg.specialists:
+            self.assertTrue(spec.focus)
+            self.assertEqual(spec.persona, "")
+
+    def test_persona_only_parses(self):
+        # R4: a persona-only specialist (no focus) parses cleanly.
+        cfg = FleetConfig.from_dict(make_data(
+            specialists=[_make_specialist(persona="adversarial-document-reviewer", focus="")],
+        ))
+        self.assertEqual(cfg.specialists[0].persona, "adversarial-document-reviewer")
+        self.assertEqual(cfg.specialists[0].focus, "")
+        self.assertEqual(cfg.specialists[0].effective_instruction, "")  # U2 populates this
+
+    def _pop_focus(self, d):
+        """Remove focus key from a specialist dict (simulates omitting it entirely)."""
+        d.pop("focus", None)
+        return d
+
+    def test_both_persona_and_focus_errors(self):
+        # R4 / KTD5: both non-empty → accumulate error.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[_make_specialist(persona="coherence-reviewer", focus="check coherence")],
+            ))
+        self.assertTrue(any("both" in e for e in ctx.exception.errors))
+
+    def test_neither_persona_nor_focus_errors(self):
+        # R5 / KTD5: neither set → accumulate error.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[_make_specialist(focus="", persona="")],
+            ))
+        self.assertTrue(any("neither" in e for e in ctx.exception.errors))
+
+    def test_empty_focus_with_no_persona_errors(self):
+        # KTD5: empty-string focus counts as absent; a specialist with focus="" and
+        # no persona fails the neither-set check, not the both-set check.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m", "focus": ""}],
+            ))
+        errors = ctx.exception.errors
+        self.assertTrue(any("neither" in e for e in errors))
+        self.assertFalse(any("both" in e for e in errors))
+
+    def test_persona_field_parsed_onto_spec(self):
+        # The persona name is stored on the SpecialistSpec after parsing.
+        cfg = FleetConfig.from_dict(make_data(
+            specialists=[_make_specialist(persona="adversarial-document-reviewer", focus="")],
+        ))
+        self.assertEqual(cfg.specialists[0].persona, "adversarial-document-reviewer")
+
+    def test_focus_only_effective_instruction_populated_at_parse(self):
+        # A focus-only spec carries effective_instruction = focus straight from parse —
+        # no resolver run needed, so a focus-only fleet runs from FleetConfig.load() alone.
+        # (A persona spec stays empty until the resolver reads the file — see
+        # test_persona_only_parses.)
+        cfg = FleetConfig.from_dict(make_data())
+        for spec in cfg.specialists:
+            self.assertTrue(spec.focus, "make_data builds focus-only specs")
+            self.assertEqual(spec.effective_instruction, spec.focus)
+
+    def test_non_string_persona_accumulates_error(self):
+        # isinstance-guard: a list value for persona must not TypeError through re.fullmatch.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m",
+                              "persona": ["a-persona"], "focus": ""}],
+            ))
+        self.assertTrue(any("persona" in e for e in ctx.exception.errors))
+
+    def test_whitespace_only_focus_with_no_persona_errors(self):
+        # Whitespace-only focus counts as absent — same as empty-string.
+        # A specialist with focus="   " and no persona triggers the "neither set" error.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m", "focus": "   "}],
+            ))
+        errors = ctx.exception.errors
+        self.assertTrue(any("neither" in e for e in errors))
+        self.assertFalse(any("both" in e for e in errors))
+
+    def test_non_string_focus_accumulates_error(self):
+        # isinstance-guard: a non-string focus (e.g. a list) must produce a ConfigError,
+        # not propagate through str() silently as a stringified list.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m", "focus": []}],
+            ))
+        self.assertTrue(any("focus" in e for e in ctx.exception.errors))
+
+
+class TestPersonaNameAllowlist(unittest.TestCase):
+    """Persona name must match [A-Za-z0-9][A-Za-z0-9._-]* (R10, KTD4)."""
+
+    def _error_names(self, names):
+        """Assert each name produces a ConfigError mentioning the name."""
+        for name in names:
+            with self.subTest(name=name):
+                with self.assertRaises(ConfigError) as ctx:
+                    FleetConfig.from_dict(make_data(
+                        specialists=[_make_specialist(persona=name, focus="")],
+                    ))
+                errors = ctx.exception.errors
+                self.assertTrue(
+                    any("persona" in e for e in errors),
+                    f"name {name!r}: expected a persona error, got: {errors}",
+                )
+
+    def _ok_names(self, names):
+        """Assert each name parses without error."""
+        for name in names:
+            with self.subTest(name=name):
+                cfg = FleetConfig.from_dict(make_data(
+                    specialists=[_make_specialist(persona=name, focus="")],
+                ))
+                self.assertEqual(cfg.specialists[0].persona, name)
+
+    def test_invalid_names_error(self):
+        # R10: bare `.`, `..`, leading-dot hidden names, separators, absolute paths,
+        # spaces are all rejected.
+        self._error_names([".", "..", ".hidden", "../x", "/etc/passwd", "a/b", "a\\b", "a b"])
+
+    def test_valid_names_parse(self):
+        # Descriptive names used for real personas must pass.
+        self._ok_names(["adversarial-document-reviewer", "a.b_c-1", "Coherence1", "x"])
+
+    def test_multiple_bad_fields_accumulate(self):
+        # Accumulation: both persona-name error AND neither-set check (persona="" focus="")
+        # or both-set check surface together — proving accumulate-not-fail-fast.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                name="",  # also bad
+                specialists=[_make_specialist(persona="/absolute/path", focus="")],
+            ))
+        self.assertGreaterEqual(len(ctx.exception.errors), 2,
+                                "expected ≥2 errors (name + persona allowlist), got: "
+                                + str(ctx.exception.errors))
 
 
 if __name__ == "__main__":

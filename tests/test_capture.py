@@ -225,7 +225,7 @@ class TestNoToolsetSpecialistSerializesEmptyList(unittest.TestCase):
     def test_empty_toolset_serializes_as_empty_list(self):
         r = _result(specialists=[_lane("notool", toolset=[])])
         save_run(_cfg(specialists=[
-            {"role": "notool", "provider": "openrouter", "model": "m"},
+            {"role": "notool", "provider": "openrouter", "model": "m", "focus": "analysis only"},
         ]), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -297,7 +297,8 @@ class TestTimedOutSpecialist(unittest.TestCase):
     def test_non_timed_out_lane_has_timed_out_false(self):
         r = _result(specialists=[_lane("web", toolset=["web"], timed_out=False)])
         save_run(_cfg(specialists=[
-            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+             "focus": "web research"},
         ]), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -373,7 +374,8 @@ class TestFullyFailedRun(unittest.TestCase):
             notes=["synthesizer failed: rate limited"],
         )
         save_run(_cfg(specialists=[
-            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+             "focus": "web research"},
         ]), r, self.run_dir)
         content = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
         # Should note that the synthesizer failed, not "N of M specialists failed"
@@ -383,7 +385,8 @@ class TestFullyFailedRun(unittest.TestCase):
         specialists = [_lane("web", ok=False, error="down", toolset=["web"])]
         r = _result(specialists=specialists, synthesis=None, ok=False, synth_ok=None)
         save_run(_cfg(specialists=[
-            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"]},
+            {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+             "focus": "web research"},
         ]), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -492,7 +495,7 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
         fmap = lane_filename_map([lane.role for lane in r.specialists])
         save_lane(r.specialists[0], fmap["web/evil"], self.run_dir)
         save_run(_cfg(specialists=[
-            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+            {"role": "web/evil", "provider": "openrouter", "model": "m", "focus": "analysis"},
         ]), r, self.run_dir)
         # The sanitized filename must be inside run_dir
         expected_file = self.run_dir / "specialist-web-evil.md"
@@ -506,7 +509,7 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
         fmap = lane_filename_map([lane.role for lane in r.specialists])
         save_lane(r.specialists[0], fmap["../escape"], self.run_dir)
         save_run(_cfg(specialists=[
-            {"role": "../escape", "provider": "openrouter", "model": "m"},
+            {"role": "../escape", "provider": "openrouter", "model": "m", "focus": "analysis"},
         ]), r, self.run_dir)
         # No escape outside run_dir
         escaped_path = self.run_dir.parent / "escape.md"
@@ -516,7 +519,7 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
         """The manifest's lane.role must be the TRUE role, not the sanitized filename."""
         r = _result(specialists=[_lane("web/evil", toolset=[])])
         save_run(_cfg(specialists=[
-            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+            {"role": "web/evil", "provider": "openrouter", "model": "m", "focus": "analysis"},
         ]), r, self.run_dir)
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -534,7 +537,7 @@ class TestSlashInRoleWritesSafeFile(unittest.TestCase):
         """manifest.json is present after a run with a slash-in-role specialist."""
         r = _result(specialists=[_lane("web/evil", toolset=[])])
         save_run(_cfg(specialists=[
-            {"role": "web/evil", "provider": "openrouter", "model": "m"},
+            {"role": "web/evil", "provider": "openrouter", "model": "m", "focus": "analysis"},
         ]), r, self.run_dir)
         self.assertTrue((self.run_dir / "manifest.json").exists())
 
@@ -728,8 +731,8 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
         for lane in r.specialists:
             save_lane(lane, fmap[lane.role], self.run_dir)
         save_run(_cfg(specialists=[
-            {"role": "a/b", "provider": "openrouter", "model": "m"},
-            {"role": "a:b", "provider": "openrouter", "model": "m"},
+            {"role": "a/b", "provider": "openrouter", "model": "m", "focus": "analysis"},
+            {"role": "a:b", "provider": "openrouter", "model": "m", "focus": "synthesis"},
         ]), r, self.run_dir)
 
         file1 = self.run_dir / "specialist-a-b.md"
@@ -764,8 +767,8 @@ class TestSpecialistFilenameDeduplication(unittest.TestCase):
         for lane in r.specialists:
             save_lane(lane, fmap[lane.role], self.run_dir)
         save_run(_cfg(specialists=[
-            {"role": "a/b", "provider": "openrouter", "model": "m"},
-            {"role": "a:b", "provider": "openrouter", "model": "m"},
+            {"role": "a/b", "provider": "openrouter", "model": "m", "focus": "analysis"},
+            {"role": "a:b", "provider": "openrouter", "model": "m", "focus": "synthesis"},
         ]), r, self.run_dir)
 
         with open(self.run_dir / "manifest.json", encoding="utf-8") as f:

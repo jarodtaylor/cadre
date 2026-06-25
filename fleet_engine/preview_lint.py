@@ -237,7 +237,7 @@ def check_focus_grounding(config: "FleetConfig") -> list[str]:
     for spec in config.specialists:
         if not (set(spec.toolset) & RETRIEVAL_TOOLSETS):
             continue  # not a retrieval lane → skip
-        focus = (spec.focus or "").lower()
+        focus = (spec.effective_instruction or "").lower()
         if any(re.search(r"\b" + re.escape(t), focus) for t in _SOURCING_TERMS):
             continue  # sourcing directive present → grounded → no warn
         # Retrieval lane with NO sourcing directive. Role is _sanitize()d — these
@@ -246,13 +246,13 @@ def check_focus_grounding(config: "FleetConfig") -> list[str]:
             msg = (
                 f"specialist '{_sanitize(spec.role)}': retrieval toolset + anti-grounding phrasing "
                 f"(breadth/speed framing) but no sourcing directive — "
-                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+                f"add \"cite a primary source with a link per claim\" to the specialist's instruction; {_PROFILE_CAVEAT}"
             )
         else:
             msg = (
-                f"specialist '{_sanitize(spec.role)}': retrieval toolset but focus does not request "
+                f"specialist '{_sanitize(spec.role)}': retrieval toolset but its instruction does not request "
                 f"sources or citations — "
-                f"add \"cite a primary source with a link per claim\" to the focus; {_PROFILE_CAVEAT}"
+                f"add \"cite a primary source with a link per claim\" to the specialist's instruction; {_PROFILE_CAVEAT}"
             )
         warnings.append(msg)
     return warnings
