@@ -22,6 +22,12 @@ The role-specific instruction that tells a specialist what to investigate and ho
 
 A focus that does not explicitly require live retrieval and citation will let the model answer from training knowledge even when a retrieval toolset is provisioned — so the focus, not the toolset alone, is the operative grounding control for a lane. Pairing a citation demand with explicit permission to mark an item "unsourced" keeps the demand from inducing fabricated sources.
 
+### Persona
+A rich, editable markdown specialist definition — the lens's full role, reasoning scaffolding, and grounding controls — referenced by name from a fleet as an alternative to an inline one-line *Focus*. A specialist carries exactly one instruction source: a persona or a focus. A persona carries no provider/model/toolset binding, so the same lens can be reused across fleets and models.
+
+### Persona pool
+The shared, flat directory of persona files (`personas/` in the repo; `~/.cadre/personas` on a host) that a `persona:` reference resolves against. A caller-layer resolver reads the named file, confined to the pool, and populates the specialist's instruction before the run — the engine never sees a path or a persona name.
+
 ### Synthesizer
 The single strong-model step that combines the specialists' successful outputs into one grounded result. It runs after the specialists, over only the survivors, and is expected to attribute claims to the specialist that surfaced them and preserve citations.
 
