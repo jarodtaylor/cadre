@@ -413,6 +413,26 @@ class TestPersonaXORFocus(unittest.TestCase):
             ))
         self.assertTrue(any("persona" in e for e in ctx.exception.errors))
 
+    def test_whitespace_only_focus_with_no_persona_errors(self):
+        # Whitespace-only focus counts as absent — same as empty-string.
+        # A specialist with focus="   " and no persona triggers the "neither set" error.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m", "focus": "   "}],
+            ))
+        errors = ctx.exception.errors
+        self.assertTrue(any("neither" in e for e in errors))
+        self.assertFalse(any("both" in e for e in errors))
+
+    def test_non_string_focus_accumulates_error(self):
+        # isinstance-guard: a non-string focus (e.g. a list) must produce a ConfigError,
+        # not propagate through str() silently as a stringified list.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(
+                specialists=[{"role": "w", "provider": "p", "model": "m", "focus": []}],
+            ))
+        self.assertTrue(any("focus" in e for e in ctx.exception.errors))
+
 
 class TestPersonaNameAllowlist(unittest.TestCase):
     """Persona name must match [A-Za-z0-9][A-Za-z0-9._-]* (R10, KTD4)."""

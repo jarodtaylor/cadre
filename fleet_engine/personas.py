@@ -111,7 +111,7 @@ def resolve(config: FleetConfig, pool_dir: str | os.PathLike) -> FleetConfig:
         st = os.stat(pool_real)
     except OSError as exc:
         errors.append(f"persona pool directory could not be inspected: {exc}")
-        raise ConfigError(errors)
+        raise ConfigError(errors) from None
     getuid = getattr(os, "getuid", None)
     if (getuid is not None and st.st_uid != getuid()) or (st.st_mode & 0o022):
         errors.append(

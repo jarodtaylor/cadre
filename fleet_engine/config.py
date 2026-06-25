@@ -199,12 +199,17 @@ class FleetConfig:
                 persona = persona_raw
 
                 focus_raw = raw.get("focus", "")
+                if focus_raw is not None and not isinstance(focus_raw, str):
+                    errors.append(f"{label}.focus must be a string")
+                    focus_raw = ""
                 focus = str(focus_raw) if focus_raw is not None else ""
 
-                # persona XOR non-empty focus: empty-string focus counts as absent,
-                # matching the engine's existing `if spec.focus` convention.
+                # persona XOR non-empty focus: whitespace-only focus counts as absent
+                # (same intent as empty-string), matching the engine's `if spec.focus`
+                # convention. A focus of "   " with no persona triggers the "neither
+                # set" error, not a silently-empty instruction.
                 has_persona = bool(persona)
-                has_focus = bool(focus)
+                has_focus = bool(focus.strip())
                 if has_persona and has_focus:
                     errors.append(
                         f"{label} specifies both `persona` and `focus` — exactly one "

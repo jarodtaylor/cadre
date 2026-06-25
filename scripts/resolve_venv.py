@@ -105,6 +105,12 @@ def _seed_files(
                 # UnicodeDecodeError (a non-UTF-8 source) is not an OSError subclass; catch it
                 # too so the never-raises contract holds. ELOOP from O_NOFOLLOW on a symlink
                 # also lands here — warned and skipped, never followed.
+                # Best-effort remove a partially-written destination so the next install
+                # does not preserve a corrupt file (the write failed mid-stream).
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
                 print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
                 continue
     finally:

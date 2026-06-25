@@ -267,8 +267,9 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
         After U6 migration each active lane carries a ``persona`` reference
         (not a ``focus``). This test verifies end-to-end resolution: resolve()
         must not raise, each lane must have a non-empty ``persona`` name, an
-        empty ``focus``, ``toolset == []``, and a non-empty
-        ``effective_instruction`` populated from the persona file.
+        empty ``focus``, ``toolset == []``, and an ``effective_instruction``
+        that exactly matches the persona file's text — catching a resolver
+        regression that points a lane at the wrong file.
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
         # Must not raise — pool exists and all five persona files are present.
@@ -289,10 +290,14 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
                 [],
                 f"doc-review lane '{spec.role}' toolset must be [] post-U6",
             )
-            self.assertTrue(
-                spec.effective_instruction and spec.effective_instruction.strip(),
-                f"doc-review lane '{spec.role}' must have a non-empty "
-                f"effective_instruction after persona resolution",
+            # Assert exact contents — not just non-empty — so a resolver regression
+            # that returns the wrong persona file fails rather than silently passes.
+            expected_text = (_REPO / "personas" / (spec.persona + ".md")).read_text(encoding="utf-8")
+            self.assertEqual(
+                spec.effective_instruction,
+                expected_text,
+                f"doc-review lane '{spec.role}' effective_instruction must equal "
+                f"the text of personas/{spec.persona}.md",
             )
 
     def test_doc_review_cross_model_spread_preserved(self):

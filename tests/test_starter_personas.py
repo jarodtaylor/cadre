@@ -39,6 +39,11 @@ _MIN_CHARS = 300
 # change that removes the instruction is caught rather than silently passing.
 _NO_TOOLS_PHRASE = "NO tools available"
 
+# Document / pasted-content framing phrase — guards that each persona instructs
+# the specialist to review from the submitted document, not from external knowledge
+# (R12). Phrase verified present in all five persona files.
+_DOCUMENT_FRAMING_PHRASE = "in the task"
+
 # Grounding-control phrases — both must appear in each persona (R12).
 _CITE_PHRASE = "cite"
 _NO_FINDING_PHRASE = "no finding"
@@ -73,10 +78,10 @@ _BANNED_ORCHESTRATION = [
 
 # Zero-width and BOM characters that must NOT appear (R11 content guard).
 _BANNED_UNICODE = [
-    "​",  # zero-width space
-    "‌",  # zero-width non-joiner
-    "‍",  # zero-width joiner
-    "﻿",  # BOM
+    "\u200b",  # zero-width space
+    "\u200c",  # zero-width non-joiner
+    "\u200d",  # zero-width joiner
+    "\ufeff",  # BOM
 ]
 
 
@@ -126,7 +131,12 @@ class TestStarterPersonasSubstantive(unittest.TestCase):
 
 
 class TestStarterPersonasNoToolsFraming(unittest.TestCase):
-    """Each persona carries the no-tools / pasted-content framing (R12)."""
+    """Each persona carries the no-tools / pasted-content / document framing (R12).
+
+    Guards both the no-tools declaration AND the document/pasted-content framing
+    that instructs each specialist to review from the submitted document rather
+    than from external knowledge or tool calls.
+    """
 
     def _check(self, name: str) -> None:
         text = _read(name)
@@ -134,6 +144,11 @@ class TestStarterPersonasNoToolsFraming(unittest.TestCase):
             _NO_TOOLS_PHRASE,
             text,
             f"{name} must contain the no-tools declaration (missing {_NO_TOOLS_PHRASE!r})",
+        )
+        self.assertIn(
+            _DOCUMENT_FRAMING_PHRASE,
+            text,
+            f"{name} must contain the document-framing phrase (missing {_DOCUMENT_FRAMING_PHRASE!r})",
         )
 
     def test_coherence_reviewer_no_tools(self):

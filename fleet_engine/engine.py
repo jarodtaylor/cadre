@@ -328,7 +328,7 @@ def run_fleet(
     # parser — so a caller that skipped resolution would otherwise produce a SILENT
     # no-instruction run (the Focus block just drops). Fail loud instead. Reads
     # effective_instruction only — no file or fleet-domain knowledge; engine stays pure.
-    missing = [s.role for s in config.specialists if not s.effective_instruction]
+    missing = [s.role for s in config.specialists if not s.effective_instruction.strip()]
     if missing:
         raise ValueError(
             "specialist(s) "

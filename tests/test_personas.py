@@ -286,7 +286,7 @@ class TestNonUtf8AndUnreadable(unittest.TestCase):
             resolve(cfg, self.pool)
         self.assertTrue(any("binary" in e for e in ctx.exception.errors))
 
-    @unittest.skipIf(os.getuid() == 0, "root can read 0o000 files — skip")
+    @unittest.skipIf(getattr(os, "getuid", lambda: 0)() == 0, "root can read 0o000 files — skip")
     def test_unreadable_persona_raises_config_error(self):
         """A chmod 0o000 file produces ConfigError, not an OSError traceback."""
         path = os.path.join(self.pool, "locked.md")

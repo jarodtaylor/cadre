@@ -683,6 +683,7 @@ class TestRenderFleetPreviewPersonaLane(unittest.TestCase):
             (i for i, ln in enumerate(lines) if "coherence" in ln and "[coherence]" in ln),
             None,
         )
+        self.assertIsNotNone(coherence_block_start, "persona lane block must be present")
         if coherence_block_start is not None:
             # Find the next specialist block or end.
             block_lines = []
@@ -695,13 +696,29 @@ class TestRenderFleetPreviewPersonaLane(unittest.TestCase):
                              "persona lane must not render a 'focus:' label")
 
     def test_persona_name_is_sanitized(self):
-        """persona name passes through _sanitize — same guarantee as focus/role/provider."""
-        # We can't build a config with an illegal name (config validator rejects it),
-        # so we verify the sanitize call by checking a clean name renders intact
-        # (no over-stripping) — the _sanitize wrapper is exercised by the persona name path.
-        self.assertIn("coherence-reviewer", self.rendered)
-        # No control bytes crept in from the name.
-        self.assertNotIn("\x1b", self.rendered)
+        """persona name passes through _sanitize — escapes are stripped before render."""
+        # Bypass config validation by constructing a SpecialistSpec directly with
+        # a persona name containing a terminal escape, then build a FleetConfig and
+        # render the preview. The ESC byte must not appear in the output.
+        evil_spec = SpecialistSpec(
+            role="evil-role",
+            provider="openrouter",
+            model="google/gemini-3-flash",
+            persona="evil\x1b[2Kname",
+            effective_instruction="some review instruction body",
+            toolset=[],
+        )
+        cfg_evil = FleetConfig(
+            name="evil-fleet",
+            synthesis=SynthesisSpec(
+                provider="openrouter",
+                model="google/gemini-2-flash",
+                prompt="Synthesize.",
+            ),
+            specialists=[evil_spec],
+        )
+        rendered_evil = render_fleet_preview(cfg_evil)
+        self.assertNotIn("\x1b", rendered_evil, "ESC byte must be stripped from persona name in preview")
 
     def test_esc_in_persona_body_stripped(self):
         """Terminal ESC bytes in persona file body are stripped in preview output.
