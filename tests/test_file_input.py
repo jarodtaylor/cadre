@@ -31,19 +31,19 @@ class TestComposeNoDocs(unittest.TestCase):
     """Empty doc list is a no-op: the base task passes through verbatim, zero I/O (R3, AE6)."""
 
     def test_plain_task_unchanged(self):
-        task, paths = compose("just a literal task", [])
+        task, paths, _trunc = compose("just a literal task", [])
         self.assertEqual(task, "just a literal task")
         self.assertEqual(paths, [])
 
     def test_none_task_passes_through(self):
-        task, paths = compose(None, [])
+        task, paths, _trunc = compose(None, [])
         self.assertIsNone(task)
         self.assertEqual(paths, [])
 
     def test_no_file_io_when_doc_list_empty(self):
         """With no docs, the helper must never call open() — proves the early return (R3)."""
         with patch("builtins.open", side_effect=AssertionError("compose opened a file with no docs")):
-            task, paths = compose("task", [])
+            task, paths, _trunc = compose("task", [])
         self.assertEqual(task, "task")
         self.assertEqual(paths, [])
 
@@ -58,25 +58,25 @@ class TestComposeOneDoc(unittest.TestCase):
         _write(self.doc, "# The Plan\n\nDo the thing.\n")
 
     def test_content_present_in_composed_task(self):
-        task, _paths = compose("review this", [self.doc])
+        task, _paths, _trunc = compose("review this", [self.doc])
         self.assertIn("# The Plan", task)
         self.assertIn("Do the thing.", task)
 
     def test_block_labeled_with_path(self):
-        task, _paths = compose("review this", [self.doc])
+        task, _paths, _trunc = compose("review this", [self.doc])
         self.assertIn(self.doc, task, "the block must be labeled with its source path (R2)")
 
     def test_base_task_preserved(self):
-        task, _paths = compose("review this", [self.doc])
+        task, _paths, _trunc = compose("review this", [self.doc])
         self.assertIn("review this", task)
 
     def test_resolved_paths_returned(self):
-        _task, paths = compose("review this", [self.doc])
+        _task, paths, _trunc = compose("review this", [self.doc])
         self.assertEqual(paths, [self.doc])
 
     def test_none_base_task_yields_block_only(self):
         """Base task None + one doc → composed task is the single labeled block (no None text)."""
-        task, _paths = compose(None, [self.doc])
+        task, _paths, _trunc = compose(None, [self.doc])
         self.assertIsNotNone(task)
         self.assertIn("# The Plan", task)
         self.assertNotIn("None", task)
@@ -94,25 +94,25 @@ class TestComposeMultipleDocs(unittest.TestCase):
         _write(self.b, "BBB content")
 
     def test_both_blocks_present(self):
-        task, _paths = compose("base", [self.a, self.b])
+        task, _paths, _trunc = compose("base", [self.a, self.b])
         self.assertIn("AAA content", task)
         self.assertIn("BBB content", task)
 
     def test_blocks_in_flag_order(self):
-        task, _paths = compose("base", [self.a, self.b])
+        task, _paths, _trunc = compose("base", [self.a, self.b])
         self.assertLess(task.index("AAA content"), task.index("BBB content"))
 
     def test_reversed_flag_order_reverses_blocks(self):
-        task, _paths = compose("base", [self.b, self.a])
+        task, _paths, _trunc = compose("base", [self.b, self.a])
         self.assertLess(task.index("BBB content"), task.index("AAA content"))
 
     def test_each_block_labeled(self):
-        task, _paths = compose("base", [self.a, self.b])
+        task, _paths, _trunc = compose("base", [self.a, self.b])
         self.assertIn(self.a, task)
         self.assertIn(self.b, task)
 
     def test_resolved_paths_in_order(self):
-        _task, paths = compose("base", [self.a, self.b])
+        _task, paths, _trunc = compose("base", [self.a, self.b])
         self.assertEqual(paths, [self.a, self.b])
 
 
@@ -184,7 +184,7 @@ class TestComposeSpecialFiles(unittest.TestCase):
         """
         empty = os.path.join(self.tmp, "empty.md")
         _write(empty, "")
-        task, paths = compose("review", [empty])
+        task, paths, _trunc = compose("review", [empty])
         self.assertIn(empty, task)        # the labeled block is present
         self.assertEqual(paths, [empty])  # readable → no error raised
 
@@ -199,7 +199,7 @@ class TestComposeOversize(unittest.TestCase):
     def test_oversize_file_truncated_with_note(self):
         big = os.path.join(self.tmp, "big.md")
         _write(big, "x" * (MAX_FILE_BYTES + 5000))
-        task, _paths = compose(None, [big])
+        task, _paths, _trunc = compose(None, [big])
         # A truncation note is visibly present in the block.
         self.assertIn("truncat", task.lower())
         # The injected content is bounded — nowhere near the full oversize length.
@@ -208,7 +208,7 @@ class TestComposeOversize(unittest.TestCase):
     def test_under_limit_file_not_truncated(self):
         small = os.path.join(self.tmp, "small.md")
         _write(small, "y" * 100)
-        task, _paths = compose(None, [small])
+        task, _paths, _trunc = compose(None, [small])
         self.assertNotIn("truncat", task.lower())
         self.assertIn("y" * 100, task)
 
@@ -216,7 +216,7 @@ class TestComposeOversize(unittest.TestCase):
         """The note states the exact 256 KiB cap — a wrong constant/format must fail."""
         big = os.path.join(self.tmp, "big.md")
         _write(big, "x" * (MAX_FILE_BYTES + 5000))
-        task, _paths = compose(None, [big])
+        task, _paths, _trunc = compose(None, [big])
         self.assertIn("[cadre: this file exceeded 256 KiB and was truncated", task)
 
     def test_exactly_max_bytes_not_truncated(self):
@@ -224,7 +224,7 @@ class TestComposeOversize(unittest.TestCase):
         (guards the > vs >= fence-post)."""
         exact = os.path.join(self.tmp, "exact.md")
         _write(exact, "z" * MAX_FILE_BYTES)
-        task, _paths = compose(None, [exact])
+        task, _paths, _trunc = compose(None, [exact])
         self.assertNotIn("truncat", task.lower())
         self.assertIn("z" * 1000, task)  # full content present
 
@@ -242,10 +242,22 @@ class TestComposeOversize(unittest.TestCase):
             f.write(b"a" * (MAX_FILE_BYTES - 1))
             f.write("日".encode("utf-8"))
         # Must not raise; returns the clean ASCII prefix + truncation note.
-        task, _paths = compose(None, [straddle])
+        task, _paths, _trunc = compose(None, [straddle])
         self.assertIn("truncat", task.lower())
         self.assertIn("a" * 1000, task)
         self.assertNotIn("日", task)  # the split char was dropped, not mangled
+
+    def test_oversize_path_reported_in_truncated_return(self):
+        """compose's third return value lists ONLY the truncated paths, so the caller
+        can disclose the partial-file review on the preview surface (the in-block note
+        is invisible there)."""
+        big = os.path.join(self.tmp, "big2.md")
+        _write(big, "x" * (MAX_FILE_BYTES + 5000))
+        small = os.path.join(self.tmp, "small2.md")
+        _write(small, "y" * 50)
+        _task, paths, truncated = compose(None, [big, small])
+        self.assertEqual(paths, [big, small])
+        self.assertEqual(truncated, [big], "only the oversize file is reported truncated")
 
 
 class TestComposeNonUtf8(unittest.TestCase):
@@ -326,7 +338,7 @@ class TestComposeTildePath(unittest.TestCase):
             doc = os.path.join(home, "notes.md")
             _write(doc, "tilde body text")
             with patch.dict(os.environ, {"HOME": home}):
-                task, paths = compose(None, ["~/notes.md"])
+                task, paths, _trunc = compose(None, ["~/notes.md"])
             self.assertIn("tilde body text", task)
             # The label/returned path stays as the caller named it (~/notes.md),
             # not the expanded absolute path.
@@ -344,7 +356,7 @@ class TestComposeUtf8Content(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             doc = os.path.join(tmp, "u.md")
             _write(doc, "résumé — 日本語 — naïve")
-            task, _paths = compose(None, [doc])
+            task, _paths, _trunc = compose(None, [doc])
             self.assertIn("résumé — 日本語 — naïve", task)
 
 

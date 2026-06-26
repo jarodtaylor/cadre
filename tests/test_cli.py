@@ -1297,6 +1297,27 @@ class TestSkillDocFlag(unittest.TestCase):
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
 
+    def test_preview_marks_oversize_doc_as_truncated(self):
+        """The preview discloses that an oversize --doc will be reviewed only partially.
+        The in-block truncation note is model-facing; the human-approval surface must
+        surface it too (cross-model review finding), still with zero model calls."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self.tmp / "huge.md"
+        big.write_text("x" * (MAX_FILE_BYTES + 4096), encoding="utf-8")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn(str(big), out)
+        self.assertIn("truncated", out, "the preview must disclose the partial-file truncation")
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
     def test_preview_non_utf8_doc_fails_read_check_no_model_call(self):
         """The preview read-check rejects a non-UTF-8 --doc too (not just a missing one):
         compose runs before the preview branch, so every failure mode is caught early."""

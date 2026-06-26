@@ -53,42 +53,61 @@ _TRUNCATION_NOTE = (
 )
 
 
-def _read_doc(path: str, errors: list[str]) -> str | None:
+def _read_doc(path: str, errors: list[str], truncated: list[str]) -> str | None:
     """Read one ``--doc`` file into a labeled block, or accumulate an error.
 
     Returns the composed block string on success, or ``None`` after appending a
-    path-naming error to ``errors`` (missing / unreadable / non-UTF-8). Never
-    raises and never returns raw bytes — every failure mode produces a clear
-    error string, mirroring ``personas.resolve``.
+    path-naming error to ``errors`` (missing / unreadable / non-UTF-8 / non-regular).
+    Records ``path`` in ``truncated`` when the file was capped at ``MAX_FILE_BYTES``,
+    so the caller can DISCLOSE the truncation on the preview surface. Never raises
+    and never returns raw bytes — every failure mode produces a clear error string,
+    mirroring ``personas.resolve``.
     """
     # expanduser FIRST — open() does not expand ~ (KTD4). The label/returned path
     # stays as the caller named it; only the open target is expanded.
     target = os.path.expanduser(path)
+
+    # Open with O_NONBLOCK, then fstat the SAME fd and refuse a non-regular file
+    # before reading. This is airtight where a stat-then-open-by-path check is not:
+    #   - O_NONBLOCK makes open() of a FIFO/device return immediately instead of
+    #     blocking forever, so the read-check / run can never hang (R6, KTD7).
+    #   - validating + reading the SAME fd closes the stat->open TOCTOU window: a
+    #     regular file swapped for a FIFO after the check cannot slip past.
+    # KTD4-compatible: no O_NOFOLLOW, so a symlink to a regular file is still
+    # followed and read (the cat-equivalent); it constrains the file TYPE, never
+    # which path. Mirrors personas.resolve's os.open + os.fdopen idiom.
+    fd = None
     try:
-        # Reject non-regular files BEFORE open(): a directory, FIFO, or device
-        # would otherwise hang open()/read() forever, violating R6 ("no lane hangs")
-        # and the KTD7 preview read-check ("fails here before approval"). os.stat
-        # does NOT block on a FIFO (only open-for-read does), so the check itself is
-        # safe. This is a file-TYPE guard, NOT the path confinement KTD4 declined —
-        # it constrains what KIND of file is read, never which path. stat follows
-        # symlinks (KTD4 intentionally has no O_NOFOLLOW), so a symlink to a regular
-        # file is still allowed.
-        if not stat.S_ISREG(os.stat(target).st_mode):
+        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        # fstat the RAW fd and reject a non-regular file BEFORE handing it to a reader
+        # (os.fdopen on a directory fd would itself raise). This validates the same fd
+        # that gets read — no stat->open TOCTOU.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             errors.append(
                 f"--doc path is not a regular file (refusing a directory / FIFO / device): {path!r}"
             )
             return None
-        with open(target, "rb") as fh:
-            # Read one past the cap so we can detect oversize without slurping a
-            # multi-gigabyte file into memory.
+        # fdopen takes ownership of fd (so the with-block closes it); clear our copy
+        # to avoid a double-close in the finally. Read one past the cap so we can
+        # detect oversize without slurping a multi-gigabyte file. (O_NONBLOCK has no
+        # effect on regular-file reads — they are always ready — so this returns bytes.)
+        with os.fdopen(fd, "rb") as fh:
+            fd = None
             data = fh.read(MAX_FILE_BYTES + 1)
     except (OSError, ValueError) as exc:
-        # OSError covers missing / permission / directory / I/O. ValueError covers
-        # an embedded NUL in the path (open() raises ValueError, not OSError) — it
-        # must NOT escape as a traceback (the helper's never-raise contract / KTD5).
-        # {path!r} keeps the message escape-safe on the preview surface.
+        # OSError: missing / permission / I/O. ValueError: embedded NUL in the path
+        # (open raises ValueError, not OSError) — must not escape as a traceback
+        # (the never-raise contract / KTD5). {path!r} keeps the message escape-safe.
         errors.append(f"--doc file could not be read: {path!r}: {exc}")
         return None
+    finally:
+        # Close the fd on any path where fdopen never took ownership (open failed →
+        # fd is None; a non-regular reject or an fstat error → fd still open).
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     oversize = len(data) > MAX_FILE_BYTES
     if oversize:
@@ -107,12 +126,16 @@ def _read_doc(path: str, errors: list[str]) -> str | None:
         return None
 
     if oversize:
+        # Note in the model-facing block AND record the path so the caller surfaces
+        # the truncation on the human-approval preview (the in-block note alone is
+        # invisible there — a reviewer would okay a silently partial file).
         text += _TRUNCATION_NOTE.format(kib=MAX_FILE_BYTES // 1024)
+        truncated.append(path)
 
     return f"{_BLOCK_OPEN.format(path=path)}\n{text}\n{_BLOCK_CLOSE}"
 
 
-def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str]]:
+def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str], list[str]]:
     """Compose ``task`` with the contents of each ``--doc`` file.
 
     Args:
@@ -120,26 +143,29 @@ def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str]]:
         docs: Ordered list of ``--doc`` paths (as the caller named them).
 
     Returns:
-        ``(composed_task, resolved_paths)``. With no docs the base task passes
-        through verbatim and ``resolved_paths`` is empty — zero file I/O, so a
-        plain task is never regressed (R3). Otherwise the composed task is the
-        base text (when present) followed by each file as a labeled block in flag
-        order, and ``resolved_paths`` lists the doc paths as named (for the
-        preview / read-check).
+        ``(composed_task, resolved_paths, truncated_paths)``. With no docs the base
+        task passes through verbatim and both lists are empty — zero file I/O, so a
+        plain task is never regressed (R3). Otherwise the composed task is the base
+        text (when present) followed by each file as a labeled block in flag order;
+        ``resolved_paths`` lists the doc paths as named (for the preview / read-check),
+        and ``truncated_paths`` is the subset capped at ``MAX_FILE_BYTES`` so the
+        caller can disclose on the human-approval surface that a review will run over
+        a partial file (the in-block note is invisible to the previewer).
 
     Raises:
         ConfigError: One or more ``--doc`` files could not be read (missing,
-            unreadable, or non-UTF-8). Every failing path is named; errors
-            accumulate into a single raised error (KTD5).
+            unreadable, non-UTF-8, or non-regular). Every failing path is named;
+            errors accumulate into a single raised error (KTD5).
     """
     # No docs: pass the task through untouched, no I/O (R3, AE6).
     if not docs:
-        return task, []
+        return task, [], []
 
     errors: list[str] = []
+    truncated: list[str] = []
     blocks: list[str] = []
     for path in docs:
-        block = _read_doc(path, errors)
+        block = _read_doc(path, errors, truncated)
         if block is not None:
             blocks.append(block)
 
@@ -152,4 +178,4 @@ def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str]]:
     # Base task (when present) precedes the labeled blocks; a --doc-only run
     # composes from blocks alone (the persona or focus carries the instruction).
     parts = ([task] if task is not None else []) + blocks
-    return "\n\n".join(parts), list(docs)
+    return "\n\n".join(parts), list(docs), truncated

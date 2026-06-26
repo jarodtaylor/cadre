@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = FleetConfig.load(args.fleet)
         resolve(cfg, default_pool_dir())
-        composed_task, resolved_docs = compose(args.task, args.doc)
+        composed_task, resolved_docs, truncated_docs = compose(args.task, args.doc)
     except ConfigError as err:
         print(str(err))
         return 1
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         # there are none, so a plain preview stays byte-identical. Because compose
         # already ran (above), a missing/unreadable/non-UTF-8 --doc has already
         # failed loudly — the preview doubles as a read-check (KTD7).
-        doc_block = render_file_inputs(resolved_docs)
+        doc_block = render_file_inputs(resolved_docs, truncated_docs)
         if doc_block:
             print(doc_block)
         # Palette + focus validation — warn-never-block (KTD5). Warnings go to

@@ -169,7 +169,10 @@ def main(argv: list[str] | None = None) -> int:
         # here so it exits cleanly (exit 1) rather than tracebacking (KTD5). The
         # composed string is passed to run_command, whose signature is unchanged.
         try:
-            task, _resolved = compose(args.task, args.doc)
+            # cli.py has no --preview surface, so the resolved/truncated lists are
+            # unused here (they drive run.py's preview disclosure). The composed task
+            # still carries the in-block truncation note + the captured prompt.txt.
+            task, _resolved, _truncated = compose(args.task, args.doc)
         except ConfigError as err:
             print(str(err))
             return 1

@@ -1577,6 +1577,21 @@ class TestRenderFileInputs(unittest.TestCase):
         rendered = render_file_inputs(["/Users/me/.cadre/docs/résumé.md"])
         self.assertIn("/Users/me/.cadre/docs/résumé.md", rendered)
 
+    def test_truncated_path_is_flagged_partial(self):
+        """A path in `truncated` is flagged so the previewer sees the review will run
+        over a PARTIAL file; a non-truncated path is not flagged."""
+        rendered = render_file_inputs(["big.md", "small.md"], truncated=["big.md"])
+        lines = rendered.split("\n")
+        big_line = next(ln for ln in lines if "big.md" in ln)
+        small_line = next(ln for ln in lines if "small.md" in ln)
+        self.assertIn("truncated", big_line)
+        self.assertIn("PARTIAL", big_line)
+        self.assertNotIn("truncated", small_line)
+
+    def test_no_truncation_marker_when_nothing_truncated(self):
+        """With no truncated paths, no marker appears (default arg, byte-clean block)."""
+        self.assertNotIn("truncated", render_file_inputs(["a.md", "b.md"]))
+
 
 if __name__ == "__main__":
     unittest.main()

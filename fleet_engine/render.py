@@ -153,25 +153,33 @@ def render_fleet_preview(config: FleetConfig) -> str:
     return "\n".join(out)
 
 
-def render_file_inputs(paths: list[str]) -> str:
+def render_file_inputs(paths: list[str], truncated: list[str] | None = None) -> str:
     """Render the "--doc files to read" preview block from a resolved-path list.
 
     Returns an empty string for an empty list — no block when no ``--doc`` was
     given, so the preview stays byte-identical to a plain run. Otherwise it names
-    each file that will be read into the task, one per line.
+    each file that will be read into the task, one per line, and flags any file in
+    ``truncated`` (capped at ``MAX_FILE_BYTES``) so the human approving the preview
+    sees that the review will run over a PARTIAL file — the in-block truncation note
+    is model-facing and invisible here, so without this the previewer would okay a
+    silently partial review (cross-model review finding).
 
     A third preview sibling of ``render_fleet_preview`` and the ``preview_lint``
     warnings: a path label is a fleet-/caller-controlled string flowing into the
     human-approval surface, so each is passed through ``_sanitize`` single-line
     (KTD6) — a control byte or bidi char in a path must not spoof or hide a line.
-    Only the path *labels* are shown and sanitized here; the file *content* is
-    never rendered on this surface and never sanitized (sanitizing it would
+    The ``⚠ truncated`` marker is our OWN trusted text (not sanitized — it cannot be
+    spoofed). Only the path *labels* are shown and sanitized here; the file *content*
+    is never rendered on this surface and never sanitized (sanitizing it would
     corrupt the reviewer's document — the deferred #5 / #23 boundary).
     """
     if not paths:
         return ""
+    truncated_set = set(truncated or ())
     out = ["Files read into the task (--doc):"]
-    out.extend(f"  - {_sanitize(p)}" for p in paths)
+    for p in paths:
+        marker = "  ⚠ truncated — the review will run over a PARTIAL file" if p in truncated_set else ""
+        out.append(f"  - {_sanitize(p)}{marker}")
     return "\n".join(out)
 
 
