@@ -1,0 +1,35 @@
+name: tests
+
+# The suite is hermetic — it tests the engine against a fake AIAgent adapter, so
+# hermes-agent and live providers are NOT needed (and aren't installable on CI:
+# hermes-agent is git-distributed, not on PyPI, and requires Python <3.14). CI
+# therefore installs only the dev deps (pyyaml) and runs the stdlib unittest suite.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    # Least-privilege: this job only reads the repo to check out + test (no writes,
+    # no packages, no deploys). Scope GITHUB_TOKEN down so a compromised step/dep
+    # can't do more (flagged by both CodeRabbit and Copilot).
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Match the project's runtime floor: hermes-agent pins Python <3.14, so
+          # the engine + tests target 3.11 (the dev venv is 3.11).
+          python-version: "3.11"
+      - name: Install dev dependencies
+        # `python -m pip` runs pip against the interpreter setup-python just
+        # configured, not a PATH-ambiguous `pip` (Copilot).
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run test suite
+        run: python -m unittest discover -s tests
