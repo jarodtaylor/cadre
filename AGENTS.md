@@ -50,6 +50,7 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 .venv/bin/python -m fleet_engine.cli validate fleets/research-swarm.example.yaml
 .venv/bin/python skills/cadre-fleet/run.py --fleet fleets/research-swarm.example.yaml --preview  # render parsed fleet, no model calls (dev-safe)
 .venv/bin/python -m fleet_engine.cli run <spec.yaml> --task "…"       # needs hermes-agent (host)
+.venv/bin/python -m fleet_engine.cli run <spec.yaml> --doc plan.md --task "Review this PLAN"  # --doc reads a file into the task (repeatable; either --task or --doc)
 ```
 
 ## Conventions
@@ -95,6 +96,18 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   by any preview/validate surface (the rendered fleet, the lint warnings, the validate
   summary) goes through `render._sanitize`: the preview is the human‑okay control and
   must not be spoofable by terminal escapes in a tampered fleet.
+- **Caller‑side file input (`--doc`):** `fleet_engine/file_input.py` is caller‑layer —
+  imported only by `run.py`/`cli.py`, never by the engine (`TestEngineIsolation` guards
+  both directions). `compose(task, docs)` reads each `--doc PATH` and appends it to the
+  task as a labeled `=== FILE: <path> ===` block; the engine still receives only the
+  finished task **string** and gains no file I/O. An unreadable/missing/non‑UTF‑8 `--doc`
+  raises `ConfigError` (named path), caught by the same handler that guards `load` +
+  `resolve`; oversize files truncate at `MAX_FILE_BYTES` with a visible note. `--preview`
+  lists the `--doc` paths as given — not canonicalized (`render.render_file_inputs`,
+  sanitized) — and read‑checks them.
+  **Boundary:** the path *labels* shown in the preview are `_sanitize`d, but the injected
+  file *content* is **not** — sanitizing it would corrupt the reviewed document;
+  output‑side content hardening is the deferred #5/#23 surface.
 
 ## Repo layout for reviewers
 

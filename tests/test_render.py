@@ -28,7 +28,12 @@ from fleet_engine.progress import (
     SynthStarted,
     Validated,
 )
-from fleet_engine.render import ProgressRenderer, render_fleet_preview, render_result
+from fleet_engine.render import (
+    ProgressRenderer,
+    render_file_inputs,
+    render_fleet_preview,
+    render_result,
+)
 
 # Path to the curated example fleet (used for some preview tests).
 _EXAMPLE_FLEET = (
@@ -1522,6 +1527,70 @@ class TestRenderFleetPreviewDescription(unittest.TestCase):
         rendered = render_fleet_preview(cfg)
         self.assertNotIn("\x1b", rendered)
         self.assertNotIn("\r", rendered)
+
+
+# ---------------------------------------------------------------------------
+# render_file_inputs — the --doc path preview block (U2)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderFileInputs(unittest.TestCase):
+    """render_file_inputs lists the --doc paths for the preview, sanitizing each
+    label (R7, KTD6). It is a third preview sibling of render_fleet_preview /
+    render_preview_warnings: a path label flows into the human-approval surface,
+    so a control byte or bidi char in it must not spoof or hide a line.
+    """
+
+    def test_empty_list_returns_empty_string(self):
+        """No --doc → no block, so the preview is byte-identical to a no-doc run."""
+        self.assertEqual(render_file_inputs([]), "")
+
+    def test_single_path_listed(self):
+        rendered = render_file_inputs(["/home/me/plan.md"])
+        self.assertIn("/home/me/plan.md", rendered)
+
+    def test_multiple_paths_all_listed_in_order(self):
+        rendered = render_file_inputs(["a.md", "b.md", "c.md"])
+        self.assertIn("a.md", rendered)
+        self.assertIn("b.md", rendered)
+        self.assertIn("c.md", rendered)
+        self.assertLess(rendered.index("a.md"), rendered.index("b.md"))
+        self.assertLess(rendered.index("b.md"), rendered.index("c.md"))
+
+    def test_esc_in_path_label_stripped(self):
+        """A control byte in a path label is sanitized — no raw escape reaches the surface."""
+        rendered = render_file_inputs(["plan\x1b[2Kevil.md"])
+        self.assertNotIn("\x1b", rendered)
+
+    def test_newline_in_path_cannot_forge_a_line(self):
+        """An embedded newline is dropped so a path can't inject a standalone fake line."""
+        rendered = render_file_inputs(["real.md\nallow_privileged_tools: false"])
+        self.assertNotIn("\n  - allow_privileged_tools: false", "\n" + rendered)
+
+    def test_bidi_control_in_path_stripped(self):
+        """A bidi override (U+202E) in a path label is stripped (the >=0xA0 trap)."""
+        rendered = render_file_inputs(["safe‮evil.md"])
+        self.assertNotIn("‮", rendered)
+
+    def test_clean_path_renders_unchanged(self):
+        """A normal path is byte-identical — no over-stripping of legitimate chars."""
+        rendered = render_file_inputs(["/Users/me/.cadre/docs/résumé.md"])
+        self.assertIn("/Users/me/.cadre/docs/résumé.md", rendered)
+
+    def test_truncated_path_is_flagged_partial(self):
+        """A path in `truncated` is flagged so the previewer sees the review will run
+        over a PARTIAL file; a non-truncated path is not flagged."""
+        rendered = render_file_inputs(["big.md", "small.md"], truncated=["big.md"])
+        lines = rendered.split("\n")
+        big_line = next(ln for ln in lines if "big.md" in ln)
+        small_line = next(ln for ln in lines if "small.md" in ln)
+        self.assertIn("truncated", big_line)
+        self.assertIn("PARTIAL", big_line)
+        self.assertNotIn("truncated", small_line)
+
+    def test_no_truncation_marker_when_nothing_truncated(self):
+        """With no truncated paths, no marker appears (default arg, byte-clean block)."""
+        self.assertNotIn("truncated", render_file_inputs(["a.md", "b.md"]))
 
 
 if __name__ == "__main__":

@@ -332,29 +332,42 @@ class TestDefaultPoolDir(unittest.TestCase):
         self.assertEqual(result, DEFAULT_PERSONAS_DIR)
 
 
-class TestEngineIsolation(unittest.TestCase):
-    """KTD1: personas.py must not statically import engine or model_client.
+def _static_imports(mod) -> list[str]:
+    """Return every module name statically imported by ``mod`` (AST, not runtime).
 
-    Uses AST analysis of the source file — immune to test-ordering effects
-    from other test modules that do import fleet_engine.engine.
+    AST analysis of the source file is immune to test-ordering effects from other
+    test modules that do import fleet_engine.engine.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(mod))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.append(node.module)
+    return imported
+
+
+class TestEngineIsolation(unittest.TestCase):
+    """KTD1: caller-layer modules and the engine stay on opposite sides of the seam.
+
+    The engine core (engine.py, model_client.py) must not import the caller-layer
+    helpers (personas, file_input), and those helpers must not import the engine —
+    so the engine receives only finished strings and gains no file I/O or
+    fleet-domain knowledge (R8;
+    docs/solutions/architecture-patterns/side-effects-at-the-edge-pure-engine-core.md).
     """
 
     def test_personas_does_not_import_engine_or_model_client(self):
         """fleet_engine/personas.py must NOT import engine or model_client (KTD1)."""
-        import ast
-        import inspect
         import fleet_engine.personas as p_mod
 
-        src = inspect.getsource(p_mod)
-        tree = ast.parse(src)
-        imported: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imported.append(alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imported.append(node.module)
+        imported = _static_imports(p_mod)
         self.assertNotIn(
             "fleet_engine.engine",
             imported,
@@ -364,6 +377,48 @@ class TestEngineIsolation(unittest.TestCase):
             "fleet_engine.model_client",
             imported,
             "personas.py must not import model_client (KTD1 — engine-purity constraint)",
+        )
+
+    def test_file_input_does_not_import_engine_or_model_client(self):
+        """fleet_engine/file_input.py must NOT import engine or model_client (KTD2)."""
+        import fleet_engine.file_input as fi_mod
+
+        imported = _static_imports(fi_mod)
+        self.assertNotIn(
+            "fleet_engine.engine",
+            imported,
+            "file_input.py must not import engine (KTD2 — engine stays path-free)",
+        )
+        self.assertNotIn(
+            "fleet_engine.model_client",
+            imported,
+            "file_input.py must not import model_client (KTD2 — engine stays path-free)",
+        )
+
+    def test_engine_does_not_import_file_input(self):
+        """fleet_engine/engine.py must NOT import file_input (KTD2 / R8).
+
+        The engine must never gain file-reading logic — it sees only the composed
+        task string. A stray import here is the architecture regression this guards.
+        """
+        import fleet_engine.engine as e_mod
+
+        imported = _static_imports(e_mod)
+        self.assertNotIn(
+            "fleet_engine.file_input",
+            imported,
+            "engine.py must not import file_input (R8 — engine gains no file I/O)",
+        )
+
+    def test_model_client_does_not_import_file_input(self):
+        """fleet_engine/model_client.py must NOT import file_input (KTD2 / R8)."""
+        import fleet_engine.model_client as mc_mod
+
+        imported = _static_imports(mc_mod)
+        self.assertNotIn(
+            "fleet_engine.file_input",
+            imported,
+            "model_client.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
 

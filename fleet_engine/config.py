@@ -44,11 +44,18 @@ _PERSONA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ConfigError(Exception):
-    """Raised when a fleet spec is invalid. Carries every error found, not just the first."""
+    """Raised when a fleet spec is invalid. Carries every error found, not just the first.
 
-    def __init__(self, errors: list[str]):
+    ``header`` defaults to the fleet-config framing but is overridable so a caller
+    that reuses the same error-accumulation + single-catch idiom for a *different*
+    failure category (e.g. ``file_input.compose`` reading ``--doc`` files) does not
+    misattribute its errors to the fleet YAML. Existing callers pass no header and
+    are unchanged.
+    """
+
+    def __init__(self, errors: list[str], *, header: str = "Invalid fleet config:"):
         self.errors = list(errors)
-        super().__init__("Invalid fleet config:\n  - " + "\n  - ".join(self.errors))
+        super().__init__(header + "\n  - " + "\n  - ".join(self.errors))
 
 
 @dataclass

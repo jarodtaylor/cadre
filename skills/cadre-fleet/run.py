@@ -21,11 +21,17 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
+from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
 from fleet_engine.personas import default_pool_dir, resolve  # noqa: E402
 from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
-from fleet_engine.render import _sanitize, render_fleet_preview, render_result  # noqa: E402
+from fleet_engine.render import (  # noqa: E402
+    _sanitize,
+    render_file_inputs,
+    render_fleet_preview,
+    render_result,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,7 +40,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--task",
         default=None,
-        help="The task / query to run (required unless --preview)",
+        help="The task / query to run (required unless --preview or --doc is given)",
+    )
+    parser.add_argument(
+        "--doc",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Read a file's contents into the task (repeatable). Each --doc PATH is "
+            "appended as a labeled block, in flag order; use with or instead of "
+            "--task. The paths you give are shown in --preview before any run."
+        ),
     )
     parser.add_argument(
         "--preview",
@@ -54,12 +71,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Load + validate the fleet, then resolve persona instructions.
-    # ConfigError and any OSError (missing file, a directory path, bad perms)
-    # both produce a clean message and exit 1.
+    # Load + validate the fleet, resolve persona instructions, then compose any
+    # --doc files into the task. ConfigError (invalid fleet OR an unreadable --doc)
+    # and any OSError (missing fleet file, a directory path, bad perms) all produce
+    # a clean message and exit 1 — compose raises ConfigError, so it shares the
+    # handler that already guards load + resolve (KTD5).
     try:
         cfg = FleetConfig.load(args.fleet)
         resolve(cfg, default_pool_dir())
+        composed_task, doc_paths, truncated_docs = compose(args.task, args.doc)
     except ConfigError as err:
         print(str(err))
         return 1
@@ -82,22 +102,41 @@ def main(argv: list[str] | None = None) -> int:
         # lands on the wrong (e.g. ungrounded) profile unnoticed.
         print(f"Profile (HERMES_HOME): {os.getenv('HERMES_HOME', DEFAULT_HERMES_HOME)}")
         print(render_fleet_preview(cfg))
+        # The --doc paths the run will read into the task, as the caller named them
+        # (R7). Skipped when there are none, so a plain preview stays byte-identical.
+        # Because compose already ran (above), a missing/unreadable/non-UTF-8 --doc
+        # has already failed loudly — the preview doubles as a read-check (KTD7).
+        doc_block = render_file_inputs(doc_paths, truncated_docs)
+        if doc_block:
+            print(doc_block)
         # Palette + focus validation — warn-never-block (KTD5). Warnings go to
         # stdout as part of the preview the human approves (no [cadre] stderr
         # infra on the preview path).
         print(render_preview_warnings(cfg))
         return 0
 
-    # Real run: --task is required.
-    if args.task is None:
-        print("--task is required (unless --preview)")
+    # Real run: need at least one of --task / --doc. composed_task is None only when
+    # both are absent (compose returns the base task unchanged for a no-doc run).
+    if composed_task is None:
+        print("provide --task and/or --doc (unless --preview)")
         return 2
+
+    # No --preview here to disclose truncation (or it was skipped), so warn on the
+    # [cadre] stream that an oversize --doc is being reviewed only partially — the
+    # in-block note is model-facing and the operator would otherwise never know
+    # (cross-model review: surface truncation on the run path, not just preview).
+    for p in truncated_docs:
+        print(
+            f"[cadre] warn: --doc {_sanitize(p)} truncated to {MAX_FILE_BYTES // 1024} KiB "
+            "— reviewing a partial file",
+            file=sys.stderr,
+        )
 
     capture = not args.no_capture
 
     if capture:
         try:
-            run_dir = prepare_run_dir(args.task)
+            run_dir = prepare_run_dir(composed_task)
         except OSError as exc:
             print(
                 f"Cannot create run directory: {exc}\n"
@@ -107,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_with_progress(
         cfg,
-        args.task,
+        composed_task,
         ModelClient(),
         run_dir=run_dir if capture else None,
     )

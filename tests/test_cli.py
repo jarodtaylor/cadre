@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fleet_engine.capture import _slugify, resolve_run_dir
-from fleet_engine.cli import run_command, validate_command
+from fleet_engine.cli import main as cli_main, run_command, validate_command
 from fleet_engine.model_client import AgentResult
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
@@ -581,10 +581,12 @@ class TestSkillFleetRequired(unittest.TestCase):
 
 
 class TestSkillTaskRequiredForRealRun(unittest.TestCase):
-    """--task is required for a real run (not preview); omitting it returns non-zero
-    with no model calls — the check fires before ModelClient is ever constructed.
+    """A real run (not preview) needs at least one of --task / --doc; with NEITHER
+    present the run returns non-zero (exit 2) with no model calls — the check fires
+    before ModelClient is ever constructed. These cases pass neither flag (the
+    --doc-only-proceeds case lives in TestSkillDocFlag).
 
-    Covers: the task-None guard fires before capture (prepare_run_dir not called).
+    Covers: the neither-present guard fires before capture (prepare_run_dir not called).
     """
 
     def setUp(self):
@@ -1099,6 +1101,269 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
             client.prompts.get("r", ""),
             "the resolved persona body must reach the specialist prompt",
         )
+
+
+class TestCLIDocFlag(unittest.TestCase):
+    """fleet_engine/cli.py `run --doc`: read named files into the task (#26).
+
+    Drives cli.main() so the argparse wiring (--doc; --task now optional) and the
+    at-least-one guard are exercised end-to-end. A prompt-capturing client (via a
+    patched ModelClient) proves the composed content reaches the specialist prompt.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _doc(self, name, text):
+        p = self.tmp / name
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    def _run(self, argv, fake=None):
+        fake = fake if fake is not None else _PromptCapturingClient()
+        buf = io.StringIO()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(argv)
+        return code, fake, buf.getvalue()
+
+    def test_doc_content_reaches_prompt(self):
+        """Covers AE1: run spec --doc f.md → file content reaches the prompt."""
+        doc = self._doc("spec.md", "SENTINEL_SPEC_CONTENT")
+        code, fake, _out = self._run(["run", EXAMPLE, "--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("SENTINEL_SPEC_CONTENT", fake.prompts["web"])
+
+    def test_task_only_passes_verbatim(self):
+        """Covers AE6/R3: --task with no --doc is unchanged — no file blocks."""
+        code, fake, _out = self._run(["run", EXAMPLE, "--task", "PLAIN_TASK", "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("PLAIN_TASK", fake.prompts["web"])
+        self.assertNotIn("=== FILE:", fake.prompts["web"])
+
+    def test_doc_only_no_task_composes(self):
+        """--doc only (no --task) composes the task from the block and runs."""
+        doc = self._doc("only.md", "ONLY_SPEC_BODY")
+        code, fake, _out = self._run(["run", EXAMPLE, "--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("ONLY_SPEC_BODY", fake.prompts["web"])
+
+    def test_missing_doc_clean_nonzero_naming_path(self):
+        """Covers AE2/R5: an unreadable --doc fails cleanly (exit 1), naming the path,
+        before any model call."""
+        missing = str(self.tmp / "ghost.md")
+        code, fake, out = self._run(["run", EXAMPLE, "--task", "t", "--doc", missing, "--no-capture"])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(fake.calls), 0, "no model call when a --doc is unreadable")
+        self.assertIn(missing, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_neither_task_nor_doc_exits_2(self):
+        """Neither --task nor --doc → exit 2 from the at-least-one check (not argparse)."""
+        code, fake, out = self._run(["run", EXAMPLE, "--no-capture"])
+        self.assertEqual(code, 2)
+        self.assertEqual(len(fake.calls), 0)
+        self.assertIn("--doc", out)
+
+    def test_oversize_doc_run_warns_on_stderr(self):
+        """A non-preview run with an oversize --doc warns the operator on stderr that
+        the review runs over a partial file (cli has no preview to disclose it)."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
+        fake = _PromptCapturingClient()
+        err = io.StringIO()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = cli_main(["run", EXAMPLE, "--doc", big, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("[cadre] warn:", err.getvalue())
+        self.assertIn("truncated", err.getvalue())
+
+    def test_capture_writes_composed_task_to_prompt_txt(self):
+        """With capture ON, prompt.txt records the COMPOSED task (the file block), not
+        the raw args.task — the run folder must reflect what specialists actually saw."""
+        doc = self._doc("plan.md", "CAPTURED_DOC_BODY")
+        run_dir = self.tmp / "run"
+        fake = _PromptCapturingClient()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = cli_main(["run", EXAMPLE, "--task", "review", "--doc", doc])
+        self.assertEqual(code, 0)
+        prompt_txt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("CAPTURED_DOC_BODY", prompt_txt)
+        self.assertIn("=== FILE:", prompt_txt)
+
+    def test_validate_subcommand_rejects_doc_flag(self):
+        """validate is config-only and out of scope — argparse must reject --doc there."""
+        with self.assertRaises(SystemExit) as ctx:
+            cli_main(["validate", EXAMPLE, "--doc", "x.md"])
+        self.assertNotEqual(ctx.exception.code, 0)
+
+
+class TestSkillDocFlag(unittest.TestCase):
+    """skills/cadre-fleet/run.py --doc: read named files into the task (#26).
+
+    Covers AE1/AE2/AE4/AE6 + R2/R3/R5/R7 at the skill entry. A prompt-capturing
+    client proves the composed file content actually reaches the specialist prompt.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_mod = _load_skill_module()
+
+    def _doc(self, name, text):
+        p = self.tmp / name
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    def _run(self, argv, fake=None):
+        """Run skill main() with a prompt-capturing client; returns (code, fake, stdout)."""
+        fake = fake if fake is not None else _PromptCapturingClient()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", return_value=fake):
+            with contextlib.redirect_stdout(buf):
+                code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET] + argv)
+        return code, fake, buf.getvalue()
+
+    def test_doc_content_reaches_prompt(self):
+        """Covers AE1: --doc file content reaches the specialist prompt."""
+        doc = self._doc("plan.md", "SENTINEL_PLAN_CONTENT")
+        code, fake, _out = self._run(["--task", "review", "--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("SENTINEL_PLAN_CONTENT", fake.prompts["web"])
+
+    def test_two_docs_reach_prompt_in_order(self):
+        """Covers R2: two --doc blocks reach the prompt in flag order."""
+        a = self._doc("a.md", "ALPHA_DOC")
+        b = self._doc("b.md", "BETA_DOC")
+        code, fake, _out = self._run(["--task", "t", "--doc", a, "--doc", b, "--no-capture"])
+        self.assertEqual(code, 0)
+        prompt = fake.prompts["web"]
+        self.assertIn("ALPHA_DOC", prompt)
+        self.assertIn("BETA_DOC", prompt)
+        self.assertLess(prompt.index("ALPHA_DOC"), prompt.index("BETA_DOC"))
+
+    def test_task_only_passes_verbatim(self):
+        """Covers AE6/R3: no --doc means no file blocks — the task is unchanged."""
+        code, fake, _out = self._run(["--task", "PLAIN_TASK", "--no-capture"])
+        self.assertEqual(code, 0)
+        prompt = fake.prompts["web"]
+        self.assertIn("PLAIN_TASK", prompt)
+        self.assertNotIn("=== FILE:", prompt)
+
+    def test_doc_only_no_task_proceeds(self):
+        """--doc only (no --task) composes from the block and the run proceeds."""
+        doc = self._doc("only.md", "ONLY_DOC_CONTENT")
+        code, fake, _out = self._run(["--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("ONLY_DOC_CONTENT", fake.prompts["web"])
+
+    def test_neither_task_nor_doc_exits_2_no_model_call(self):
+        """Neither --task nor --doc → clean usage error (exit 2), zero model calls."""
+        code, fake, out = self._run(["--no-capture"])
+        self.assertEqual(code, 2)
+        self.assertEqual(len(fake.calls), 0)
+        self.assertIn("--task", out)
+        self.assertIn("--doc", out)
+
+    def test_missing_doc_clean_nonzero_no_model_call(self):
+        """Covers AE2/R5: an unreadable --doc fails the run cleanly, naming the path,
+        before any model call (no traceback)."""
+        missing = str(self.tmp / "ghost.md")
+        code, fake, out = self._run(["--task", "t", "--doc", missing, "--no-capture"])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(fake.calls), 0, "no model call when a --doc is unreadable")
+        self.assertIn(missing, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_preview_with_doc_shows_path_and_makes_no_model_call(self):
+        """Covers AE4 + R7: --preview --doc shows the --doc path AND makes zero
+        model calls / zero capture side-effects."""
+        doc = self._doc("preview.md", "PREVIEW_DOC_BODY")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
+        self.assertEqual(code, 0)
+        self.assertIn(doc, buf.getvalue(), "the --doc path appears in the preview (R7)")
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_preview_missing_doc_fails_read_check_no_model_call(self):
+        """Covers R5/KTD7: the preview doubles as a read-check — a missing --doc fails
+        the preview with the path-naming error, before approval, zero model calls."""
+        missing = str(self.tmp / "absent.md")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", missing])
+        self.assertEqual(code, 1)
+        self.assertIn(missing, buf.getvalue())
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_oversize_doc_run_warns_on_stderr(self):
+        """A non-preview skill run with an oversize --doc warns on stderr (run path has
+        no preview gate to disclose the partial-file truncation)."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
+        fake = _PromptCapturingClient()
+        err = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", return_value=fake):
+            with contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("[cadre] warn:", err.getvalue())
+        self.assertIn("truncated", err.getvalue())
+
+    def test_preview_marks_oversize_doc_as_truncated(self):
+        """The preview discloses that an oversize --doc will be reviewed only partially.
+        The in-block truncation note is model-facing; the human-approval surface must
+        surface it too (cross-model review finding), still with zero model calls."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self.tmp / "huge.md"
+        big.write_text("x" * (MAX_FILE_BYTES + 4096), encoding="utf-8")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn(str(big), out)
+        self.assertIn("truncated", out, "the preview must disclose the partial-file truncation")
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_preview_non_utf8_doc_fails_read_check_no_model_call(self):
+        """The preview read-check rejects a non-UTF-8 --doc too (not just a missing one):
+        compose runs before the preview branch, so every failure mode is caught early."""
+        binf = self.tmp / "image.bin"
+        binf.write_bytes(b"\xff\xfe\x00\x80 not text")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(binf)])
+        self.assertEqual(code, 1)
+        self.assertIn(str(binf), buf.getvalue())
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
 
 
 if __name__ == "__main__":

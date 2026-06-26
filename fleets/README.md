@@ -41,6 +41,12 @@ across different models in parallel and returning each lane's raw, attributed
 critique (collect shape — no synthesizer). They share one design, so the
 guidance below applies to both.
 
+**Name the artifact with `--doc`, don't paste it.** Pass the code, diff, or
+planning document with `--doc PATH` (repeatable) and the runner reads the file
+into the task — no copy-paste. `--preview` lists the paths (as you gave them) and
+read-checks them before any model runs. Pasting into `--task` still works; the
+two combine (e.g. `--task "Review this PLAN" --doc plan.md`).
+
 **Cross-model beats all-Claude.** The whole point is independent perspective: a
 lane on Grok, one on Gemini, one on GPT, one on DeepSeek, one on Claude will
 disagree — and the disagreement is the signal, because one model catches what
@@ -52,7 +58,7 @@ exist.
 
 **Prefer reasoning/completion models, not agentic ones.** Every review lane is
 `toolset: []` (fail-closed zero tools): reviewers reason over the code or
-document you supply in `--task`, not live retrieval. Agentic, tool-happy models
+document you supply (via `--doc` or pasted into `--task`), not live retrieval. Agentic, tool-happy models
 may try to emit tool calls even when none are available — under `toolset: []`
 those calls no-op and the lane can return **no review at all**. Each lane's
 `focus` opens with "you have no tools — review only from the provided artifact"
@@ -69,8 +75,8 @@ escalating to actions.
 
 ### `code-review.example.yaml` — four lenses
 
-Reviews the code or diff you pass as `--task`. Lenses, each on a different
-provider/model:
+Reviews the code or diff you pass via `--doc` (or `--task`). Lenses, each on a
+different provider/model:
 
 - **security** — injection (SQL/command/prompt), auth/authz gaps, insecure defaults, exposed secrets, OWASP patterns
 - **architecture** — coupling, separation-of-concerns violations, abstraction leaks, dead code
@@ -79,8 +85,9 @@ provider/model:
 
 ### `doc-review.example.yaml` — five lenses
 
-Reviews a **planning document** — a requirements doc or a plan — that you paste
-as `--task`. The lenses are ported from the `ce-doc-review` personas and are
+Reviews a **planning document** — a requirements doc or a plan — that you name
+with `--doc` (or paste as `--task`). The lenses are ported from the
+`ce-doc-review` personas and are
 **doc-type-agnostic**: they apply to either artifact, so name the type in the
 task when it matters (e.g. "Review this PLAN: …" vs "Review these
 REQUIREMENTS: …"). Lenses, each on a different provider/model:
