@@ -1,16 +1,20 @@
 # Cadre
 
-Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and tools, then synthesize one grounded, attributed report. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
+Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and toolset, then **synthesize** them into one grounded, attributed result — or **collect** their independent findings side by side. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 
-> **Status: building in public.** The engine, run-capture, and the agent-run handoff are shipped and **dogfooded live** — a Hermes agent drove a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Expect APIs to change.
+> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, and cross-model **review fleets** (code-review + doc-review) — with both `synthesize` and `collect` convergence. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
 
 ## Why
 
-A single-vendor runtime can only fan a task out across one provider's own tiers. Cadre routes the right subtask to the right *provider* — real-time social from Grok, broad web from a fast model, deep analysis from a strong one, a contrarian read from another — then synthesizes one report that **attributes each claim to the model that surfaced it**. Diverse models catch what same-model ensembles miss. See [STRATEGY.md](STRATEGY.md).
+**Where it came from.** I build Hermes agents. When one needs to spread work across subagents — review its own plan, validate a diff, research something — Hermes's `delegate_task` can't vary the model: every subagent runs the one default (or a single configured delegate model for *all* of them). Cadre fixes that. Spin up an ephemeral fleet where each specialist is its own provider and model — no full Hermes profile, workspace, or memory required, just a YAML fleet.
+
+The primitive is general: **any fleet you can describe in config**, not a fixed menu. We pre-bake a few to get you started — a research swarm, a code-review swarm, and a docs-review swarm — and the aim is harness/runtime-agnostic, so you run your fleets wherever your agents live (Hermes today; more runtimes as reach).
+
+A single-vendor runtime can only fan a task out across one provider's own tiers. Cadre routes the right subtask to the right *provider* — real-time social from Grok, broad web from a fast model, deep analysis from a strong one, a contrarian read from another — then synthesizes one report that **attributes each claim to the model that surfaced it**. Decomposing a task into specialist lenses is what drives coverage; running those lenses across *diverse* models adds independent cross-checking and resilience, and surfaces what any single model's blind spots miss. See [STRATEGY.md](STRATEGY.md).
 
 ## How it works
 
-One orchestration primitive — **parallel fan-out → synthesize** — over a *fleet* defined entirely in YAML (specialists, each a role + provider + model + toolset, plus a synthesizer). Specialists run concurrently; the synthesizer combines the survivors. It degrades rather than crashing: if some lanes fail it synthesizes the rest and reports the failures; it fails outright only when none survive.
+The core primitive is **parallel fan-out**, then one of two convergence modes — **synthesize** (a strong model combines the survivors into one grounded report) or **collect** (no synthesizer — return each specialist's attributed output side by side, as the review fleets do) — over a *fleet* defined entirely in YAML (specialists, each a role + provider + model + toolset, plus an optional synthesizer). Specialists run concurrently. Synthesize degrades rather than crashing: if some lanes fail it synthesizes the rest and reports the failures, failing outright only when none survive.
 
 ```mermaid
 flowchart TB
@@ -93,4 +97,4 @@ See [STRATEGY.md](STRATEGY.md) for the full direction.
 
 ## License
 
-TBD
+[MIT](LICENSE) © 2026 Jarod Taylor
