@@ -100,6 +100,10 @@ Relay the complete preview output to the human. It shows:
 - A **fleet-validation summary** — advisory warnings for any model/toolset not on
   the host palette and any retrieval lane whose focus lacks a sourcing directive.
   It never blocks a run; relay it so the human sees it before approving.
+- **Files to read (`--doc`)** — when you pass `--doc PATH` (see step 3), the resolved
+  file paths the run will read into the task. The preview doubles as a **read-check**:
+  a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit 1, naming the path)
+  before any approval, so preview with the same `--doc` flags you intend to run with.
 
 Ask the human to okay it before running. Do not paraphrase the fleet in lieu of
 the preview — the preview is the operative control.
@@ -111,11 +115,16 @@ in parallel; for synthesize fleets, synthesis follows). Then run:
 
 ```bash
 "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --task "<the task>"
+# …or read a document into the task instead of pasting it (repeatable; --task optional):
+"$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/doc-review.yaml --doc plan.md --task "Review this PLAN"
 ```
 
-The runner prints the result — a synthesized report (synthesize fleets) or the
-attributed specialist blocks (collect fleets) — and a `Run folder:` pointer to
-the captured run under `~/.cadre/runs/`.
+Use `--doc PATH` (repeatable) to read a file's contents into the task — the
+"name the plan, no pasting" path, with the doc-review fleet as the primary
+consumer. Preview with the same `--doc` flags first (step 2) to read-check the
+files before the human approves. The runner prints the result — a synthesized
+report (synthesize fleets) or the attributed specialist blocks (collect fleets) —
+and a `Run folder:` pointer to the captured run under `~/.cadre/runs/`.
 
 Add `--no-capture` to suppress the run folder (not recommended — the manifest
 records the full result, provenance, and timings).

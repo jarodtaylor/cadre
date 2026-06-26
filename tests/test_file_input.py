@@ -175,6 +175,41 @@ class TestComposeOversize(unittest.TestCase):
         self.assertNotIn("truncat", task.lower())
         self.assertIn("y" * 100, task)
 
+    def test_truncation_note_pins_exact_text_and_kib(self):
+        """The note states the exact 256 KiB cap — a wrong constant/format must fail."""
+        big = os.path.join(self.tmp, "big.md")
+        _write(big, "x" * (MAX_FILE_BYTES + 5000))
+        task, _paths = compose(None, [big])
+        self.assertIn("[cadre: this file exceeded 256 KiB and was truncated", task)
+
+    def test_exactly_max_bytes_not_truncated(self):
+        """A file of EXACTLY MAX_FILE_BYTES is at the cap, not over it — no truncation
+        (guards the > vs >= fence-post)."""
+        exact = os.path.join(self.tmp, "exact.md")
+        _write(exact, "z" * MAX_FILE_BYTES)
+        task, _paths = compose(None, [exact])
+        self.assertNotIn("truncat", task.lower())
+        self.assertIn("z" * 1000, task)  # full content present
+
+    def test_multibyte_char_straddling_cap_decodes_cleanly(self):
+        """When the byte cap splits a multibyte UTF-8 char, the partial tail is dropped
+        (incremental decoder, final=False) rather than raising — the subtlest KTD5 path.
+
+        If final were True here, the lone leading byte of the split char would raise
+        UnicodeDecodeError and turn a valid oversize document into an error.
+        """
+        straddle = os.path.join(self.tmp, "straddle.md")
+        # ASCII filler of MAX-1 bytes, then a 3-byte char ('日' = E6 97 A5). Truncating
+        # to MAX bytes keeps the filler + only the first byte of the char.
+        with open(straddle, "wb") as f:
+            f.write(b"a" * (MAX_FILE_BYTES - 1))
+            f.write("日".encode("utf-8"))
+        # Must not raise; returns the clean ASCII prefix + truncation note.
+        task, _paths = compose(None, [straddle])
+        self.assertIn("truncat", task.lower())
+        self.assertIn("a" * 1000, task)
+        self.assertNotIn("日", task)  # the split char was dropped, not mangled
+
 
 class TestComposeNonUtf8(unittest.TestCase):
     """A non-UTF-8 / binary file is a loud error naming the file; raw bytes never returned (R6, AE5)."""
@@ -203,6 +238,43 @@ class TestComposeNonUtf8(unittest.TestCase):
         _write(binf, b"\xff\xfe" * (MAX_FILE_BYTES), binary=True)
         with self.assertRaises(ConfigError):
             compose(None, [binf])
+
+
+class TestComposeErrorFraming(unittest.TestCase):
+    """The single raised ConfigError is framed as a --doc failure, escape-safe, and
+    never escapes as a foreign exception type (review folds: NUL traceback, header
+    misattribution, preview-surface escape-safety)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp)
+
+    def test_nul_byte_path_raises_config_error_not_value_error(self):
+        """An embedded NUL in a --doc path makes open() raise ValueError; it must be
+        caught and reframed, NOT escape as a traceback (the never-raise contract)."""
+        with self.assertRaises(ConfigError) as ctx:
+            compose("task", ["plan\x00.md"])
+        # The clean message is produced; no ValueError escapes.
+        self.assertIn("could not be read", str(ctx.exception))
+
+    def test_doc_error_header_does_not_claim_invalid_fleet_config(self):
+        """A --doc read failure must NOT be mislabeled 'Invalid fleet config:' — the
+        fleet YAML is fine; the --doc path is the problem."""
+        missing = os.path.join(self.tmp, "ghost.md")
+        with self.assertRaises(ConfigError) as ctx:
+            compose("task", [missing])
+        msg = str(ctx.exception)
+        self.assertNotIn("Invalid fleet config", msg)
+        self.assertIn("--doc", msg)
+
+    def test_error_message_is_escape_safe(self):
+        """A --doc path carrying a terminal escape must not leak a raw control byte
+        into the error message (it prints on the preview read-check surface). repr
+        on both the path and the OSError filename keeps it inert."""
+        evil = os.path.join(self.tmp, "plan\x1b[2Kevil.md")  # never created → read fails
+        with self.assertRaises(ConfigError) as ctx:
+            compose("task", [evil])
+        self.assertNotIn("\x1b", str(ctx.exception), "raw ESC must not reach the surface")
 
 
 class TestComposeTildePath(unittest.TestCase):

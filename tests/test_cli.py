@@ -1166,6 +1166,21 @@ class TestCLIDocFlag(unittest.TestCase):
         self.assertEqual(len(fake.calls), 0)
         self.assertIn("--doc", out)
 
+    def test_capture_writes_composed_task_to_prompt_txt(self):
+        """With capture ON, prompt.txt records the COMPOSED task (the file block), not
+        the raw args.task — the run folder must reflect what specialists actually saw."""
+        doc = self._doc("plan.md", "CAPTURED_DOC_BODY")
+        run_dir = self.tmp / "run"
+        fake = _PromptCapturingClient()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = cli_main(["run", EXAMPLE, "--task", "review", "--doc", doc])
+        self.assertEqual(code, 0)
+        prompt_txt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("CAPTURED_DOC_BODY", prompt_txt)
+        self.assertIn("=== FILE:", prompt_txt)
+
     def test_validate_subcommand_rejects_doc_flag(self):
         """validate is config-only and out of scope — argparse must reject --doc there."""
         with self.assertRaises(SystemExit) as ctx:
@@ -1279,6 +1294,23 @@ class TestSkillDocFlag(unittest.TestCase):
                     code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", missing])
         self.assertEqual(code, 1)
         self.assertIn(missing, buf.getvalue())
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_preview_non_utf8_doc_fails_read_check_no_model_call(self):
+        """The preview read-check rejects a non-UTF-8 --doc too (not just a missing one):
+        compose runs before the preview branch, so every failure mode is caught early."""
+        binf = self.tmp / "image.bin"
+        binf.write_bytes(b"\xff\xfe\x00\x80 not text")
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(binf)])
+        self.assertEqual(code, 1)
+        self.assertIn(str(binf), buf.getvalue())
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
 

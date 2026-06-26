@@ -68,7 +68,11 @@ def _read_doc(path: str, errors: list[str]) -> str | None:
             # Read one past the cap so we can detect oversize without slurping a
             # multi-gigabyte file into memory.
             data = fh.read(MAX_FILE_BYTES + 1)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # OSError covers missing / permission / directory / I/O. ValueError covers
+        # an embedded NUL in the path (open() raises ValueError, not OSError) — it
+        # must NOT escape as a traceback (the helper's never-raise contract / KTD5).
+        # {path!r} keeps the message escape-safe on the preview surface.
         errors.append(f"--doc file could not be read: {path!r}: {exc}")
         return None
 
@@ -126,7 +130,10 @@ def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str]]:
             blocks.append(block)
 
     if errors:
-        raise ConfigError(errors)
+        # A doc-read failure is NOT a fleet-config error — override the header so
+        # the operator is pointed at the --doc path, not their fleet YAML (the
+        # error-accumulation + single-catch idiom is shared; the framing is not).
+        raise ConfigError(errors, header="Could not read --doc input:")
 
     # Base task (when present) precedes the labeled blocks; a --doc-only run
     # composes from blocks alone (the persona or focus carries the instruction).
