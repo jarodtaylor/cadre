@@ -43,7 +43,7 @@ guidance below applies to both.
 
 **Name the artifact with `--doc`, don't paste it.** Pass the code, diff, or
 planning document with `--doc PATH` (repeatable) and the runner reads the file
-into the task — no copy-paste. `--preview` lists the resolved paths and
+into the task — no copy-paste. `--preview` lists the paths (as you gave them) and
 read-checks them before any model runs. Pasting into `--task` still works; the
 two combine (e.g. `--task "Review this PLAN" --doc plan.md`).
 

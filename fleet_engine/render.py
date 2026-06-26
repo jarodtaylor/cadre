@@ -154,7 +154,10 @@ def render_fleet_preview(config: FleetConfig) -> str:
 
 
 def render_file_inputs(paths: list[str], truncated: list[str] | None = None) -> str:
-    """Render the "--doc files to read" preview block from a resolved-path list.
+    """Render the "--doc files to read" preview block from the list of ``--doc`` paths.
+
+    The paths are shown exactly as the caller named them (no canonicalization /
+    realpath) — this surface lists what will be read, it does not resolve it.
 
     Returns an empty string for an empty list — no block when no ``--doc`` was
     given, so the preview stays byte-identical to a plain run. Otherwise it names

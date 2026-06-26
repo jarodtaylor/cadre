@@ -1281,7 +1281,7 @@ class TestSkillDocFlag(unittest.TestCase):
         self.assertNotIn("Traceback", out)
 
     def test_preview_with_doc_shows_path_and_makes_no_model_call(self):
-        """Covers AE4 + R7: --preview --doc shows the resolved path AND makes zero
+        """Covers AE4 + R7: --preview --doc shows the --doc path AND makes zero
         model calls / zero capture side-effects."""
         doc = self._doc("preview.md", "PREVIEW_DOC_BODY")
         fake_client_cls = MagicMock()
@@ -1292,7 +1292,7 @@ class TestSkillDocFlag(unittest.TestCase):
                 with contextlib.redirect_stdout(buf):
                     code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
         self.assertEqual(code, 0)
-        self.assertIn(doc, buf.getvalue(), "the resolved --doc path appears in the preview (R7)")
+        self.assertIn(doc, buf.getvalue(), "the --doc path appears in the preview (R7)")
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
 

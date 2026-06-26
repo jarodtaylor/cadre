@@ -170,8 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         # composed string is passed to run_command, whose signature is unchanged.
         try:
             # cli.py has no --preview surface to disclose truncation, so the warn
-            # below is the operator's only signal; resolved_paths is unused here.
-            task, _resolved, truncated = compose(args.task, args.doc)
+            # below is the operator's only signal; the doc-paths list is unused here.
+            task, _doc_paths, truncated = compose(args.task, args.doc)
         except ConfigError as err:
             print(str(err))
             return 1

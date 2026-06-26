@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Read a file's contents into the task (repeatable). Each --doc PATH is "
             "appended as a labeled block, in flag order; use with or instead of "
-            "--task. The resolved paths are shown in --preview before any run."
+            "--task. The paths you give are shown in --preview before any run."
         ),
     )
     parser.add_argument(
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = FleetConfig.load(args.fleet)
         resolve(cfg, default_pool_dir())
-        composed_task, resolved_docs, truncated_docs = compose(args.task, args.doc)
+        composed_task, doc_paths, truncated_docs = compose(args.task, args.doc)
     except ConfigError as err:
         print(str(err))
         return 1
@@ -102,11 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         # lands on the wrong (e.g. ungrounded) profile unnoticed.
         print(f"Profile (HERMES_HOME): {os.getenv('HERMES_HOME', DEFAULT_HERMES_HOME)}")
         print(render_fleet_preview(cfg))
-        # Resolved --doc paths the run will read into the task (R7). Skipped when
-        # there are none, so a plain preview stays byte-identical. Because compose
-        # already ran (above), a missing/unreadable/non-UTF-8 --doc has already
-        # failed loudly — the preview doubles as a read-check (KTD7).
-        doc_block = render_file_inputs(resolved_docs, truncated_docs)
+        # The --doc paths the run will read into the task, as the caller named them
+        # (R7). Skipped when there are none, so a plain preview stays byte-identical.
+        # Because compose already ran (above), a missing/unreadable/non-UTF-8 --doc
+        # has already failed loudly — the preview doubles as a read-check (KTD7).
+        doc_block = render_file_inputs(doc_paths, truncated_docs)
         if doc_block:
             print(doc_block)
         # Palette + focus validation — warn-never-block (KTD5). Warnings go to

@@ -103,7 +103,8 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   finished task **string** and gains no file I/O. An unreadable/missing/non‑UTF‑8 `--doc`
   raises `ConfigError` (named path), caught by the same handler that guards `load` +
   `resolve`; oversize files truncate at `MAX_FILE_BYTES` with a visible note. `--preview`
-  lists the resolved paths (`render.render_file_inputs`, sanitized) and read‑checks them.
+  lists the `--doc` paths as given — not canonicalized (`render.render_file_inputs`,
+  sanitized) — and read‑checks them.
   **Boundary:** the path *labels* shown in the preview are `_sanitize`d, but the injected
   file *content* is **not** — sanitizing it would corrupt the reviewed document;
   output‑side content hardening is the deferred #5/#23 surface.

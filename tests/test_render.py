@@ -1530,7 +1530,7 @@ class TestRenderFleetPreviewDescription(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# render_file_inputs — the --doc resolved-path preview block (U2)
+# render_file_inputs — the --doc path preview block (U2)
 # ---------------------------------------------------------------------------
 
 

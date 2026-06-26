@@ -25,7 +25,7 @@ A cross-model review (Codex) found the gap a same-model panel of ten personas ha
 
 When a render *is* an approval control, every **material fact about what will actually run** must appear **on that surface** — not only in the downstream artifact the machine consumes. A silent transformation of the input (truncation, sampling, dedup, a defaulted value, a dropped field) is exactly such a fact: it changes what the human is approving.
 
-- Return the transformation as data from the layer that performs it, so the surface can render it. Here `compose()` returns `(composed_task, resolved_paths, truncated_paths)`; `render_file_inputs(paths, truncated)` flags each truncated path: `⚠ truncated — the review will run over a PARTIAL file`. The flag is the renderer's *own* trusted text (not the untrusted path), so it can't be spoofed.
+- Return the transformation as data from the layer that performs it, so the surface can render it. Here `compose()` returns `(composed_task, doc_paths, truncated_paths)`; `render_file_inputs(paths, truncated)` flags each truncated path: `⚠ truncated — the review will run over a PARTIAL file`. The flag is the renderer's *own* trusted text (not the untrusted path), so it can't be spoofed.
 - **Cover every surface where the human (or its proxy) acts, not just the obvious one.** The preview is one; the *non-preview run path* is another. `cli.py run` has no preview at all, and `run.py` skips it when `--preview` isn't passed — so both runners also emit a `[cadre] warn: … truncated …` to stderr before any model call. A fix that discloses on the preview but leaves the run path silent only half-closes the gap (see the next point).
 - **A multi-part finding folded halfway reads as fully folded.** Codex's recommendation was two-part ("render it in `--preview` *and* run output"). Folding only the preview half and shipping it as "done" would misrepresent the diff. Either fold every part, or name the unfolded part explicitly in the residuals — never let "I addressed the finding" stand for "I addressed the load-bearing half." A second review pass caught the omission precisely because the first fold looked complete.
 
@@ -56,9 +56,9 @@ out.extend(f"  - {_sanitize(p)}" for p in paths)
 After — the transformation is returned as data and disclosed on every surface the decision touches:
 
 ```python
-# compose() -> (composed_task, resolved_paths, truncated_paths)
+# compose() -> (composed_task, doc_paths, truncated_paths)
 # preview (run.py): flag truncated files where the human approves
-doc_block = render_file_inputs(resolved_docs, truncated_docs)
+doc_block = render_file_inputs(doc_paths, truncated_docs)
 # render_file_inputs marks each: "  - <path>  ⚠ truncated — the review will run over a PARTIAL file"
 
 # run path (both runners, no preview to disclose it): warn before any model call

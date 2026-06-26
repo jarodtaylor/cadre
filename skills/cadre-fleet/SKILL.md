@@ -100,8 +100,9 @@ Relay the complete preview output to the human. It shows:
 - A **fleet-validation summary** — advisory warnings for any model/toolset not on
   the host palette and any retrieval lane whose focus lacks a sourcing directive.
   It never blocks a run; relay it so the human sees it before approving.
-- **Files to read (`--doc`)** — when you pass `--doc PATH` (see step 3), the resolved
-  file paths the run will read into the task. The preview doubles as a **read-check**:
+- **Files to read (`--doc`)** — when you pass `--doc PATH` (see step 3), the file
+  paths the run will read into the task (shown as you named them — no canonicalization).
+  The preview doubles as a **read-check**:
   a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit 1, naming the path)
   before any approval, so preview with the same `--doc` flags you intend to run with.
   It also **flags any `--doc` that will be truncated** (over 256 KiB → reviewed only

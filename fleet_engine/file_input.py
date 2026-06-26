@@ -143,12 +143,14 @@ def compose(task: str | None, docs: list[str]) -> tuple[str | None, list[str], l
         docs: Ordered list of ``--doc`` paths (as the caller named them).
 
     Returns:
-        ``(composed_task, resolved_paths, truncated_paths)``. With no docs the base
+        ``(composed_task, doc_paths, truncated_paths)``. With no docs the base
         task passes through verbatim and both lists are empty — zero file I/O, so a
         plain task is never regressed (R3). Otherwise the composed task is the base
         text (when present) followed by each file as a labeled block in flag order;
-        ``resolved_paths`` lists the doc paths as named (for the preview / read-check),
-        and ``truncated_paths`` is the subset capped at ``MAX_FILE_BYTES`` so the
+        ``doc_paths`` lists the ``--doc`` paths exactly as the caller named them —
+        NOT canonicalized (no realpath; a symlink stays the symlink path) — for the
+        preview / read-check, and ``truncated_paths`` is the subset capped at
+        ``MAX_FILE_BYTES`` so the
         caller can disclose on the human-approval surface that a review will run over
         a partial file (the in-block note is invisible to the previewer).
 

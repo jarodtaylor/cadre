@@ -21,7 +21,7 @@
 # Usage: name the planning document with --doc PATH (repeatable) — the runner
 # reads the file into the task, so you no longer paste its text:
 #   run.py --fleet ~/.cadre/fleets/doc-review.yaml --doc plan.md --task "Review this PLAN"
-# --preview lists the resolved --doc paths (and read-checks them — a missing or
+# --preview lists the --doc paths you gave (and read-checks them — a missing or
 # non-UTF-8 file fails before any model runs). The personas are doc-type-agnostic —
 # they apply to a requirements doc or a plan — so name the document type in the
 # task when it matters (e.g. --task "Review this PLAN" vs "Review these
