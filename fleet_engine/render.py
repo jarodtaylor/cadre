@@ -153,6 +153,28 @@ def render_fleet_preview(config: FleetConfig) -> str:
     return "\n".join(out)
 
 
+def render_file_inputs(paths: list[str]) -> str:
+    """Render the "--doc files to read" preview block from a resolved-path list.
+
+    Returns an empty string for an empty list — no block when no ``--doc`` was
+    given, so the preview stays byte-identical to a plain run. Otherwise it names
+    each file that will be read into the task, one per line.
+
+    A third preview sibling of ``render_fleet_preview`` and the ``preview_lint``
+    warnings: a path label is a fleet-/caller-controlled string flowing into the
+    human-approval surface, so each is passed through ``_sanitize`` single-line
+    (KTD6) — a control byte or bidi char in a path must not spoof or hide a line.
+    Only the path *labels* are shown and sanitized here; the file *content* is
+    never rendered on this surface and never sanitized (sanitizing it would
+    corrupt the reviewer's document — the deferred #5 / #23 boundary).
+    """
+    if not paths:
+        return ""
+    out = ["Files read into the task (--doc):"]
+    out.extend(f"  - {_sanitize(p)}" for p in paths)
+    return "\n".join(out)
+
+
 def render_result(result: FleetResult) -> str:
     # Key the header on convergence so a successful collect run (ok=True,
     # synthesis=None, synth_ok=None) is never mislabeled as a failure.
