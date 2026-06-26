@@ -175,6 +175,18 @@ class TestComposeSpecialFiles(unittest.TestCase):
         self.assertIn(fifo, msg)
         self.assertIn("regular file", msg)
 
+    def test_symlink_to_regular_file_is_followed_and_read(self):
+        """KTD4 intentionally follows symlinks (no O_NOFOLLOW): a symlink to a regular
+        file is read. Guards the decision — a later O_NOFOLLOW hardening would break it
+        silently (same discipline as the ~-path test)."""
+        real = os.path.join(self.tmp, "real.md")
+        _write(real, "REAL_DOC_BODY")
+        link = os.path.join(self.tmp, "link.md")
+        os.symlink(real, link)
+        task, paths, _trunc = compose(None, [link])
+        self.assertIn("REAL_DOC_BODY", task)
+        self.assertEqual(paths, [link])  # labeled with the as-named symlink path
+
     def test_empty_file_composes_empty_block_not_error(self):
         """An empty (0-byte) --doc is readable and composes an (empty) labeled block.
 

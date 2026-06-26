@@ -104,6 +104,9 @@ Relay the complete preview output to the human. It shows:
   file paths the run will read into the task. The preview doubles as a **read-check**:
   a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit 1, naming the path)
   before any approval, so preview with the same `--doc` flags you intend to run with.
+  It also **flags any `--doc` that will be truncated** (over 256 KiB → reviewed only
+  partially) so you never approve a review of a silently partial file; on a
+  non-preview run that truncation is warned on stderr instead.
 
 Ask the human to okay it before running. Do not paraphrase the fleet in lieu of
 the preview — the preview is the operative control.

@@ -21,7 +21,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
-from fleet_engine.file_input import compose  # noqa: E402
+from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
 from fleet_engine.personas import default_pool_dir, resolve  # noqa: E402
 from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
@@ -120,6 +120,17 @@ def main(argv: list[str] | None = None) -> int:
     if composed_task is None:
         print("provide --task and/or --doc (unless --preview)")
         return 2
+
+    # No --preview here to disclose truncation (or it was skipped), so warn on the
+    # [cadre] stream that an oversize --doc is being reviewed only partially — the
+    # in-block note is model-facing and the operator would otherwise never know
+    # (cross-model review: surface truncation on the run path, not just preview).
+    for p in truncated_docs:
+        print(
+            f"[cadre] warn: --doc {_sanitize(p)} truncated to {MAX_FILE_BYTES // 1024} KiB "
+            "— reviewing a partial file",
+            file=sys.stderr,
+        )
 
     capture = not args.no_capture
 

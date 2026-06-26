@@ -1166,6 +1166,21 @@ class TestCLIDocFlag(unittest.TestCase):
         self.assertEqual(len(fake.calls), 0)
         self.assertIn("--doc", out)
 
+    def test_oversize_doc_run_warns_on_stderr(self):
+        """A non-preview run with an oversize --doc warns the operator on stderr that
+        the review runs over a partial file (cli has no preview to disclose it)."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
+        fake = _PromptCapturingClient()
+        err = io.StringIO()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = cli_main(["run", EXAMPLE, "--doc", big, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("[cadre] warn:", err.getvalue())
+        self.assertIn("truncated", err.getvalue())
+
     def test_capture_writes_composed_task_to_prompt_txt(self):
         """With capture ON, prompt.txt records the COMPOSED task (the file block), not
         the raw args.task — the run folder must reflect what specialists actually saw."""
@@ -1296,6 +1311,21 @@ class TestSkillDocFlag(unittest.TestCase):
         self.assertIn(missing, buf.getvalue())
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
+
+    def test_oversize_doc_run_warns_on_stderr(self):
+        """A non-preview skill run with an oversize --doc warns on stderr (run path has
+        no preview gate to disclose the partial-file truncation)."""
+        from fleet_engine.file_input import MAX_FILE_BYTES
+        big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
+        fake = _PromptCapturingClient()
+        err = io.StringIO()
+        with patch.object(self.run_mod, "ModelClient", return_value=fake):
+            with contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("[cadre] warn:", err.getvalue())
+        self.assertIn("truncated", err.getvalue())
 
     def test_preview_marks_oversize_doc_as_truncated(self):
         """The preview discloses that an oversize --doc will be reviewed only partially.

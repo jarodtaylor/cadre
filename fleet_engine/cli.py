@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
-from fleet_engine.file_input import compose
+from fleet_engine.file_input import MAX_FILE_BYTES, compose
 from fleet_engine.model_client import ModelClient
 from fleet_engine.personas import default_pool_dir, resolve
 from fleet_engine.preview_lint import render_preview_warnings
@@ -169,13 +169,21 @@ def main(argv: list[str] | None = None) -> int:
         # here so it exits cleanly (exit 1) rather than tracebacking (KTD5). The
         # composed string is passed to run_command, whose signature is unchanged.
         try:
-            # cli.py has no --preview surface, so the resolved/truncated lists are
-            # unused here (they drive run.py's preview disclosure). The composed task
-            # still carries the in-block truncation note + the captured prompt.txt.
-            task, _resolved, _truncated = compose(args.task, args.doc)
+            # cli.py has no --preview surface to disclose truncation, so the warn
+            # below is the operator's only signal; resolved_paths is unused here.
+            task, _resolved, truncated = compose(args.task, args.doc)
         except ConfigError as err:
             print(str(err))
             return 1
+        # Surface oversize truncation on the run path too (run has no preview gate) —
+        # the in-block note is model-facing, so without this the operator never knows
+        # the review ran over a partial file.
+        for p in truncated:
+            print(
+                f"[cadre] warn: --doc {_sanitize(p)} truncated to {MAX_FILE_BYTES // 1024} KiB "
+                "— reviewing a partial file",
+                file=sys.stderr,
+            )
         code, out = run_command(args.spec, task, capture=not args.no_capture)
     print(out)
     return code
