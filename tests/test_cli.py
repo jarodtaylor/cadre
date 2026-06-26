@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fleet_engine.capture import _slugify, resolve_run_dir
-from fleet_engine.cli import run_command, validate_command
+from fleet_engine.cli import main as cli_main, run_command, validate_command
 from fleet_engine.model_client import AgentResult
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
@@ -1101,6 +1101,76 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
             client.prompts.get("r", ""),
             "the resolved persona body must reach the specialist prompt",
         )
+
+
+class TestCLIDocFlag(unittest.TestCase):
+    """fleet_engine/cli.py `run --doc`: read named files into the task (#26).
+
+    Drives cli.main() so the argparse wiring (--doc; --task now optional) and the
+    at-least-one guard are exercised end-to-end. A prompt-capturing client (via a
+    patched ModelClient) proves the composed content reaches the specialist prompt.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _doc(self, name, text):
+        p = self.tmp / name
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    def _run(self, argv, fake=None):
+        fake = fake if fake is not None else _PromptCapturingClient()
+        buf = io.StringIO()
+        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(argv)
+        return code, fake, buf.getvalue()
+
+    def test_doc_content_reaches_prompt(self):
+        """Covers AE1: run spec --doc f.md → file content reaches the prompt."""
+        doc = self._doc("spec.md", "SENTINEL_SPEC_CONTENT")
+        code, fake, _out = self._run(["run", EXAMPLE, "--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("SENTINEL_SPEC_CONTENT", fake.prompts["web"])
+
+    def test_task_only_passes_verbatim(self):
+        """Covers AE6/R3: --task with no --doc is unchanged — no file blocks."""
+        code, fake, _out = self._run(["run", EXAMPLE, "--task", "PLAIN_TASK", "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("PLAIN_TASK", fake.prompts["web"])
+        self.assertNotIn("=== FILE:", fake.prompts["web"])
+
+    def test_doc_only_no_task_composes(self):
+        """--doc only (no --task) composes the task from the block and runs."""
+        doc = self._doc("only.md", "ONLY_SPEC_BODY")
+        code, fake, _out = self._run(["run", EXAMPLE, "--doc", doc, "--no-capture"])
+        self.assertEqual(code, 0)
+        self.assertIn("ONLY_SPEC_BODY", fake.prompts["web"])
+
+    def test_missing_doc_clean_nonzero_naming_path(self):
+        """Covers AE2/R5: an unreadable --doc fails cleanly (exit 1), naming the path,
+        before any model call."""
+        missing = str(self.tmp / "ghost.md")
+        code, fake, out = self._run(["run", EXAMPLE, "--task", "t", "--doc", missing, "--no-capture"])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(fake.calls), 0, "no model call when a --doc is unreadable")
+        self.assertIn(missing, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_neither_task_nor_doc_exits_2(self):
+        """Neither --task nor --doc → exit 2 from the at-least-one check (not argparse)."""
+        code, fake, out = self._run(["run", EXAMPLE, "--no-capture"])
+        self.assertEqual(code, 2)
+        self.assertEqual(len(fake.calls), 0)
+        self.assertIn("--doc", out)
+
+    def test_validate_subcommand_rejects_doc_flag(self):
+        """validate is config-only and out of scope — argparse must reject --doc there."""
+        with self.assertRaises(SystemExit) as ctx:
+            cli_main(["validate", EXAMPLE, "--doc", "x.md"])
+        self.assertNotEqual(ctx.exception.code, 0)
 
 
 class TestSkillDocFlag(unittest.TestCase):

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fleet_engine.capture import prepare_run_dir, save_run
 from fleet_engine.config import ConfigError, FleetConfig
+from fleet_engine.file_input import compose
 from fleet_engine.model_client import ModelClient
 from fleet_engine.personas import default_pool_dir, resolve
 from fleet_engine.preview_lint import render_preview_warnings
@@ -133,7 +134,20 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="Run a fleet on a task")
     p_run.add_argument("spec", help="Path to a fleet YAML spec")
-    p_run.add_argument("--task", required=True, help="The task / query for the fleet")
+    # --task is optional (default None): a --doc-only run is valid, so it can't be an
+    # argparse-required flag. The at-least-one check below enforces "task and/or doc".
+    p_run.add_argument(
+        "--task",
+        default=None,
+        help="The task / query for the fleet (required unless --doc is given)",
+    )
+    p_run.add_argument(
+        "--doc",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Read a file's contents into the task (repeatable); use with or instead of --task",
+    )
     p_run.add_argument(
         "--no-capture",
         action="store_true",
@@ -145,7 +159,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "validate":
         code, out = validate_command(args.spec)
     else:
-        code, out = run_command(args.spec, args.task, capture=not args.no_capture)
+        # A real run needs at least one of --task / --doc. Explicit exit-2 usage
+        # error (not argparse's required-flag error, since --task is now optional).
+        if args.task is None and not args.doc:
+            print("Provide --task and/or --doc.")
+            return 2
+        # Compose any --doc files into the task at the caller layer — the engine
+        # stays path-free. compose raises ConfigError on an unreadable --doc, caught
+        # here so it exits cleanly (exit 1) rather than tracebacking (KTD5). The
+        # composed string is passed to run_command, whose signature is unchanged.
+        try:
+            task, _resolved = compose(args.task, args.doc)
+        except ConfigError as err:
+            print(str(err))
+            return 1
+        code, out = run_command(args.spec, task, capture=not args.no_capture)
     print(out)
     return code
 
