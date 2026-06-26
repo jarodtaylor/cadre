@@ -152,6 +152,43 @@ class TestComposeMissingFile(unittest.TestCase):
         self.assertIn(self.tmp, str(ctx.exception))
 
 
+class TestComposeSpecialFiles(unittest.TestCase):
+    """Non-regular files error cleanly and NEVER hang (R6 'no lane hangs'); an empty
+    regular file is read (a conscious content-not-instruction choice)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo not available on this platform")
+    def test_fifo_errors_and_does_not_hang(self):
+        """A FIFO --doc must error ('not a regular file'), not block at open() (R6).
+
+        If the S_ISREG guard regressed, this would hang at open() waiting for a
+        writer — the test would time out loudly rather than silently pass.
+        """
+        fifo = os.path.join(self.tmp, "pipe")
+        os.mkfifo(fifo)
+        with self.assertRaises(ConfigError) as ctx:
+            compose("task", [fifo])
+        msg = str(ctx.exception)
+        self.assertIn(fifo, msg)
+        self.assertIn("regular file", msg)
+
+    def test_empty_file_composes_empty_block_not_error(self):
+        """An empty (0-byte) --doc is readable and composes an (empty) labeled block.
+
+        A CONSCIOUS choice (advisor-confirmed): unlike personas.resolve, which errors
+        on an empty INSTRUCTION, a --doc is CONTENT — the helper does not police whether
+        the named document is empty. The labeled block is visible, not a silent drop.
+        """
+        empty = os.path.join(self.tmp, "empty.md")
+        _write(empty, "")
+        task, paths = compose("review", [empty])
+        self.assertIn(empty, task)        # the labeled block is present
+        self.assertEqual(paths, [empty])  # readable → no error raised
+
+
 class TestComposeOversize(unittest.TestCase):
     """A file over MAX_FILE_BYTES is truncated with a visible note — no unbounded inject (R6, AE3)."""
 

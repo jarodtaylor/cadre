@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import codecs
 import os
+import stat
 
 from fleet_engine.config import ConfigError
 
@@ -64,6 +65,19 @@ def _read_doc(path: str, errors: list[str]) -> str | None:
     # stays as the caller named it; only the open target is expanded.
     target = os.path.expanduser(path)
     try:
+        # Reject non-regular files BEFORE open(): a directory, FIFO, or device
+        # would otherwise hang open()/read() forever, violating R6 ("no lane hangs")
+        # and the KTD7 preview read-check ("fails here before approval"). os.stat
+        # does NOT block on a FIFO (only open-for-read does), so the check itself is
+        # safe. This is a file-TYPE guard, NOT the path confinement KTD4 declined —
+        # it constrains what KIND of file is read, never which path. stat follows
+        # symlinks (KTD4 intentionally has no O_NOFOLLOW), so a symlink to a regular
+        # file is still allowed.
+        if not stat.S_ISREG(os.stat(target).st_mode):
+            errors.append(
+                f"--doc path is not a regular file (refusing a directory / FIFO / device): {path!r}"
+            )
+            return None
         with open(target, "rb") as fh:
             # Read one past the cap so we can detect oversize without slurping a
             # multi-gigabyte file into memory.
