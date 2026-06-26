@@ -18,16 +18,20 @@
 # attributed block on stdout; you (or a caller agent) review the five lenses
 # independently and decide what to act on.
 #
-# Usage: pass the planning document you want reviewed as the --task argument
-# (paste the requirements or plan text). The personas are doc-type-agnostic —
+# Usage: name the planning document with --doc PATH (repeatable) — the runner
+# reads the file into the task, so you no longer paste its text:
+#   run.py --fleet ~/.cadre/fleets/doc-review.yaml --doc plan.md --task "Review this PLAN"
+# --preview lists the resolved --doc paths (and read-checks them — a missing or
+# non-UTF-8 file fails before any model runs). The personas are doc-type-agnostic —
 # they apply to a requirements doc or a plan — so name the document type in the
-# task when it matters (e.g. "Review this PLAN: ..." vs "Review these
-# REQUIREMENTS: ...").
+# task when it matters (e.g. --task "Review this PLAN" vs "Review these
+# REQUIREMENTS"). Pasting the text into --task still works; --doc just removes the
+# copy-paste.
 #
 # toolset: [] on every active lane — each specialist reasons over the document
-# you supply in the task (provided context only). [] is fail-closed zero tools
-# (not unset), preserving the SAFE_TOOLSETS gate and keeping prompt-injection
-# in the reviewed document from escalating to actions.
+# you supply (via --doc, or pasted into --task) as provided context only. [] is
+# fail-closed zero tools (not unset), preserving the SAFE_TOOLSETS gate and keeping
+# prompt-injection in the reviewed document from escalating to actions.
 #
 # Prefer reasoning/completion models, not agentic ones: under toolset: [] a
 # tool-happy model may emit no-op tool calls and return no review at all.
