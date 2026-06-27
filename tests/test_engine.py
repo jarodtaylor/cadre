@@ -12,7 +12,7 @@ from fleet_engine.config import FleetConfig
 from fleet_engine.engine import run_fleet
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
-from fleet_engine.progress import LaneDone
+from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone
 
 
 def _config(**overrides):
@@ -39,10 +39,12 @@ class FakeClient:
 
     def __init__(self, behavior=None):
         self.behavior = behavior or {}
-        self.calls = []  # (role, prompt)
+        self.calls = []         # (role, prompt)
+        self.toolset_for = {}   # role -> toolset of last call (for toolset-assertion tests)
 
     def run(self, *, role, provider, model, prompt, toolset=()):
         self.calls.append((role, prompt))
+        self.toolset_for[role] = toolset
         kind, payload = self.behavior.get(role, ("ok", f"{role}-output"))
         ok = kind == "ok"
         return AgentResult(
@@ -298,19 +300,33 @@ never = threading.Event()
 
 class HangingClient:
     def run(self, *, role, provider, model, prompt, toolset=()):
-        if (hang == "synthesizer" and role == "synthesizer") or (hang == "specialist" and role == "social"):
+        if (hang == "synthesizer" and role == "synthesizer") or \
+           (hang == "specialist" and role == "social") or \
+           (hang == "judge" and role == "judge"):
             never.wait()
         return AgentResult(role=role, provider=provider, model=model, ok=True, text=role + "-out")
 
 
-cfg = FleetConfig.from_dict({
-    "name": "t",
-    "synthesis": {"provider": "openrouter", "model": "s/m", "prompt": "S:"},
-    "specialists": [
-        {"role": "web", "provider": "openrouter", "model": "w/m", "focus": "web research"},
-        {"role": "social", "provider": "xai", "model": "grok", "focus": "social scan"},
-    ],
-})
+if hang == "judge":
+    cfg_data = {
+        "name": "t",
+        "convergence": "judge",
+        "judge": {"provider": "openrouter", "model": "j/m"},
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "w/m", "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "focus": "social scan"},
+        ],
+    }
+else:
+    cfg_data = {
+        "name": "t",
+        "synthesis": {"provider": "openrouter", "model": "s/m", "prompt": "S:"},
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "w/m", "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "focus": "social scan"},
+        ],
+    }
+cfg = FleetConfig.from_dict(cfg_data)
 resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O (mirrors prod callers)
 run_fleet(cfg, "task", HangingClient(), call_timeout=0.3)
 print("EXITED_CLEANLY")
@@ -437,6 +453,28 @@ class TestCleanExitOnHang(unittest.TestCase):
     def test_exits_with_hung_synthesizer(self):
         self._assert_exits("synthesizer")
 
+    def test_exits_with_hung_judge(self):
+        self._assert_exits("judge")
+
+
+def _judge_config(**overrides):
+    """Build a judge-convergence FleetConfig (no synthesis block required)."""
+    data = {
+        "name": "t",
+        "convergence": "judge",
+        "judge": {"provider": "openrouter", "model": "judge/model"},
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "web/model", "toolset": ["web"],
+             "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok", "toolset": ["x_search"],
+             "focus": "social scan"},
+        ],
+    }
+    data.update(overrides)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
+
 
 def _collect_config(**overrides):
     """Build a collect-convergence FleetConfig (no synthesis block required)."""
@@ -559,6 +597,130 @@ class TestCollectConvergence(unittest.TestCase):
         # elapsed is from the worker's completion stamp, not inflated by hook latency
         for lane in result.specialists:
             self.assertLess(lane.elapsed_s, 0.2, f"{lane.role} elapsed inflated by hook latency")
+
+
+class TestJudgeConvergence(unittest.TestCase):
+    """Judge mode: one independent critic call over surviving specialists."""
+
+    def test_judge_succeeds_result_fields(self):
+        """Judge succeeds → judge set, judge_ok True, ok True, convergence 'judge'."""
+        client = FakeClient()
+        result = run_fleet(_judge_config(), "task", client)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.judge, "judge-output")
+        self.assertIs(result.judge_ok, True)
+        self.assertEqual(result.convergence, "judge")
+        # synthesis fields stay unset (KTD2)
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+
+    def test_judge_succeeds_emits_progress_events(self):
+        """JudgeStarted and JudgeDone are emitted on a successful judge run."""
+        events = []
+        client = FakeClient()
+        run_fleet(_judge_config(), "task", client, progress=lambda e: events.append(e))
+
+        started = [e for e in events if isinstance(e, JudgeStarted)]
+        done = [e for e in events if isinstance(e, JudgeDone)]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(done), 1)
+        self.assertEqual(started[0].survivors, 2)  # 2 specialists in _judge_config
+        self.assertEqual(done[0].outcome, "ok")
+        self.assertIsNotNone(done[0].elapsed_s)
+
+    def test_judge_failure_degrades_gracefully(self):
+        """Judge call returns failure → judge_ok False, judge None, ok False, degrade note."""
+        client = FakeClient({"judge": ("fail", "rate limited")})
+        result = run_fleet(_judge_config(), "task", client)
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.judge)
+        self.assertIs(result.judge_ok, False)
+        self.assertTrue(any("judge failed" in n for n in result.notes))
+        # Specialist outputs preserved for attribution (R10)
+        self.assertEqual(len(result.successes), 2)
+
+    def test_judge_timeout_degrades_gracefully(self):
+        """Hung judge times out → judge_ok False, ok False, timed-out note, no hang."""
+        client = HangingClient(hang_roles={"judge"})
+        start = time.monotonic()
+        result = run_fleet(_judge_config(), "task", client, call_timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 2.0)  # returned despite the hang
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.judge)
+        self.assertIs(result.judge_ok, False)
+        self.assertTrue(any("judge failed" in n and "timed out" in n for n in result.notes))
+
+    def test_all_specialists_fail_judge_not_invoked(self):
+        """All specialists fail → judge never invoked, judge_ok None, ok False."""
+        behavior = {r: ("fail", "down") for r in ("web", "social")}
+        client = FakeClient(behavior)
+        result = run_fleet(_judge_config(), "task", client)
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.judge)
+        self.assertIsNone(result.judge_ok)
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("judge", called_roles)
+
+    def test_judge_client_receives_explicit_empty_toolset(self):
+        """The judge's client.run receives toolset=[] — not None, not () (KTD6/R8)."""
+        client = FakeClient()
+        run_fleet(_judge_config(), "task", client)
+
+        self.assertIn("judge", client.toolset_for, "judge role must have been called")
+        received = client.toolset_for["judge"]
+        self.assertEqual(received, [], "judge must receive toolset=[], not None or ()")
+        self.assertIsNotNone(received)
+        self.assertIsInstance(received, list)
+
+    def test_judge_prompt_labels_survivors_by_exact_role(self):
+        """_judge_prompt labels each survivor by its exact role string (KTD9)."""
+        client = FakeClient()
+        cfg = _judge_config()
+        run_fleet(cfg, "task", client)
+        judge_prompt = client.prompt_for("judge")
+        for spec in cfg.specialists:
+            self.assertIn(spec.role, judge_prompt,
+                          f"exact role {spec.role!r} must appear in the judge prompt")
+
+    def test_judge_prompt_contains_format_tokens(self):
+        """_judge_prompt contains the three format-contract tokens the parser relies on."""
+        client = FakeClient()
+        run_fleet(_judge_config(), "task", client)
+        judge_prompt = client.prompt_for("judge")
+        self.assertIn("=== LANE:", judge_prompt)
+        self.assertIn("Grade:", judge_prompt)
+        self.assertIn("Rationale:", judge_prompt)
+
+    def test_judge_does_not_invoke_synthesizer(self):
+        """Judge convergence never invokes the synthesizer role."""
+        client = FakeClient()
+        run_fleet(_judge_config(), "task", client)
+        called_roles = [r for (r, _) in client.calls]
+        self.assertNotIn("synthesizer", called_roles)
+
+    def test_judge_partial_failure_still_invokes_judge(self):
+        """One specialist fails but one survives → judge still runs over the survivor."""
+        client = FakeClient({"social": ("fail", "error")})
+        result = run_fleet(_judge_config(), "task", client)
+
+        self.assertTrue(result.ok)
+        self.assertIs(result.judge_ok, True)
+        # Only the surviving specialist's output went to the judge
+        events = []
+        run_fleet(_judge_config(specialists=[
+            {"role": "web", "provider": "openrouter", "model": "web/model",
+             "toolset": ["web"], "focus": "web research"},
+            {"role": "social", "provider": "xai", "model": "grok",
+             "toolset": ["x_search"], "focus": "social scan"},
+        ]), "task", FakeClient({"social": ("fail", "down")}),
+            progress=lambda e: events.append(e))
+        started = [e for e in events if isinstance(e, JudgeStarted)]
+        self.assertEqual(started[0].survivors, 1)
 
 
 if __name__ == "__main__":

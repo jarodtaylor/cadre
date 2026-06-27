@@ -66,6 +66,21 @@ class SynthDone:
     elapsed_s: float
 
 
+@dataclass(frozen=True)
+class JudgeStarted:
+    """Judge grading is about to run over the surviving lanes."""
+
+    survivors: int
+
+
+@dataclass(frozen=True)
+class JudgeDone:
+    """Judge grading finished. ``outcome`` is a label (ok / failed / timed-out)."""
+
+    outcome: str
+    elapsed_s: float
+
+
 # ---------------------------------------------------------------------------
 # Edge-emitted events — cli.py / run.py construct these (the engine never does).
 # ---------------------------------------------------------------------------
@@ -96,7 +111,8 @@ class Completion:
 
 
 ProgressEvent = Union[
-    LaneLaunched, LaneDone, SynthStarted, SynthDone, Validated, RunFolder, Completion
+    LaneLaunched, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
+    Validated, RunFolder, Completion
 ]
 ProgressHook = Callable[[ProgressEvent], None]
 

@@ -46,6 +46,8 @@ from typing import Callable
 from fleet_engine.config import FleetConfig, SpecialistSpec
 from fleet_engine.model_client import AgentResult, ModelClient
 from fleet_engine.progress import (
+    JudgeDone,
+    JudgeStarted,
     LaneDone,
     LaneLaunched,
     ProgressHook,
@@ -73,9 +75,11 @@ class FleetResult:
     specialists: list[AgentResult]                   # every specialist, success or failure (provenance)
     synthesis: str | None = None                     # synthesized text, or None if synthesis didn't happen
     notes: list[str] = field(default_factory=list)   # failure / degradation notes
-    ok: bool = False                                 # True only when a synthesis was produced (synthesize) or >=1 specialist succeeded (collect)
+    ok: bool = False                                 # True when synthesis produced (synthesize), >=1 specialist succeeded (collect), or judge succeeded (judge)
     synth_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
-    convergence: str = "synthesize"                  # "synthesize" or "collect" — always set; consumers must read this to disambiguate ok=True,synthesis=None
+    convergence: str = "synthesize"                  # "synthesize", "collect", or "judge" — always set; consumers must read this to disambiguate
+    judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
+    judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
 
     @property
     def successes(self) -> list[AgentResult]:
@@ -98,6 +102,33 @@ def _synthesis_prompt(config: FleetConfig, task: str, successes: list[AgentResul
     )
     findings = "\n\n".join(f"--- {r.role} (model: {r.model}) ---\n{r.text}" for r in successes)
     return f"{base}\n\nTask: {task}\n\nSpecialist findings:\n{findings}"
+
+
+def _judge_prompt(config: FleetConfig, task: str, successes: list[AgentResult]) -> str:
+    """Build the prompt sent to the judge over the surviving specialist outputs.
+
+    Each survivor is labeled by its exact ``role`` string — the stable key the
+    caller-layer parser (U3) uses to match grade entries back to lanes. The
+    format contract below is pinned to the parser's expected markers so label
+    drift degrades toward a false-partial, never a false-full (KTD9).
+    """
+    base = config.judge.prompt or (
+        "Grade each specialist's output independently. "
+        "Assess the quality, accuracy, and usefulness of each lane's findings."
+    )
+    findings = "\n\n".join(f"--- {r.role} (model: {r.model}) ---\n{r.text}" for r in successes)
+    role_list = ", ".join(r.role for r in successes)
+    example_role = successes[0].role if successes else "role-name"
+    format_block = (
+        "\n\nFor each specialist lane listed above, output a block in this exact format:\n\n"
+        f"=== LANE: {example_role} ===\n"
+        "Grade: <a score, letter grade, or PASS/FAIL — your choice of scale>\n"
+        "Rationale: <your justification; may span multiple lines>\n\n"
+        "Copy each lane's exact role string verbatim into the === LANE: <role> === marker — "
+        "never paraphrase or rename it. "
+        f"Output one block per specialist, in any order, for these roles: {role_list}."
+    )
+    return f"{base}\n\nTask: {task}\n\nSpecialist findings:\n{findings}{format_block}"
 
 
 def _start_daemon(fn: Callable[[], AgentResult], name: str) -> tuple[threading.Thread, list[AgentResult], float]:
@@ -347,6 +378,37 @@ def run_fleet(
     if not successes:
         result.notes.append("all specialists failed — no synthesis")
         return result  # ok stays False; synthesis never runs, so no synth-started
+
+    if config.convergence == "judge":
+        # Judge: one independent critic call over the surviving specialists — synthesizer-shaped
+        # (daemon thread + deadline), but with toolset=[] explicit (KTD6) and its own progress
+        # events and result fields (KTD2). Returns before reaching collect or synthesizer.
+        progress(JudgeStarted(survivors=len(successes)))
+        judge_started = _start_daemon(
+            lambda: client.run(
+                role="judge",
+                provider=config.judge.provider,
+                model=config.judge.model,
+                toolset=[],  # fail-closed zero tools over untrusted specialist text (KTD6)
+                prompt=_judge_prompt(config, task, successes),
+            ),
+            name="fleet-judge",
+        )
+        judge_deadline = None if call_timeout is None else time.monotonic() + call_timeout
+        judge_outcome = _collect(
+            judge_started, judge_deadline,
+            "judge", config.judge.provider, config.judge.model, call_timeout,
+            toolset=[],
+        )
+        result.judge_ok = judge_outcome.ok
+        if judge_outcome.ok:
+            result.judge = judge_outcome.text
+            result.ok = True
+        else:
+            # Judge failed (error or timeout): degrade to attributed outputs + note (R10/KTD5).
+            result.notes.append(f"judge failed: {judge_outcome.error}")
+        progress(JudgeDone(outcome=outcome_label(judge_outcome), elapsed_s=judge_outcome.elapsed_s or 0.0))
+        return result
 
     if config.convergence == "collect":
         # Collect: return raw specialist lanes; synthesizer is never invoked.
