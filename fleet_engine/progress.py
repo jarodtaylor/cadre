@@ -93,6 +93,7 @@ class Validated:
     fleet: str
     specialists: int
     synthesizers: int = 1
+    convergence: str = "synthesize"
 
 
 @dataclass(frozen=True)

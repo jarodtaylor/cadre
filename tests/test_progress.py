@@ -495,6 +495,63 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
         self.assertTrue(validated_events, "no Validated event was emitted")
         self.assertEqual(validated_events[0].synthesizers, 1)
 
+    def _judge_config(self):
+        cfg = FleetConfig.from_dict({
+            "name": "judge-fleet",
+            "convergence": "judge",
+            "judge": {"provider": "openrouter", "model": "judge/model"},
+            "specialists": [
+                {"role": "web", "provider": "openrouter", "model": "m", "toolset": ["web"],
+                 "focus": "web research"},
+            ],
+        })
+        resolve(cfg, "/unused")
+        return cfg
+
+    def test_judge_validated_breadcrumb_reports_judge(self):
+        """A judge fleet's Validated breadcrumb reports '1 judge', not 'synthesizer(s)'."""
+        text = self._run_and_get_progress(
+            self._judge_config(),
+        )
+        self.assertIn("1 judge", text)
+        self.assertNotIn("synthesizer", text.split("\n")[0] if text else "")
+
+    def test_judge_validated_event_convergence_is_judge(self):
+        """run_with_progress emits a Validated event with convergence='judge' for judge fleets."""
+        from fleet_engine.progress import Validated
+        from fleet_engine.progress_runner import run_with_progress
+        from unittest.mock import patch as _patch
+
+        validated_events = []
+
+        class CapturingRenderer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def emit(self, event):
+                if isinstance(event, Validated):
+                    validated_events.append(event)
+
+            def start_heartbeat(self):
+                pass
+
+            def stop_heartbeat(self):
+                pass
+
+            def note(self, _msg):
+                pass
+
+        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+            run_with_progress(
+                self._judge_config(), "task",
+                FakeClient({"judge": ("ok", "JUDGE OUTPUT")}),
+                run_dir=None, progress_stream=None,
+            )
+
+        self.assertTrue(validated_events, "no Validated event was emitted")
+        self.assertEqual(validated_events[0].convergence, "judge")
+        self.assertEqual(validated_events[0].synthesizers, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
