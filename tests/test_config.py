@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from fleet_engine.config import ConfigError, FleetConfig, SpecialistSpec, SynthesisSpec
+from fleet_engine.config import ConfigError, FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 
 
 def make_data(**overrides):
@@ -480,6 +480,110 @@ class TestPersonaNameAllowlist(unittest.TestCase):
         self.assertGreaterEqual(len(ctx.exception.errors), 2,
                                 "expected ≥2 errors (name + persona allowlist), got: "
                                 + str(ctx.exception.errors))
+
+
+class TestJudgeConvergence(unittest.TestCase):
+    """judge as a first-class third convergence mode (R1, R6, R7, R8; KTD1, KTD7)."""
+
+    def _make_judge_data(self, **overrides):
+        """Minimal valid judge fleet dict; override per test."""
+        data = {
+            "name": "judge-swarm",
+            "convergence": "judge",
+            "judge": {
+                "provider": "xai",
+                "model": "grok-4.5",
+                "prompt": "Grade each specialist.",
+            },
+            "specialists": [
+                {"role": "reviewer-a", "provider": "openrouter",
+                 "model": "anthropic/claude-opus-4", "toolset": [],
+                 "focus": "review correctness"},
+                {"role": "reviewer-b", "provider": "xai", "model": "grok-4.3",
+                 "toolset": [], "focus": "review security"},
+            ],
+        }
+        data.update(overrides)
+        return data
+
+    def test_valid_judge_fleet_parses(self):
+        cfg = FleetConfig.from_dict(self._make_judge_data())
+        self.assertEqual(cfg.convergence, "judge")
+        self.assertIsInstance(cfg.judge, JudgeSpec)
+        self.assertEqual(cfg.judge.provider, "xai")
+        self.assertEqual(cfg.judge.model, "grok-4.5")
+        self.assertEqual(cfg.judge.prompt, "Grade each specialist.")
+        # synthesis must be None in judge mode (KTD1)
+        self.assertIsNone(cfg.synthesis)
+
+    def test_judge_convergence_without_judge_block_errors(self):
+        data = self._make_judge_data()
+        del data["judge"]
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(data)
+        errors = ctx.exception.errors
+        self.assertTrue(any("judge" in e and "required" in e for e in errors))
+
+    def test_judge_block_missing_provider_errors(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(self._make_judge_data(judge={"model": "grok-4.5"}))
+        self.assertTrue(any("judge.provider" in e for e in ctx.exception.errors))
+
+    def test_judge_block_missing_model_errors(self):
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(self._make_judge_data(judge={"provider": "xai"}))
+        self.assertTrue(any("judge.model" in e for e in ctx.exception.errors))
+
+    def test_judge_same_model_as_specialist_is_valid(self):
+        # KTD7: no model-distinctness check; judge may share provider/model with a specialist.
+        cfg = FleetConfig.from_dict(self._make_judge_data(
+            judge={"provider": "xai", "model": "grok-4.3"},  # same as reviewer-b
+        ))
+        self.assertIsInstance(cfg.judge, JudgeSpec)
+        self.assertEqual(cfg.judge.provider, "xai")
+        self.assertEqual(cfg.judge.model, "grok-4.3")
+
+    def test_judge_block_on_synthesize_fleet_is_ignored(self):
+        # A stray judge: block on a synthesize fleet must not pollute config.judge.
+        data = make_data()  # convergence=synthesize, has synthesis block
+        data["judge"] = {"provider": "xai", "model": "grok-4.5"}
+        cfg = FleetConfig.from_dict(data)
+        self.assertEqual(cfg.convergence, "synthesize")
+        self.assertIsNone(cfg.judge)
+        self.assertIsNotNone(cfg.synthesis)  # synthesis block still parsed
+
+    def test_judge_block_on_collect_fleet_is_ignored(self):
+        # A stray judge: block on a collect fleet must not pollute config.judge.
+        data = make_data(convergence="collect")
+        data["judge"] = {"provider": "xai", "model": "grok-4.5"}
+        cfg = FleetConfig.from_dict(data)
+        self.assertEqual(cfg.convergence, "collect")
+        self.assertIsNone(cfg.judge)
+
+    def test_invalid_convergence_error_lists_all_three_modes(self):
+        # Error message for an unknown convergence must name all three accepted values.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(convergence="rank"))
+        errors = ctx.exception.errors
+        self.assertTrue(any("convergence" in e for e in errors))
+        self.assertTrue(any("judge" in e for e in errors))
+
+    def test_judge_prompt_optional_defaults_to_empty(self):
+        # prompt is optional; omitting it yields JudgeSpec.prompt == "".
+        cfg = FleetConfig.from_dict(self._make_judge_data(
+            judge={"provider": "xai", "model": "grok-4.5"},  # no prompt key
+        ))
+        self.assertEqual(cfg.judge.prompt, "")
+
+    def test_judge_synthesis_stays_none_even_with_stray_synthesis_block(self):
+        # In judge mode, a stray synthesis: block must not populate config.synthesis
+        # (KTD1: reusing synthesis to hold a judge spec is a semantic trap).
+        data = self._make_judge_data()
+        data["synthesis"] = {"provider": "openrouter", "model": "anthropic/claude-opus-4"}
+        cfg = FleetConfig.from_dict(data)
+        self.assertEqual(cfg.convergence, "judge")
+        self.assertIsNone(cfg.synthesis)
+        self.assertIsNotNone(cfg.judge)
 
 
 if __name__ == "__main__":
