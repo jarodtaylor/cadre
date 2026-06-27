@@ -35,10 +35,15 @@ The single strong-model step that combines the specialists' successful outputs i
 The engine's one orchestration primitive: run every specialist concurrently (fan-out), then synthesize their successful outputs into one result. If some specialists fail, it synthesizes the survivors and reports the failures; it fails outright only when none succeed.
 
 ### Convergence
-What a fleet does with its specialists' outputs, configured per fleet. Three modes span the space: **synthesize** — a strong model blends the survivors into one grounded report (the built mode; see Fan-out → synthesize); **collect** — return the raw, attributed outputs for the caller to review, with no blend; **judge** — an independent critic scores or ranks them (future). Convergence is one of a fleet's two shape axes; the other is topology.
+What a fleet does with its specialists' outputs, configured per fleet. Three modes: **synthesize** — a strong model blends the survivors into one grounded report (the default; see Fan-out → synthesize); **collect** — return the raw, attributed outputs for the caller to review, with no blend (see Collect); **judge** — an independent critic grades each surviving specialist's output in place, attributed per lane, without blending (see Judge). Convergence is one of a fleet's two shape axes; the other is topology.
 
 ### Collect
 A convergence mode in which a fleet has no synthesizer: it fans out the specialists and returns their raw, attributed outputs (role, model, text) intact, leaving synthesis to the caller. The correct contract for review and adversarial fleets, where blending independent findings would destroy the signal the review exists to surface. A collect run succeeds when at least one specialist returns. (Shipped alongside synthesize.)
+
+### Judge
+A convergence mode in which, after the fan-out, one independent judge model grades each surviving specialist's output as a distinct item — assessed and attributed per lane, never blended. The grade's *form* (numeric score, rank, pass/fail) is prompt-determined; the per-lane *container* `{role, model, grade, rationale}` is fixed and lands in the run manifest. The judge is advisory by design: a low grade is a successful, usable run; it never blocks, discards, or makes a binding selection. A partial-coverage run — the judge returned grades for only some surviving lanes — also succeeds; ungraded lanes are named in the manifest and in the report. Judge failure (call error or timeout) degrades to the attributed specialist outputs plus a note; only failure exits non-zero, never silence or crash.
+
+No-self-grading principle: give the judge a model distinct from the specialists. A same-model judge may over-rate its sibling lane (self-favoring bias — the models share training-data priors). Cadre does not enforce distinctness; the judge is defined by its role and instructions, not its model identity. Cross-model assignment is the recommended default.
 
 ### Topology
 How a fleet's lanes relate in time: **parallel** — independent and concurrent (the built topology, the basis of fan-out); **sequential** — each lane consumes the previous lane's output; **iterative** — lanes run in rounds and see each other's output. Distinct from convergence: topology is execution order, convergence is output handling. Only parallel is built; sequential and iterative are future primitives.

@@ -79,7 +79,8 @@ def run_with_progress(
     renderer.emit(Validated(
         fleet=cfg.name,
         specialists=len(cfg.specialists),
-        synthesizers=0 if cfg.convergence == "collect" else 1,
+        synthesizers=1 if cfg.convergence == "synthesize" else 0,
+        convergence=cfg.convergence,
     ))
     if capture:
         renderer.emit(RunFolder(path=str(run_dir)))

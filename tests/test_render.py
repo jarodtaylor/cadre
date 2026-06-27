@@ -15,12 +15,14 @@ import time
 import unittest
 from pathlib import Path
 
-from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
+from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from fleet_engine.engine import FleetResult
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
 from fleet_engine.progress import (
     Completion,
+    JudgeDone,
+    JudgeStarted,
     LaneDone,
     LaneLaunched,
     RunFolder,
@@ -80,6 +82,8 @@ def make_result(
     notes=None,
     ok=False,
     convergence="synthesize",
+    judge=None,
+    judge_ok=None,
 ):
     """Return a FleetResult; caller provides the specialists list and result state."""
     return FleetResult(
@@ -91,6 +95,8 @@ def make_result(
         notes=notes or [],
         ok=ok,
         convergence=convergence,
+        judge=judge,
+        judge_ok=judge_ok,
     )
 
 
@@ -1591,6 +1597,395 @@ class TestRenderFileInputs(unittest.TestCase):
     def test_no_truncation_marker_when_nothing_truncated(self):
         """With no truncated paths, no marker appears (default arg, byte-clean block)."""
         self.assertNotIn("truncated", render_file_inputs(["a.md", "b.md"]))
+
+
+# ---------------------------------------------------------------------------
+# Judge convergence — preview, render_result, and progress breadcrumbs (U4)
+# ---------------------------------------------------------------------------
+
+
+def _make_judge_config(
+    name="test-judge-fleet",
+    judge_provider="openrouter",
+    judge_model="google/gemini-2-flash",
+    judge_prompt="Grade each lane.",
+    allow_privileged_tools=False,
+):
+    """Build a judge FleetConfig (judge=JudgeSpec, synthesis=None) for preview tests."""
+    cfg = FleetConfig(
+        name=name,
+        synthesis=None,
+        judge=JudgeSpec(
+            provider=judge_provider,
+            model=judge_model,
+            prompt=judge_prompt,
+        ),
+        convergence="judge",
+        specialists=[
+            SpecialistSpec(
+                role="web",
+                provider="openrouter",
+                model="google/gemini-3-flash",
+                focus="find sources",
+                toolset=["web"],
+            ),
+            SpecialistSpec(
+                role="analysis",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                focus="deep analysis",
+                toolset=[],
+            ),
+        ],
+        allow_privileged_tools=allow_privileged_tools,
+    )
+    resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
+
+
+class TestRenderFleetPreviewJudge(unittest.TestCase):
+    """render_fleet_preview handles judge fleets: convergence line, judge model, prompt."""
+
+    def setUp(self):
+        self.cfg = _make_judge_config()
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_convergence_judge_line_present(self):
+        self.assertIn("Convergence: judge", self.rendered)
+
+    def test_judge_model_present(self):
+        self.assertIn("google/gemini-2-flash", self.rendered)
+
+    def test_judge_prompt_block_present(self):
+        self.assertIn("Judge prompt:", self.rendered)
+        self.assertIn("Grade each lane.", self.rendered)
+
+    def test_no_synthesizer_line(self):
+        self.assertNotIn("Synthesizer:", self.rendered)
+
+    def test_no_synthesis_prompt_block(self):
+        self.assertNotIn("Synthesis prompt:", self.rendered)
+
+    def test_specialists_still_listed(self):
+        self.assertIn("Specialists (2)", self.rendered)
+        self.assertIn("web", self.rendered)
+        self.assertIn("analysis", self.rendered)
+
+    def test_no_raises_on_synthesis_none(self):
+        """render_fleet_preview must not AttributeError on synthesis=None (judge mode)."""
+        self.assertIsInstance(self.rendered, str)
+
+    def test_fleet_name_in_header(self):
+        self.assertIn("test-judge-fleet", self.rendered)
+
+
+# Judge text fixture for two-lane tests.
+_JUDGE_TEXT_TWO_LANES = (
+    "=== LANE: web ===\n"
+    "Grade: A\n"
+    "Rationale: Strong sourcing.\n"
+    "\n"
+    "=== LANE: analysis ===\n"
+    "Grade: B+\n"
+    "Rationale: Solid but could go deeper.\n"
+)
+
+# Judge text fixture for one-lane (partial coverage) tests.
+_JUDGE_TEXT_ONE_LANE = (
+    "=== LANE: web ===\n"
+    "Grade: A\n"
+    "Rationale: Excellent.\n"
+)
+
+
+class TestRenderResultJudgeSuccess(unittest.TestCase):
+    """judge_ok=True, ok=True — judge's own text shown, attributed outputs present,
+    never 'all specialists failed'."""
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", text="web findings"),
+            make_lane(role="analysis", text="analysis findings"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=_JUDGE_TEXT_TWO_LANES,
+            judge_ok=True,
+            ok=True,
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_judge_result_header(self):
+        self.assertIn("judge result", self.rendered)
+
+    def test_grade_text_present(self):
+        self.assertIn("Grade: A", self.rendered)
+        self.assertIn("Grade: B+", self.rendered)
+
+    def test_rationale_present(self):
+        self.assertIn("Strong sourcing", self.rendered)
+        self.assertIn("Solid but could go deeper", self.rendered)
+
+    def test_attributed_outputs_present(self):
+        self.assertIn("web findings", self.rendered)
+        self.assertIn("analysis findings", self.rendered)
+
+    def test_never_synthesis_preamble(self):
+        """The 'synthesis was not attempted' preamble must NEVER fire for judge mode."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+    def test_no_partial_result_header(self):
+        self.assertNotIn("partial result", self.rendered)
+
+    def test_no_synthesized_result_header(self):
+        self.assertNotIn("synthesized result", self.rendered)
+
+    def test_provenance_rows_present(self):
+        self.assertIn("[ok  ] web", self.rendered)
+        self.assertIn("[ok  ] analysis", self.rendered)
+
+
+class TestRenderResultJudgeDegrade(unittest.TestCase):
+    """judge_ok=False, ok=False — attributed outputs present, NO synthesis preamble."""
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", text="web findings"),
+            make_lane(role="analysis", text="analysis findings"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=None,
+            judge_ok=False,
+            ok=False,
+            notes=["judge failed: rate limited"],
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_judge_failed_header(self):
+        self.assertIn("judge result — judge failed", self.rendered)
+
+    def test_attributed_outputs_present(self):
+        """Specialist outputs are surfaced even when the judge failed (degrade path)."""
+        self.assertIn("web findings", self.rendered)
+        self.assertIn("analysis findings", self.rendered)
+
+    def test_no_synthesis_preamble(self):
+        """The 'synthesis was not attempted' preamble must NOT fire for judge mode."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+    def test_no_partial_result_header(self):
+        self.assertNotIn("partial result", self.rendered)
+
+    def test_no_synthesized_result_header(self):
+        self.assertNotIn("synthesized result", self.rendered)
+
+    def test_failure_note_renders(self):
+        """The judge-failed note must appear in the rendered output."""
+        self.assertIn("judge failed: rate limited", self.rendered)
+
+
+class TestRenderResultJudgePartialCoverage(unittest.TestCase):
+    """Judge graded only one of two lanes — partial note names the ungraded lane."""
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", text="web findings"),
+            make_lane(role="analysis", text="analysis findings"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=_JUDGE_TEXT_ONE_LANE,
+            judge_ok=True,
+            ok=True,
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_graded_lane_present(self):
+        self.assertIn("Grade: A", self.rendered)
+
+    def test_partial_note_names_ungraded_lane(self):
+        # The note must name the specific ungraded lane, not just appear somewhere
+        # in the attributed-output section where "analysis" would also match.
+        self.assertIn("not graded by judge: analysis", self.rendered)
+
+    def test_graded_lane_text_present(self):
+        self.assertIn("Excellent", self.rendered)
+
+
+class TestRenderResultJudgeParseFallback(unittest.TestCase):
+    """Judge text doesn't parse into structured blocks — raw text shown, no crash."""
+
+    def setUp(self):
+        lanes = [make_lane(role="web", text="web findings")]
+        self.result = make_result(
+            specialists=lanes,
+            judge="No structured grades here — prose only.",
+            judge_ok=True,
+            ok=True,
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_raw_judge_text_shown(self):
+        self.assertIn("No structured grades", self.rendered)
+
+    def test_attributed_outputs_still_present(self):
+        self.assertIn("web findings", self.rendered)
+
+    def test_no_crash(self):
+        self.assertIsInstance(self.rendered, str)
+
+
+class TestRenderResultJudgeLeadsWithRawText(unittest.TestCase):
+    """The judge body leads with the judge's OWN text (KTD2) — content the judge wrote
+    OUTSIDE the per-lane blocks (an overall summary / ranking) is preserved, not dropped
+    by reconstructing the report from parsed per-lane entries."""
+
+    def setUp(self):
+        judge_text = (
+            "OVERALL: web edged out analysis on sourcing depth.\n"
+            "\n"
+            "=== LANE: web ===\n"
+            "Grade: A\n"
+            "Rationale: Strong sourcing.\n"
+            "\n"
+            "=== LANE: analysis ===\n"
+            "Grade: B+\n"
+            "Rationale: Solid.\n"
+        )
+        lanes = [
+            make_lane(role="web", text="web findings"),
+            make_lane(role="analysis", text="analysis findings"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=judge_text,
+            judge_ok=True,
+            ok=True,
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_cross_lane_summary_preserved(self):
+        # This line lives OUTSIDE any per-lane block. Reconstructing from parsed
+        # entries (the old behavior) dropped it; leading with the raw judge text keeps it.
+        self.assertIn("OVERALL: web edged out analysis on sourcing depth.", self.rendered)
+
+    def test_per_lane_grades_still_present(self):
+        self.assertIn("Grade: A", self.rendered)
+        self.assertIn("Grade: B+", self.rendered)
+
+    def test_attributed_outputs_present(self):
+        self.assertIn("web findings", self.rendered)
+        self.assertIn("analysis findings", self.rendered)
+
+
+class TestRenderResultJudgeAllSpecialistsFailed(unittest.TestCase):
+    """All specialists failed in a judge fleet — the engine returns BEFORE the judge runs
+    (judge_ok None, ok False). The header must read 'all specialists failed', not
+    'judge failed' (the judge never ran)."""
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", ok=False, error="boom"),
+            make_lane(role="analysis", ok=False, error="boom"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=None,
+            judge_ok=None,
+            ok=False,
+            notes=["all specialists failed — no judge grade"],  # mode-specific note the engine now emits
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_all_specialists_failed_header(self):
+        self.assertIn("judge result — all specialists failed", self.rendered)
+
+    def test_not_judge_failed_header(self):
+        self.assertNotIn("judge failed", self.rendered)
+
+    def test_no_synthesis_preamble(self):
+        """The 'synthesis was not attempted' preamble must NOT fire for judge mode."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+
+class TestJudgeGradeTextSanitized(unittest.TestCase):
+    """Grade text is sanitized at render (KTD8); specialist r.text is NOT sanitized."""
+
+    def test_esc_in_grade_stripped(self):
+        """A terminal escape in the judge's grade is stripped; specialist text is clean."""
+        # Only the judge text carries the ESC — specialist r.text is clean so
+        # assertNotIn("\x1b") is NOT a false pass from an unsanitized lane.
+        judge_text = (
+            "=== LANE: web ===\n"
+            "Grade: A\x1b[2J\n"
+            "Rationale: Good.\n"
+        )
+        lanes = [make_lane(role="web", text="clean output")]
+        result = make_result(
+            specialists=lanes,
+            judge=judge_text,
+            judge_ok=True,
+            ok=True,
+            convergence="judge",
+        )
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("Grade: A", rendered)
+
+
+class TestJudgeProgressBreadcrumbs(unittest.TestCase):
+    """JudgeStarted/JudgeDone and judge Validated emit correct [cadre] breadcrumbs."""
+
+    def _emit_and_get(self, event, filename_for=None):
+        r, stream = _make_renderer(filename_for=filename_for)
+        r.emit(event)
+        return _lines(stream)
+
+    def test_judge_started_format(self):
+        lines = self._emit_and_get(JudgeStarted(survivors=3))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] judging over 3 survivor(s)")
+
+    def test_judge_done_ok_format(self):
+        lines = self._emit_and_get(JudgeDone(outcome="ok", elapsed_s=4.5))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] judge ok 4.5s")
+
+    def test_judge_done_failed_format(self):
+        lines = self._emit_and_get(JudgeDone(outcome="failed", elapsed_s=2.1))
+        self.assertEqual(lines[0], "[cadre] judge failed 2.1s")
+
+    def test_judge_done_timed_out_format(self):
+        lines = self._emit_and_get(JudgeDone(outcome="timed-out", elapsed_s=600.0))
+        self.assertEqual(lines[0], "[cadre] judge timed-out 600.0s")
+
+    def test_judge_validated_shows_judge_not_synthesizer(self):
+        """Validated with convergence='judge' shows '1 judge', not 'N synthesizer(s)'."""
+        lines = self._emit_and_get(
+            Validated(fleet="judge-fleet", specialists=2, synthesizers=0, convergence="judge")
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] validated fleet 'judge-fleet' — 2 specialists, 1 judge")
+        self.assertNotIn("synthesizer", lines[0])
+
+    def test_synthesize_validated_unchanged(self):
+        """Existing synthesize Validated breadcrumb format is unchanged (no regression)."""
+        lines = self._emit_and_get(Validated(fleet="synth-fleet", specialists=3, synthesizers=1))
+        self.assertEqual(lines[0], "[cadre] validated fleet 'synth-fleet' — 3 specialists, 1 synthesizer(s)")
+
+    def test_collect_validated_unchanged(self):
+        """Existing collect Validated breadcrumb format is unchanged (no regression)."""
+        lines = self._emit_and_get(
+            Validated(fleet="collect-fleet", specialists=2, synthesizers=0, convergence="collect")
+        )
+        self.assertEqual(lines[0], "[cadre] validated fleet 'collect-fleet' — 2 specialists, 0 synthesizer(s)")
 
 
 if __name__ == "__main__":

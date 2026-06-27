@@ -10,6 +10,7 @@ the first — and malformed inputs become errors, never tracebacks.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,11 +77,19 @@ class SynthesisSpec:
     prompt: str = ""
 
 
+@dataclass
+class JudgeSpec:
+    provider: str
+    model: str
+    prompt: str = ""
+
+
 @dataclass(kw_only=True)
 class FleetConfig:
     name: str
     specialists: list[SpecialistSpec]
     synthesis: SynthesisSpec | None = None
+    judge: JudgeSpec | None = None
     convergence: str = "synthesize"
     description: str = ""
     allow_privileged_tools: bool = False
@@ -119,8 +128,8 @@ class FleetConfig:
         # isinstance guard FIRST: a non-str value (e.g. `convergence: [collect]`) is
         # unhashable and would raise TypeError on the set membership test — accumulate a
         # ConfigError instead, honoring the loader's malformed-input-never-tracebacks contract.
-        if not isinstance(conv_raw, str) or conv_raw not in {"synthesize", "collect"}:
-            errors.append("`convergence` must be one of: synthesize, collect")
+        if not isinstance(conv_raw, str) or conv_raw not in {"synthesize", "collect", "judge"}:
+            errors.append("`convergence` must be one of: synthesize, collect, judge")
             convergence = "synthesize"
         else:
             convergence = conv_raw
@@ -145,13 +154,30 @@ class FleetConfig:
                     model=str(syn_raw.get("model", "")),
                     prompt=str(syn_raw.get("prompt", "")),
                 )
-        elif isinstance(syn_raw, dict):
+        elif convergence == "collect" and isinstance(syn_raw, dict):
             # collect mode: synthesis block is optional; parse it if present
             synthesis = SynthesisSpec(
                 provider=str(syn_raw.get("provider", "")),
                 model=str(syn_raw.get("model", "")),
                 prompt=str(syn_raw.get("prompt", "")),
             )
+
+        judge_raw = data.get("judge")
+        judge: JudgeSpec | None = None
+        if convergence == "judge":
+            if not isinstance(judge_raw, dict):
+                errors.append("`judge` is required and must be a mapping with provider + model")
+            else:
+                if not judge_raw.get("provider"):
+                    errors.append("`judge.provider` is required")
+                if not judge_raw.get("model"):
+                    errors.append("`judge.model` is required")
+                judge = JudgeSpec(
+                    provider=str(judge_raw.get("provider", "")),
+                    model=str(judge_raw.get("model", "")),
+                    prompt=str(judge_raw.get("prompt", "")),
+                )
+        # convergence != "judge": a stray judge: block is ignored; judge stays None.
 
         specs_raw = data.get("specialists")
         specialists: list[SpecialistSpec] = []
@@ -174,6 +200,36 @@ class FleetConfig:
                     if role in seen_roles:
                         errors.append(f"duplicate specialist role '{role}'")
                     seen_roles.add(role)
+                    # Role-label hygiene: the role is shown verbatim on the approval
+                    # preview, emitted verbatim as a judge per-lane label
+                    # (`=== LANE: <role> ===`), and matched back on the exact stripped
+                    # string. Its displayed, prompt, and parsed forms must be identical.
+                    # Reject leading/trailing whitespace, `===`, and any character the
+                    # preview sanitizer strips — control/format/bidi/line-separator. The
+                    # category test (`C*` plus Zl/Zp) is a deliberate SUPERSET of
+                    # render._sanitize's strip-set (C0/C1/DEL + the bidi/line-sep chars),
+                    # so any accepted role satisfies `_sanitize(role) == role` without
+                    # importing the renderer (avoids a config→render cycle) and without
+                    # drifting if that set grows. Regular spaces (Zs) are fine mid-role;
+                    # leading/trailing are caught by the strip() check. The cross-role
+                    # "two roles that sanitize to the same display string" collision check
+                    # belongs with the _sanitize→text_safety consolidation (#23).
+                    if (
+                        role != role.strip()
+                        or "===" in role
+                        or any(
+                            unicodedata.category(c)[0] == "C"
+                            or unicodedata.category(c) in ("Zl", "Zp")
+                            for c in role
+                        )
+                    ):
+                        errors.append(
+                            f"{label}.role {role!r} must not contain leading/trailing "
+                            "whitespace, '===', or any control/format/bidi/line-separator "
+                            "character — the role is shown verbatim on the approval "
+                            "surface and matched verbatim as a judge per-lane label, so "
+                            "its displayed, prompt, and parsed forms must be identical."
+                        )
 
                 if not raw.get("provider"):
                     errors.append(f"{label}.provider is required")
@@ -258,11 +314,14 @@ class FleetConfig:
             raise ConfigError(errors)
 
         # In synthesize mode, a None synthesis means an error was accumulated above.
+        # In judge mode, a None judge means an error was accumulated above.
         assert convergence != "synthesize" or synthesis is not None
+        assert convergence != "judge" or judge is not None
         return cls(
             name=str(name),
             specialists=specialists,
             synthesis=synthesis,
+            judge=judge,
             convergence=convergence,
             description=description,
             allow_privileged_tools=allow_priv,

@@ -1,0 +1,116 @@
+# Review scoring — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/review-scoring.example.yaml ~/.cadre/fleets/review-scoring.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
+#
+# Replace provider/model values with the exact strings your Hermes resolves.
+# These are EXAMPLE assignments — swap each lane to a model from your verified
+# palette before running.
+#
+# Per-provider model-string format:
+#   - OpenRouter providers: model is the full "vendor/model" slug
+#   - OAuth providers (xai, openai-codex, nous): set provider explicitly + bare model id
+#
+# NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
+#
+# Convergence: JUDGE — four review specialists run in parallel; an independent
+# judge then grades each reviewer's output, attributed to its model. The judge is
+# advisory: it never discards, blocks, or selects — it ranks and calibrates. The
+# grade and the attributed specialist outputs are co-primary output; you (or a
+# caller agent) receive both. Pass the code or diff you want reviewed as the
+# --task argument when running.
+#
+# toolset: [] on every specialist lane — code reviewers reason over the code or
+# diff you supply in the task (provided context). They need no live retrieval
+# tools. [] is fail-closed zero tools (not unset), preserving the SAFE_TOOLSETS
+# gate. The judge also runs with fail-closed zero tools (enforced by the engine).
+#
+# Cross-model judge recommendation (KTD7 / R16): assign the judge a provider and
+# model DIFFERENT from any specialist. A judge sharing a model with a reviewer may
+# over-rate its sibling lane (self-favoring bias). A distinct model produces a
+# more independent grade. (The engine does not enforce distinctness — the fleet
+# author is responsible for this choice.)
+
+name: review-scoring
+description: >-
+  Four-model code review swarm graded by an independent judge. Security,
+  architecture, performance, and correctness specialists run in parallel; a
+  cross-model judge then grades each reviewer's findings on severity calibration,
+  credibility, and signal-vs-noise — returning the per-lane grade and the attributed
+  specialist outputs together. Convergence: judge.
+convergence: judge
+
+specialists:
+  - role: security
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: openai/gpt-5.5
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for security vulnerabilities: injection risks
+      (SQL, command, prompt), auth/authz gaps, insecure defaults, exposed
+      secrets or credentials, unsafe deserialization, and OWASP Top 10
+      patterns. For each finding state the risk level (high/medium/low),
+      the exact location, and a concrete remediation.
+
+  - role: architecture
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: google/gemini-3-flash
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for architectural concerns: coupling between
+      modules, violation of separation of concerns, abstraction leaks, naming
+      that misrepresents intent, dead or unreachable code, and patterns that
+      will resist change. Distinguish genuine structural debt from acceptable
+      trade-offs given the apparent scope.
+
+  - role: performance
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: anthropic/claude-opus-4.8
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for performance concerns: algorithmic complexity
+      (O(n²) or worse in hot paths), unnecessary I/O or repeated computation,
+      blocking calls in async contexts, memory allocation patterns that could
+      cause pressure or leaks, and missing caching opportunities. Flag only
+      real risks, not hypothetical micro-optimizations.
+
+  - role: correctness
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: deepseek/deepseek-v3.2
+    toolset: []
+    focus: >-
+      You have NO tools available: review strictly from the code or diff in the
+      task — do not emit tool calls, fetch, or run anything; output your review as
+      text. Review for correctness: logic errors, off-by-one
+      mistakes, incorrect handling of edge cases (empty input, zero, nil/None,
+      overflow), error propagation failures (swallowed exceptions, wrong error
+      types), and intent-vs-implementation mismatches. Flag anything that would
+      produce wrong results under normal or adversarial inputs.
+
+# Cross-model judge: assign a model DISTINCT from all four specialists above to
+# reduce self-favoring bias (a same-model judge may over-rate its sibling lane).
+# The engine automatically appends the per-lane grading format
+# (=== LANE: <role> === / Grade: / Rationale:) and the verbatim reviewer roles
+# to whatever the prompt says — the prompt below is criteria-only; do NOT add a
+# format block here (two conflicting format instructions will break the parser).
+judge:
+  provider: xai                # OAuth provider -> bare model id; swap to your palette
+  model: grok-4.3
+  prompt: >-
+    Grade each specialist reviewer's findings independently. For each lane assess:
+    (1) Severity calibration — are the risk levels (high/medium/low) appropriate
+    for the actual exploitability or impact of each finding, or is the reviewer
+    over- or under-calling severity? (2) Credibility and specificity — is each
+    finding concrete, located (exact file/function/line), and actionable, or is it
+    vague, speculative, or unsupported by the code in the task? (3) Signal-to-noise
+    ratio — do the findings represent genuine risks worth acting on, or is the
+    reviewer padding with low-value observations? After grading each lane, surface
+    the two or three highest-priority findings across all reviewers that the team
+    should act on first, naming the lane(s) that flagged them. Be specific about
+    why each lane earned its grade — cite the reviewer's own language where helpful.

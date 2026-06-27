@@ -410,6 +410,42 @@ class TestEngineIsolation(unittest.TestCase):
             "engine.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
+    def test_judge_grade_does_not_import_engine_or_model_client(self):
+        """fleet_engine/judge_grade.py must NOT import engine or model_client.
+
+        The judge-grade parser is caller-layer: the engine returns the judge's
+        raw text and the edge parses it (KTD2). A stray engine import here would
+        fold parsing back into the core.
+        """
+        import fleet_engine.judge_grade as jg_mod
+
+        imported = _static_imports(jg_mod)
+        self.assertNotIn(
+            "fleet_engine.engine",
+            imported,
+            "judge_grade.py must not import engine (KTD2 — parsing lives at the edge)",
+        )
+        self.assertNotIn(
+            "fleet_engine.model_client",
+            imported,
+            "judge_grade.py must not import model_client (caller-layer parser)",
+        )
+
+    def test_engine_does_not_import_judge_grade(self):
+        """fleet_engine/engine.py must NOT import judge_grade (KTD2).
+
+        The engine emits the judge's raw text and does no parsing; a stray import
+        of the edge parser is the architecture regression this guards.
+        """
+        import fleet_engine.engine as e_mod
+
+        imported = _static_imports(e_mod)
+        self.assertNotIn(
+            "fleet_engine.judge_grade",
+            imported,
+            "engine.py must not import judge_grade (KTD2 — engine returns raw text, edge parses)",
+        )
+
     def test_model_client_does_not_import_file_input(self):
         """fleet_engine/model_client.py must NOT import file_input (KTD2 / R8)."""
         import fleet_engine.model_client as mc_mod

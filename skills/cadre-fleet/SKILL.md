@@ -36,12 +36,16 @@ parallelism genuinely helps.
 
 Prefer a curated fleet first. Compose one from the palette only when nothing fits.
 
-**Two fleet shapes.** Most fleets **synthesize** — a strong model blends the
+**Three fleet shapes.** Most fleets **synthesize** — a strong model blends the
 specialists into one grounded report. Some fleets (e.g. `code-review`) use
 **collect** convergence: no synthesizer runs; the fleet returns each specialist's
-raw, attributed output for you to review. The preview shows which mode a fleet uses
-(a `Synthesizer:` line vs `Convergence: collect (no synthesizer)`); steps 4–5
-cover both.
+raw, attributed output for you to review. A third set (e.g. `review-scoring`) use
+**judge** convergence: after the fan-out an independent critic grades each
+specialist's output in place — attributed per lane, never blended — and the result
+leads with the judge's grade text followed by the attributed specialist blocks. The
+judge is advisory: it never blocks, discards, or selects. The preview shows which
+mode a fleet uses (a `Synthesizer:` line, `Convergence: collect (no synthesizer)`,
+or `Convergence: judge` with a `Judge:` line); steps 4–5 cover all three.
 
 ## Procedure
 
@@ -139,8 +143,14 @@ records the full result, provenance, and timings).
 no synthesis — the result is a `collect result` header followed by one attributed
 block per specialist (`--- role (provider/model) ---`). Relay the blocks as the
 independent perspectives they are; do not blend them into a single voice or invent
-a consensus the fleet did not produce. Either way the result ends with a
-provenance section tagging each specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]`.
+a consensus the fleet did not produce. **Judge fleets:** the result is a `judge
+result` header, then the judge's grade text **verbatim** (relay it as-is — do not
+re-blend it into your own summary), then the attributed specialist blocks. If a
+`note: N lane(s) not graded by judge` line is present, relay it — the judge graded
+only some lanes, so do not present the run as fully graded. The grade is advisory:
+report it as the judge's opinion, never as a verdict that drops or ranks-out a
+specialist. Either way the result ends with a provenance section tagging each
+specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]`.
 
 If the result is **degraded**, relay the rendered degraded shape as-is:
 - **`[TIMEOUT]` lane:** a specialist timed out — its output is absent; the others
@@ -152,6 +162,10 @@ If the result is **degraded**, relay the rendered degraded shape as-is:
 - **Collect, all specialists failed:** the `collect result` header notes all lanes
   failed and the provenance shows each `[FAIL]`/`[TIMEOUT]` — relay that no outputs
   were produced; do not fabricate any.
+- **Judge-failed result** (`judge result — judge failed`): the judge call errored
+  or timed out — the surviving specialist outputs are still shown; relay them,
+  noting the grade is unavailable. (`judge result — all specialists failed` means
+  no specialist survived for the judge to grade.)
 
 Never present a partial result as if it were the whole. Never fabricate a
 synthesis from the labeled lane outputs.

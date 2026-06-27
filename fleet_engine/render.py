@@ -18,8 +18,11 @@ from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
+from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
     Completion,
+    JudgeDone,
+    JudgeStarted,
     LaneDone,
     LaneLaunched,
     ProgressEvent,
@@ -102,10 +105,18 @@ def render_fleet_preview(config: FleetConfig) -> str:
         out.append(f"\n{_sanitize(config.description)}")
 
     # --- synthesizer / convergence ---
-    # Branch on config.convergence (the explicit field — KTD1: a stray synthesis:
-    # block in a collect fleet must still preview as collect).
+    # Branch EXPLICITLY on config.convergence (the authoritative field — KTD1: a
+    # stray synthesis: block in a collect fleet must still preview as collect;
+    # synthesis=None in judge mode must not crash the else branch).
     if config.convergence == "collect":
         out.append("\nConvergence: collect (no synthesizer)")
+    elif config.convergence == "judge":
+        # judge path — cost predicate runs on the RAW strings; only display is sanitized
+        judge_str = f"{_sanitize(config.judge.provider)}/{_sanitize(config.judge.model)}"
+        out.append("\nConvergence: judge")
+        out.append(f"Judge: {judge_str}")
+        if _looks_api_billed(config.judge.provider, config.judge.model):
+            out.append("  ⚠ bills at API rates inside Hermes")
     else:
         # synthesize path — cost predicate runs on the RAW strings; only display is sanitized
         synth_str = f"{_sanitize(config.synthesis.provider)}/{_sanitize(config.synthesis.model)}"
@@ -121,17 +132,23 @@ def render_fleet_preview(config: FleetConfig) -> str:
     else:
         out.append("\nallow_privileged_tools: false")
 
-    # --- synthesis prompt (multi-line: newlines preserved, other controls stripped) ---
+    # --- judge/synthesis prompt (multi-line: newlines preserved, other controls stripped) ---
     # Render the prompt byte-faithful to the parsed config (no .strip()): the
     # preview is the approval surface, so it must match what actually runs. Only
     # fall back to "(none)" when the sanitized prompt is truly empty.
-    # Skipped for collect fleets — there is no synthesizer to run a prompt.
-    if config.convergence != "collect":
+    # Skipped for collect fleets — there is no synthesizer or judge to run a prompt.
+    if config.convergence == "synthesize":
         raw_prompt = config.synthesis.prompt or ""
         prompt_text = _sanitize(raw_prompt, multiline=True)
         if prompt_text == "":
             prompt_text = "(none)"
         out.append(f"\nSynthesis prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
+    elif config.convergence == "judge":
+        raw_prompt = config.judge.prompt or ""
+        prompt_text = _sanitize(raw_prompt, multiline=True)
+        if prompt_text == "":
+            prompt_text = "(none)"
+        out.append(f"\nJudge prompt:\n  {prompt_text.replace(chr(10), chr(10) + '  ')}")
 
     # --- specialists ---
     out.append(f"\nSpecialists ({len(config.specialists)}):")
@@ -191,6 +208,13 @@ def render_result(result: FleetResult) -> str:
     # synthesis=None, synth_ok=None) is never mislabeled as a failure.
     if result.convergence == "collect":
         header = "collect result" if result.ok else "collect result — all specialists failed"
+    elif result.convergence == "judge":
+        if result.ok:
+            header = "judge result"
+        elif result.judge_ok is False:
+            header = "judge result — judge failed"
+        else:  # judge_ok is None → all specialists failed, the judge never ran
+            header = "judge result — all specialists failed"
     else:
         header = "synthesized result" if result.ok else "partial result (no synthesis)"
     out = [f"=== {_sanitize(result.fleet)} — {header} ==="]
@@ -198,13 +222,35 @@ def render_result(result: FleetResult) -> str:
     # fleets where synthesis never ran (all specialists failed). On a collect fleet
     # synth_ok is always None by design — emitting this on collect success is the
     # load-bearing bug this unit fixes (KTD2).
-    if result.convergence != "collect" and result.synth_ok is None:
+    if result.convergence == "synthesize" and result.synth_ok is None:
         # All specialists failed — synthesis was never attempted. Surface a
         # prominent line so the caller never mistakes this for a valid result.
         n_failed = len(result.failures)
         n_total = len(result.specialists)
         out.append(f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted.")
-    if result.synthesis:
+    if result.convergence == "judge":
+        # Judge body: lead with the judge's OWN raw text (KTD2 — the human report
+        # always shows the judge's text, even if a parse falls short). Reconstructing
+        # from parsed per-lane entries would silently drop anything the judge wrote
+        # outside the per-lane blocks (an overall summary, a ranking, cross-lane notes);
+        # the parsed structure is for the manifest, not the report (plan §High-Level
+        # Design). parse_grades drives ONLY the partial-coverage note here. Grade text
+        # is sanitized (KTD8); specialist r.text is model output and intentionally NOT
+        # sanitized (deferred #5/#23).
+        judge_text = result.judge or ""
+        surviving = [(r.role, r.model) for r in result.successes]
+        pg = parse_grades(judge_text, surviving)
+        if judge_text:
+            out.append(f"\n{_sanitize(judge_text, multiline=True)}")
+        # Partial-coverage note (R14/AE7): only when we parsed structure AND a survivor
+        # went ungraded — flag the gap without hiding the judge's own words above.
+        if pg.parsed_ok and pg.ungraded:
+            ungraded_roles = ", ".join(_sanitize(role) for role, _ in pg.ungraded)
+            out.append(f"\nnote: {len(pg.ungraded)} lane(s) not graded by judge: {ungraded_roles}")
+        # Attributed specialist outputs always follow.
+        for r in result.successes:
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+    elif result.synthesis:
         out.append(result.synthesis)
     elif result.successes:
         # No synthesis (synthesizer failed) but lanes succeeded — surface their raw
@@ -431,6 +477,11 @@ class ProgressRenderer:
         """
         if isinstance(event, Validated):
             name = _sanitize(event.fleet)
+            if event.convergence == "judge":
+                return (
+                    f"[cadre] validated fleet '{name}'"
+                    f" — {event.specialists} specialists, 1 judge"
+                )
             return (
                 f"[cadre] validated fleet '{name}'"
                 f" — {event.specialists} specialists, {event.synthesizers} synthesizer(s)"
@@ -469,6 +520,14 @@ class ProgressRenderer:
             # SynthDone.outcome is already a label string — do NOT call outcome_label().
             elapsed = f"{event.elapsed_s:.1f}"
             return f"[cadre] synthesis {event.outcome} {elapsed}s"
+
+        if isinstance(event, JudgeStarted):
+            return f"[cadre] judging over {event.survivors} survivor(s)"
+
+        if isinstance(event, JudgeDone):
+            # JudgeDone.outcome is already a label string — do NOT call outcome_label().
+            elapsed = f"{event.elapsed_s:.1f}"
+            return f"[cadre] judge {event.outcome} {elapsed}s"
 
         if isinstance(event, Completion):
             total = f"{event.elapsed_s:.1f}"
