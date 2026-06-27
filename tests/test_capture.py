@@ -1342,6 +1342,21 @@ class TestJudgeSynthesisMd(unittest.TestCase):
         md = self._md(result)
         self.assertIn("judge failed", md)
 
+    def test_judge_degrade_note_not_confused_by_specialist_error(self):
+        """A specialist note that merely contains the phrase 'judge failed' must NOT be
+        picked as the degrade reason. Specialist notes are appended before the judge note,
+        so a loose substring match would mis-report; the prefix match selects the real one."""
+        result = _judge_result(
+            judge=None, judge_ok=False, ok=False,
+            notes=[
+                "specialist 'web' failed: upstream said judge failed to respond",
+                "judge failed: rate limited",
+            ],
+        )
+        md = self._md(result)
+        self.assertIn("judge failed: rate limited", md)
+        self.assertNotIn("upstream said judge failed to respond", md)
+
     # --- All-fail path ---
 
     def test_judge_all_failed_md_says_judge_mode(self):

@@ -377,9 +377,13 @@ def _synthesis_md(result: FleetResult) -> str:
             n = len(result.specialists)
             return f"No specialist outputs — all {n} specialists failed (judge mode)."
         if result.judge_ok is False:
-            # Judge ran but failed (degrade path).
+            # Judge ran but failed (degrade path). Match the note by its exact
+            # prefix — the engine emits "judge failed: <error>". A loose substring
+            # ("judge failed" in note) could match a specialist failure note whose
+            # provider error text happens to contain that phrase (specialist notes
+            # are appended first), misattributing the degrade reason on disk.
             judge_note = next(
-                (note for note in result.notes if "judge failed" in note),
+                (note for note in result.notes if note.startswith("judge failed:")),
                 "judge failed",
             )
             return f"No judge grade — {judge_note}."

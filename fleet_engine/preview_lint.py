@@ -168,8 +168,12 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
                     f"verify the toolset name against ~/.cadre/palette.yaml"
                 )
 
-    # Synthesizer: only for synthesize-convergence fleets with a non-None synthesis.
-    if config.convergence != "collect" and config.synthesis is not None:
+    # Synthesizer: only for synthesize-convergence fleets. Match the mode positively
+    # (== "synthesize") rather than "!= collect" — with three modes, "!= collect" also
+    # admits judge, and relying on synthesis-is-None to exclude judge is implicit. The
+    # explicit form mirrors the judge guard below. synthesis is guaranteed non-None in
+    # synthesize mode (config validation), so the second clause is belt-and-suspenders.
+    if config.convergence == "synthesize" and config.synthesis is not None:
         syn = config.synthesis
         if (syn.provider, syn.model) not in palette.models:
             warnings.append(

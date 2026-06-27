@@ -150,6 +150,10 @@ def parse_grades(judge_text: str, surviving_lanes: list[tuple[str, str]]) -> Par
             # Exact role match (case-sensitive — KTD9).
             if label not in role_to_lane:
                 continue  # drifted or non-survivor label → ignore
+            if label in matched_roles:
+                continue  # already graded by an earlier block — first valid grade wins,
+                          # so a repeated (or injected duplicate) LANE block can't add a
+                          # second entry for one role and pollute the manifest.
 
             grade, rationale = _parse_block(block_body)
             if not grade:
