@@ -5,9 +5,10 @@ editing this repository. Product north star: `STRATEGY.md`. Human overview: `REA
 
 **What this is:** a provider‑neutral Python engine that runs ephemeral, multi‑model
 agent *fleets* — fan a task out across specialists (different models/providers),
-then **either** synthesize one grounded, attributed report (the default) **or**
-collect the raw, attributed specialist outputs for the caller to review (no
-synthesizer). All model calls go through one thin adapter over Hermes's `AIAgent` library.
+then **synthesize** one grounded, attributed report (the default), **collect** the
+raw attributed outputs for the caller to review, or **judge** them with an
+independent critic that grades each specialist's output in place (attributed, not
+blended). All model calls go through one thin adapter over Hermes's `AIAgent` library.
 
 ## ⚠️ Verify Hermes/AIAgent behavior — do not guess
 
@@ -78,18 +79,33 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
     lane reaches beyond a tainted report. Owner-only `~/.cadre` perms guard other OS users,
     not the agent itself.
 - **Schema:** minimal. One execution topology (parallel fan‑out) and an explicit
-  `convergence: synthesize|collect` field — **synthesize** (default; a strong model
-  blends the survivors) or **collect** (no synthesizer; return the raw attributed
-  outputs). `convergence` defaults to synthesize, so every pre‑existing fleet parses
-  unchanged. Don't add abstraction for the *deferred* axes (judge convergence,
-  sequential/iterative topology — see `CONCEPTS.md`) until a concrete one lands.
-- **Convergence‑aware consumers (`ok`‑aliasing — keep it):** a successful collect run
-  is `ok=True, synthesis=None, synth_ok=None`, which aliases the historical "synthesis
-  didn't happen" state. Every consumer — process exit code, `render` header + the
-  "synthesis was not attempted" preamble, the manifest + `synthesis.md`, the `Validated`
-  breadcrumb, `cli validate` — reads `result.convergence` to disambiguate. Do not add a
-  consumer that branches on `ok` / `synth_ok is None` / `synthesis is None` without also
-  reading `convergence`, or a successful collect run reads as a failure.
+  `convergence: synthesize|collect|judge` field — **synthesize** (default; a strong
+  model blends the survivors), **collect** (no synthesizer; return the raw attributed
+  outputs), or **judge** (an independent critic grades each survivor in place; requires
+  a `judge:` block with provider/model/prompt). `convergence` defaults to synthesize,
+  so every pre‑existing fleet parses unchanged. Don't add abstraction for the *deferred*
+  topology axes (sequential/iterative — see `CONCEPTS.md`) until a concrete one lands.
+- **Convergence‑aware consumers (`ok`‑aliasing — keep it):** `FleetResult` now has
+  three ok-shapes. A successful collect run: `ok=True, synthesis=None, synth_ok=None`.
+  A successful judge run: `ok=True, judge=<raw text>, judge_ok=True, synthesis=None,
+  synth_ok=None` — the same `synthesis=None` alias as collect, discriminated only by
+  `convergence` (`FleetResult` gains `judge: str|None` and `judge_ok: bool|None`).
+  Every consumer — process exit code, `render` header + the "synthesis was not attempted"
+  preamble, the manifest, the `Validated` breadcrumb, `cli validate` — reads
+  `result.convergence` to disambiguate all three. Do not add a consumer that branches on
+  `ok` / `synth_ok is None` / `synthesis is None` without also reading `convergence`, or
+  a successful collect or judge run reads as a failure.
+- **Judge‑specific seams:** the engine returns the judge's raw text in `result.judge`
+  and stays pure (no parsing). `fleet_engine/judge_grade.py` (caller‑layer) parses it
+  into per-lane structure (`{role, model, grade, rationale}`, plus `ungraded` lanes and
+  `parsed_ok`). **Prompt↔parser label contract:** `_judge_prompt` labels each surviving
+  specialist by its exact `role` string (response format: `=== LANE: <role> ===` /
+  `Grade:` / `Rationale:`); `parse_grades` matches each grade entry to a surviving lane
+  on that exact key. Label drift (paraphrase or wrong role name) degrades toward
+  *false-partial* (lane flagged ungraded) — never *false-full* (skipped lane hidden).
+  Partial coverage exits 0; only a judge error/timeout or total specialist failure exits
+  1. The judge passes `toolset=[]` explicitly — the `[]`-vs-`None` invariant applies
+  (never `None`, which enables every tool over untrusted specialist text).
 - **Preview/validate is a trust surface:** `fleet_engine/preview_lint.py` (palette +
   focus‑grounding validation) is caller‑layer — imported only by `run.py`/`cli.py`,
   never by the engine — and warns, never blocks. Every fleet‑controlled string printed

@@ -7,10 +7,11 @@ library to use it:
 cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
 cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
 cp fleets/doc-review.example.yaml ~/.cadre/fleets/doc-review.yaml
+cp fleets/review-scoring.example.yaml ~/.cadre/fleets/review-scoring.yaml
 # then set provider/model strings to your host-verified values (see ~/.cadre/palette.yaml)
 ```
 
-All three starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
+All four starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
 `.example` from the filename) so they are ready to configure without copying
 manually.
 
@@ -34,12 +35,14 @@ Shape: **fan-out → synthesize**. `convergence` is absent (defaults to
 
 ---
 
-## Review catalog — collect-shape review fleets
+## Review catalog — review fleets
 
-Two of the seeded starters review your work by fanning a set of **lenses**
-across different models in parallel and returning each lane's raw, attributed
-critique (collect shape — no synthesizer). They share one design, so the
-guidance below applies to both.
+Three of the seeded starters review your work by fanning a set of **lenses**
+across different models in parallel. Two (`code-review`, `doc-review`) use the
+collect shape — no synthesizer, each lane's raw attributed critique returned
+intact. The third (`review-scoring`) uses the judge shape — an independent
+critic grades each reviewer's output in place after the fan-out. The `--doc`,
+cross-model, and toolset guidance below applies to all three.
 
 **Name the artifact with `--doc`, don't paste it.** Pass the code, diff, or
 planning document with `--doc PATH` (repeatable) and the runner reads the file
@@ -113,21 +116,61 @@ each spec.
 
 ---
 
-## The two fleet shapes
+### `review-scoring.example.yaml` — judge shape
+
+Reviews the code, diff, or document you pass via `--doc`, then runs an
+**independent judge** that grades each reviewer's output in place — ranked and
+calibrated, with each lane kept separate and attributed to its role and model.
+The judge's grade text leads the report; the attributed reviewer outputs follow
+so you can verify the grade against the underlying findings. Structured per-lane
+grades (`{role, model, grade, rationale}`) land in the run manifest for machine
+consumption or later analytics.
+
+**The judge is advisory.** A low score is a successful, usable run; the judge
+never blocks, discards, or selects. A partial-coverage run (the judge graded
+only some lanes) also succeeds — the manifest lists the ungraded lanes and the
+report names them. Only a judge call error or timeout (or total specialist
+failure) exits non-zero.
+
+**No-self-grading: prefer a different model for the judge.** A judge sharing a
+model with a specialist may over-rate that sibling lane (self-favoring bias).
+Cadre does not enforce model-distinctness — the judge is defined by its role and
+instructions, not its model identity — but a cross-model assignment is the
+recommended default and what the example demonstrates.
+
+Specialist lanes follow the same empty-toolset setup and placeholder model
+strings as `code-review` and `doc-review` — swap them to your palette. The
+judge model call also runs with no tools (fail-closed over untrusted specialist
+text).
+
+Shape: **fan-out → judge**. `convergence: judge` plus a `judge:` block
+(provider, model, prompt) are explicit; the `judge:` block is required.
+
+---
+
+## The three fleet shapes
 
 | Shape | `convergence:` | Output |
 |---|---|---|
 | `synthesize` | `synthesize` (default, may be omitted) | One synthesized report on stdout |
 | `collect` | `collect` (must be explicit) | Attributed specialist blocks on stdout |
+| `judge` | `judge` (must be explicit; requires a `judge:` block) | Judge grade + attributed specialist outputs on stdout |
 
 **Synthesize** is the default: the synthesizer model reads all specialist
 outputs and produces a single, attributed consensus report. Best for research
 and summarization tasks where you want one integrated answer.
 
 **Collect** skips the synthesizer: each specialist's raw output is returned
-with its role and model labeled. Best for review tasks (code, document, plan)
-where you want independent perspectives without a model collapsing them into
-one voice.
+with its role and model labeled. Best for review tasks where you want
+independent perspectives without a model collapsing them into one voice — you
+rank the outputs yourself.
+
+**Judge** runs an independent critic after the fan-out that grades each
+specialist's output in place: ranked and calibrated, but each lane preserved
+and attributed. Best for the same review tasks as collect, when you want an
+independent ranking of the findings rather than doing it by hand. `synthesize`
+blends (erasing per-finding signal); `collect` preserves signal but leaves
+ranking to you; `judge` preserves signal and adds the calibrated perspective.
 
 ---
 
