@@ -1899,7 +1899,7 @@ class TestRenderResultJudgeAllSpecialistsFailed(unittest.TestCase):
             judge=None,
             judge_ok=None,
             ok=False,
-            notes=["all specialists failed — no synthesis"],
+            notes=["all specialists failed — no judge grade"],  # mode-specific note the engine now emits
             convergence="judge",
         )
         self.rendered = render_result(self.result)

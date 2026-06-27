@@ -376,8 +376,12 @@ def run_fleet(
 
     successes = result.successes
     if not successes:
-        result.notes.append("all specialists failed — no synthesis")
-        return result  # ok stays False; synthesis never runs, so no synth-started
+        # Name the convergence step that did not run, per mode — a judge/collect fleet
+        # has no synthesis, so the synthesize-only wording would mislead in the rendered
+        # notes (bot review). synthesize keeps its existing "no synthesis" text.
+        step = {"synthesize": "synthesis", "judge": "judge grade"}.get(config.convergence, "output")
+        result.notes.append(f"all specialists failed — no {step}")
+        return result  # ok stays False; the convergence step never runs
 
     if config.convergence == "judge":
         # Judge: one independent critic call over the surviving specialists — synthesizer-shaped

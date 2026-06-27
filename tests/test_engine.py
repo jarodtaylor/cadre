@@ -665,6 +665,10 @@ class TestJudgeConvergence(unittest.TestCase):
         self.assertIsNone(result.judge_ok)
         called_roles = [r for (r, _) in client.calls]
         self.assertNotIn("judge", called_roles)
+        # The all-fail note is judge-specific, not synthesize-only wording (bot review).
+        self.assertTrue(any("all specialists failed" in n for n in result.notes))
+        self.assertFalse(any("no synthesis" in n for n in result.notes))
+        self.assertTrue(any("no judge grade" in n for n in result.notes))
 
     def test_judge_client_receives_explicit_empty_toolset(self):
         """The judge's client.run receives toolset=[] — not None, not () (KTD6/R8)."""

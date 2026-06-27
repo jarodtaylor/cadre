@@ -1475,6 +1475,16 @@ class TestJudgeManifest(unittest.TestCase):
         self.assertEqual(manifest.get("judge_text_raw"), garbled_judge)
         self.assertEqual(manifest["grades"], [])  # nothing extracted
 
+    def test_judge_manifest_empty_success_marked_parse_failed(self):
+        """A 'successful' judge (judge_ok True) that returned empty text must still be
+        flagged parse_failed — otherwise grades=[] + all-ungraded is indistinguishable
+        from a real partial-coverage run (bot review). Defense-in-depth on the contract."""
+        result = _judge_result(judge="", judge_ok=True)
+        manifest = self._load_manifest(result=result)
+        self.assertIs(manifest.get("parse_failed"), True)
+        self.assertEqual(manifest.get("judge_text_raw"), "")
+        self.assertEqual(manifest["grades"], [])
+
     def test_judge_manifest_degrade_judge_ok_false(self):
         """Degrade run manifest has judge_ok=False and empty grades/ungraded.
 

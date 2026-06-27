@@ -488,9 +488,15 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             manifest["ungraded"] = [
                 {"role": role, "model": model} for role, model in pg.ungraded
             ]
-            if not pg.parsed_ok and result.judge:
+            if not pg.parsed_ok:
+                # judge_ok is True here but nothing parsed — flag it even when the judge
+                # text is empty (a successful call that returned ""), so an empty success
+                # is never serialized as a partial-coverage run (grades=[] + all ungraded)
+                # indistinguishable from a real partial (bot review). Defense-in-depth:
+                # model_client maps an empty response to ok=False today, but the manifest
+                # contract must hold regardless.
                 manifest["parse_failed"] = True
-                manifest["judge_text_raw"] = result.judge
+                manifest["judge_text_raw"] = result.judge or ""
         else:
             manifest["grades"] = []
             manifest["ungraded"] = []
