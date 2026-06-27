@@ -35,6 +35,7 @@ from pathlib import Path
 
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult
+from fleet_engine.judge_grade import parse_grades
 from fleet_engine.render import _sanitize
 
 # Default Hermes profile location — recorded in the manifest and shown in the
@@ -369,6 +370,36 @@ def _synthesis_md(result: FleetResult) -> str:
         n = len(result.specialists)
         return f"No specialist outputs — all {n} specialists failed (collect mode)."
 
+    # Judge mode: write raw grade text (KTD8 — UNMUTATED, no _sanitize) + attributed blocks.
+    if result.convergence == "judge":
+        if result.judge_ok is None:
+            # All specialists failed; judge was never invoked.
+            n = len(result.specialists)
+            return f"No specialist outputs — all {n} specialists failed (judge mode)."
+        if result.judge_ok is False:
+            # Judge ran but failed (degrade path).
+            judge_note = next(
+                (note for note in result.notes if "judge failed" in note),
+                "judge failed",
+            )
+            return f"No judge grade — {judge_note}."
+        # judge_ok is True — success.
+        # KTD8: the judge text is written UNMUTATED so the record is accurate;
+        # _sanitize is the render boundary's job, not capture's.
+        # Identity fields on the delimiter (role/provider/model) are still
+        # _sanitize'd to guard the trust surface (same as collect mode on-disk).
+        successes = result.successes
+        blocks = [
+            f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{lane.text or ''}"
+            for lane in successes
+        ]
+        specialist_section = "\n\n".join(blocks)
+        return (
+            "# Judge grade\n\n"
+            + (result.judge or "")
+            + ("\n\n# Specialist outputs\n\n" + specialist_section if specialist_section else "")
+        )
+
     # Synthesize mode: existing logic unchanged.
     if result.synthesis is not None:
         return result.synthesis
@@ -417,17 +448,37 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             "file": filename,
         })
 
-    return {
+    # Guard: cfg.synthesis is None for collect and judge fleets; cfg.judge is None
+    # for synthesize and collect fleets.  Key on convergence (KTD1) — not the
+    # optional block — so a collect/judge fleet with a stray block is still correct.
+    manifest: dict = {
         "fleet": result.fleet,
         "task": result.task,
         "timestamp": datetime.now().isoformat(),
         "models": participating_models,
-        # Null-guard: a collect fleet has no synthesizer (cfg.synthesis may be None).
-        # Key on convergence (KTD1) — not cfg.synthesis, which can be present in a
-        # collect fleet that carries a stray synthesis block.
-        "synthesizer": None if result.convergence == "collect" else {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model},
+        "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model}
+                       if result.convergence == "synthesize" else None,
+        "judge": {"provider": cfg.judge.provider, "model": cfg.judge.model}
+                 if result.convergence == "judge" else None,
         "convergence": result.convergence,
         "synth_ok": result.synth_ok,
+        "judge_ok": result.judge_ok,
         "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),
         "lanes": lanes,
     }
+
+    # Judge mode: add per-lane structured grades and partial-coverage metadata.
+    if result.convergence == "judge":
+        pg = parse_grades(
+            result.judge or "",
+            [(r.role, r.model) for r in result.successes],
+        )
+        manifest["grades"] = pg.entries
+        manifest["ungraded"] = [
+            {"role": role, "model": model} for role, model in pg.ungraded
+        ]
+        if not pg.parsed_ok and result.judge:
+            manifest["parse_failed"] = True
+            manifest["judge_text_raw"] = result.judge
+
+    return manifest

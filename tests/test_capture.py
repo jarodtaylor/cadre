@@ -25,8 +25,10 @@ from fleet_engine.capture import (
     save_run,
 )
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult
+from fleet_engine.engine import FleetResult, run_fleet
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import resolve
+from fleet_engine.render import render_result
 
 
 # ---------------------------------------------------------------------------
@@ -1211,6 +1213,457 @@ class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
         self.assertIsNone(collect_manifest["synthesizer"])
         self.assertIsNotNone(synth_manifest["synthesizer"])
         self.assertIsInstance(synth_manifest["synthesizer"], dict)
+
+
+# ---------------------------------------------------------------------------
+# Judge convergence fixtures (U5)
+# ---------------------------------------------------------------------------
+
+# Canonical two-lane judge text that parse_grades can fully parse.
+_JUDGE_TEXT_FULL = (
+    "=== LANE: web ===\nGrade: A\nRationale: Excellent grounding.\n\n"
+    "=== LANE: social ===\nGrade: B\nRationale: Good social coverage."
+)
+
+
+def _judge_cfg(**overrides):
+    """Minimal valid judge FleetConfig (no synthesis block required)."""
+    data = {
+        "name": "test-judge",
+        "convergence": "judge",
+        "judge": {"provider": "openrouter", "model": "judge/model"},
+        "specialists": [
+            {"role": "web", "provider": "openrouter", "model": "google/gemini-3-flash",
+             "toolset": ["web"], "focus": "find sources"},
+            {"role": "social", "provider": "xai", "model": "grok-4.3",
+             "toolset": ["x_search"], "focus": "scan X"},
+        ],
+    }
+    data.update(overrides)
+    return FleetConfig.from_dict(data)
+
+
+def _judge_result(
+    judge=_JUDGE_TEXT_FULL,
+    judge_ok=True,
+    ok=True,
+    specialists=None,
+    notes=None,
+) -> FleetResult:
+    """Build a judge FleetResult (convergence='judge', synthesis=None, synth_ok=None)."""
+    if specialists is None:
+        specialists = [
+            _lane("web", toolset=["web"]),
+            _lane("social", provider="xai", model="grok-4.3", toolset=["x_search"]),
+        ]
+    return FleetResult(
+        fleet="test-judge",
+        task="Score design tools",
+        specialists=specialists,
+        synthesis=None,
+        ok=ok,
+        synth_ok=None,
+        notes=notes or [],
+        convergence="judge",
+        judge=judge,
+        judge_ok=judge_ok,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Judge: synthesis.md content (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeSynthesisMd(unittest.TestCase):
+    """synthesis.md for a judge run contains the judge grade text + attributed blocks, or degrade note."""
+
+    def _md(self, result: FleetResult) -> str:
+        return _synthesis_md(result)
+
+    # --- Success path ---
+
+    def test_judge_success_md_not_failure_note(self):
+        """NEGATIVE: a successful judge run's synthesis.md must NOT say 'synthesis was not attempted'."""
+        md = self._md(_judge_result())
+        self.assertNotIn("synthesis was not attempted", md)
+        self.assertNotIn("all 2 specialists failed", md)
+
+    def test_judge_success_md_has_judge_grade_header(self):
+        """synthesis.md for a successful judge run starts with '# Judge grade'."""
+        md = self._md(_judge_result())
+        self.assertTrue(md.startswith("# Judge grade"), repr(md[:80]))
+
+    def test_judge_success_md_judge_text_present(self):
+        """The raw judge text appears verbatim in synthesis.md."""
+        md = self._md(_judge_result())
+        # Spot-check canonical sub-strings from the judge text
+        self.assertIn("Grade: A", md)
+        self.assertIn("Grade: B", md)
+        self.assertIn("Excellent grounding", md)
+
+    def test_judge_success_md_specialist_blocks_present(self):
+        """Attributed specialist blocks appear after the judge grade section."""
+        md = self._md(_judge_result())
+        self.assertIn("# Specialist outputs", md)
+        self.assertIn("--- web", md)
+        self.assertIn("--- social", md)
+
+    def test_judge_success_md_specialist_text_preserved(self):
+        """Specialist lane.text (content) is preserved verbatim in the specialist blocks."""
+        lane = _lane("web", toolset=["web"], text="unique-web-content")
+        result = _judge_result(specialists=[lane,
+                                            _lane("social", provider="xai",
+                                                  model="grok-4.3", toolset=["x_search"])])
+        md = self._md(result)
+        self.assertIn("unique-web-content", md)
+
+    # --- Degrade path ---
+
+    def test_judge_degrade_md_degrade_note(self):
+        """Judge degrade (judge_ok False) writes a degrade note, not the all-fail message."""
+        result = _judge_result(judge=None, judge_ok=False, ok=False,
+                               notes=["judge failed: rate limited"])
+        md = self._md(result)
+        self.assertNotIn("synthesis was not attempted", md)
+        self.assertNotIn("all 2 specialists failed", md)
+        self.assertIn("No judge grade", md)
+
+    def test_judge_degrade_md_contains_note_text(self):
+        """The degrade note extracts the 'judge failed' message from result.notes."""
+        result = _judge_result(judge=None, judge_ok=False, ok=False,
+                               notes=["judge failed: rate limited"])
+        md = self._md(result)
+        self.assertIn("judge failed: rate limited", md)
+
+    def test_judge_degrade_md_fallback_when_no_note(self):
+        """When notes contains no 'judge failed' entry, falls back to 'judge failed'."""
+        result = _judge_result(judge=None, judge_ok=False, ok=False, notes=[])
+        md = self._md(result)
+        self.assertIn("judge failed", md)
+
+    # --- All-fail path ---
+
+    def test_judge_all_failed_md_says_judge_mode(self):
+        """All specialists failed (judge_ok None) → note says 'judge mode', not 'collect mode'."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = _judge_result(judge=None, judge_ok=None, ok=False,
+                               specialists=specialists)
+        md = self._md(result)
+        self.assertIn("judge mode", md)
+        self.assertNotIn("collect mode", md)
+        self.assertNotIn("synthesis was not attempted", md)
+
+    def test_judge_all_failed_md_failure_count(self):
+        """All-fail judge synthesis.md names the specialist count."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = _judge_result(judge=None, judge_ok=None, ok=False,
+                               specialists=specialists)
+        md = self._md(result)
+        self.assertIn("2", md)
+
+
+# ---------------------------------------------------------------------------
+# Judge: manifest (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeManifest(unittest.TestCase):
+    """Judge run manifest carries convergence='judge', judge={provider/model}, judge_ok, grades, ungraded."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _load_manifest(self, cfg=None, result=None):
+        cfg = cfg or _judge_cfg()
+        result = result or _judge_result()
+        save_run(cfg, result, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_judge_manifest_convergence_field(self):
+        """manifest.convergence == 'judge' for a judge run."""
+        manifest = self._load_manifest()
+        self.assertEqual(manifest["convergence"], "judge")
+
+    def test_judge_manifest_synthesizer_is_none(self):
+        """manifest.synthesizer is null for a judge run (no synthesis step)."""
+        manifest = self._load_manifest()
+        self.assertIsNone(manifest["synthesizer"])
+
+    def test_judge_manifest_synth_ok_is_none(self):
+        """manifest.synth_ok is null for a judge run (synthesis never ran)."""
+        manifest = self._load_manifest()
+        self.assertIsNone(manifest["synth_ok"])
+
+    def test_judge_manifest_judge_field_present(self):
+        """manifest.judge carries provider and model from cfg.judge."""
+        cfg = _judge_cfg()
+        manifest = self._load_manifest(cfg=cfg)
+        self.assertIsNotNone(manifest["judge"])
+        self.assertEqual(manifest["judge"]["provider"], cfg.judge.provider)
+        self.assertEqual(manifest["judge"]["model"], cfg.judge.model)
+
+    def test_judge_manifest_judge_ok_true(self):
+        """manifest.judge_ok == True on a successful judge run."""
+        manifest = self._load_manifest(result=_judge_result(judge_ok=True))
+        self.assertIs(manifest["judge_ok"], True)
+
+    def test_judge_manifest_grades_list(self):
+        """manifest.grades is a list of per-lane grade dicts."""
+        manifest = self._load_manifest()
+        grades = manifest["grades"]
+        self.assertIsInstance(grades, list)
+        self.assertGreater(len(grades), 0)
+        for g in grades:
+            for key in ("role", "model", "grade", "rationale"):
+                self.assertIn(key, g)
+
+    def test_judge_manifest_ungraded_empty_on_full_coverage(self):
+        """manifest.ungraded is [] when all surviving lanes are graded."""
+        manifest = self._load_manifest()
+        self.assertEqual(manifest["ungraded"], [])
+
+    def test_judge_manifest_grades_role_values(self):
+        """manifest.grades entries carry the correct role values."""
+        manifest = self._load_manifest()
+        graded_roles = {g["role"] for g in manifest["grades"]}
+        self.assertIn("web", graded_roles)
+        self.assertIn("social", graded_roles)
+
+    def test_judge_manifest_partial_coverage_ungraded(self):
+        """Partial coverage: ungraded lists the lane whose role was not graded."""
+        # Only "web" graded — "social" will land in ungraded.
+        partial_judge_text = "=== LANE: web ===\nGrade: A\nRationale: Good."
+        result = _judge_result(judge=partial_judge_text, judge_ok=True)
+        manifest = self._load_manifest(result=result)
+        self.assertEqual(len(manifest["grades"]), 1)
+        self.assertEqual(manifest["grades"][0]["role"], "web")
+        ungraded_roles = {u["role"] for u in manifest["ungraded"]}
+        self.assertIn("social", ungraded_roles)
+
+    def test_judge_manifest_parse_failure_fields(self):
+        """When parse_grades returns parsed_ok=False and judge text exists → parse_failed + judge_text_raw."""
+        garbled_judge = "This is not a parseable judge output at all."
+        result = _judge_result(judge=garbled_judge, judge_ok=True)
+        manifest = self._load_manifest(result=result)
+        self.assertIs(manifest.get("parse_failed"), True)
+        self.assertEqual(manifest.get("judge_text_raw"), garbled_judge)
+        self.assertEqual(manifest["grades"], [])  # nothing extracted
+
+    def test_judge_manifest_degrade_judge_ok_false(self):
+        """Degrade run manifest has judge_ok=False and empty grades/ungraded."""
+        result = _judge_result(judge=None, judge_ok=False, ok=False,
+                               notes=["judge failed: rate limited"])
+        manifest = self._load_manifest(result=result)
+        self.assertIs(manifest["judge_ok"], False)
+        self.assertEqual(manifest["grades"], [])
+
+    def test_judge_manifest_all_failed_judge_ok_none(self):
+        """All-fail run manifest has judge_ok=None."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = _judge_result(judge=None, judge_ok=None, ok=False,
+                               specialists=specialists)
+        manifest = self._load_manifest(result=result)
+        self.assertIsNone(manifest["judge_ok"])
+
+    def test_synthesize_manifest_judge_is_none(self):
+        """A synthesize-mode run's manifest has judge=null and judge_ok=null (no judge step)."""
+        save_run(_cfg(), _result(), self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertIsNone(manifest["judge"])
+        self.assertIsNone(manifest["judge_ok"])
+
+    def test_collect_manifest_judge_is_none(self):
+        """A collect-mode run's manifest has judge=null and judge_ok=null."""
+        save_run(_collect_cfg(), _collect_result(), self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertIsNone(manifest["judge"])
+        self.assertIsNone(manifest["judge_ok"])
+
+
+# ---------------------------------------------------------------------------
+# Judge: save_run does not raise (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeSaveRunNoRaise(unittest.TestCase):
+    """save_run on a judge fleet must not raise (test the 3-way convergence dispatch)."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_save_run_judge_success_no_raise(self):
+        """save_run on a successful judge fleet completes without exception."""
+        save_run(_judge_cfg(), _judge_result(), self.run_dir)
+        self.assertTrue((self.run_dir / "manifest.json").exists())
+
+    def test_save_run_judge_degrade_no_raise(self):
+        """save_run on a degraded judge fleet (judge_ok=False) completes without exception."""
+        result = _judge_result(judge=None, judge_ok=False, ok=False,
+                               notes=["judge failed: rate limited"])
+        save_run(_judge_cfg(), result, self.run_dir)
+        self.assertTrue((self.run_dir / "manifest.json").exists())
+
+    def test_save_run_judge_all_failed_no_raise(self):
+        """save_run on an all-fail judge fleet (judge_ok=None) completes without exception."""
+        specialists = [
+            _lane("web", ok=False, error="down", toolset=["web"]),
+            _lane("social", ok=False, error="down", provider="xai",
+                  model="grok-4.3", toolset=["x_search"]),
+        ]
+        result = _judge_result(judge=None, judge_ok=None, ok=False,
+                               specialists=specialists)
+        save_run(_judge_cfg(), result, self.run_dir)
+        self.assertTrue((self.run_dir / "manifest.json").exists())
+
+
+# ---------------------------------------------------------------------------
+# Judge: grade text is written UNMUTATED on disk (KTD8, U5)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeGradeUnmutated(unittest.TestCase):
+    """The judge grade text must reach disk UNCHANGED — _sanitize is the render boundary's job.
+
+    KTD8: capture writes the judge text verbatim; the terminal renderer (_sanitize) is
+    the only place that strips control characters. A terminal escape in the judge text
+    must survive in synthesis.md — if capture sanitized it, that would corrupt the record.
+    """
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_terminal_escape_survives_in_synthesis_md(self):
+        """A terminal escape in the judge text is preserved verbatim on disk (KTD8)."""
+        # Use a clearly-synthetic ANSI escape as a canary — _sanitize would strip it.
+        escape = "\x1b[31m"
+        judge_text_with_escape = (
+            f"{escape}=== LANE: web ===\nGrade: A\nRationale: {escape}Bold finding."
+        )
+        result = _judge_result(judge=judge_text_with_escape)
+        save_run(_judge_cfg(), result, self.run_dir)
+        on_disk = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
+        self.assertIn(escape, on_disk,
+                      "KTD8 violated: capture _sanitize'd the judge text; it must stay raw")
+
+
+# ---------------------------------------------------------------------------
+# Judge: end-to-end smoke test (U5)
+# ---------------------------------------------------------------------------
+
+
+class _FakeClient:
+    """Minimal duck-typed ModelClient for the smoke test — mirrors test_engine.FakeClient."""
+
+    def __init__(self, behavior=None):
+        self.behavior = behavior or {}
+
+    def run(self, *, role, provider, model, prompt, toolset=()):
+        kind, payload = self.behavior.get(role, ("ok", f"{role}-output"))
+        ok = kind == "ok"
+        return AgentResult(
+            role=role, provider=provider, model=model, ok=ok,
+            text=payload if ok else None, error=None if ok else payload,
+        )
+
+
+class TestJudgeEndToEnd(unittest.TestCase):
+    """Smoke: run_fleet → render_result + save_run — wires engine, capture, and render together.
+
+    Uses a FakeClient that returns canonical-format judge text so parse_grades produces
+    structured entries.  Validates both the terminal render path and the on-disk capture
+    path in one test, catching any edge-wiring break introduced by U2–U5.
+    """
+
+    # Canonical judge text: both lanes graded → parse_grades returns 2 entries, 0 ungraded.
+    _JUDGE_RESPONSE = (
+        "=== LANE: web ===\nGrade: A\nRationale: Strong grounding.\n\n"
+        "=== LANE: social ===\nGrade: B\nRationale: Adequate social coverage."
+    )
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _build_cfg(self):
+        cfg = _judge_cfg()
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction, zero I/O
+        return cfg
+
+    def _run(self):
+        cfg = self._build_cfg()
+        client = _FakeClient({
+            "web": ("ok", "web-specialist-output"),
+            "social": ("ok", "social-specialist-output"),
+            "judge": ("ok", self._JUDGE_RESPONSE),
+        })
+        return cfg, run_fleet(cfg, "smoke task", client)
+
+    def test_e2e_result_judge_ok(self):
+        """run_fleet returns judge_ok=True and the raw judge text."""
+        _, result = self._run()
+        self.assertIs(result.judge_ok, True)
+        self.assertEqual(result.judge, self._JUDGE_RESPONSE)
+        self.assertEqual(result.convergence, "judge")
+
+    def test_e2e_render_result_contains_judge_text(self):
+        """render_result shows the judge text content (no '# Judge grade' header — render is different from capture)."""
+        _, result = self._run()
+        rendered = render_result(result)
+        # render_result leads with sanitized judge text; check content sub-strings
+        self.assertIn("Grade: A", rendered)
+        self.assertIn("Strong grounding", rendered)
+
+    def test_e2e_save_run_no_raise(self):
+        """save_run completes without exception on the live run_fleet result."""
+        cfg, result = self._run()
+        save_run(cfg, result, self.run_dir)
+        self.assertTrue((self.run_dir / "synthesis.md").exists())
+        self.assertTrue((self.run_dir / "manifest.json").exists())
+
+    def test_e2e_synthesis_md_has_judge_grade_header(self):
+        """synthesis.md starts with '# Judge grade' (capture boundary, not render)."""
+        cfg, result = self._run()
+        save_run(cfg, result, self.run_dir)
+        content = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
+        self.assertTrue(content.startswith("# Judge grade"), repr(content[:80]))
+
+    def test_e2e_manifest_grades_fully_structured(self):
+        """manifest.grades has one entry per specialist; ungraded is empty."""
+        cfg, result = self._run()
+        save_run(cfg, result, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(len(manifest["grades"]), 2)
+        self.assertEqual(manifest["ungraded"], [])
+        graded_roles = {g["role"] for g in manifest["grades"]}
+        self.assertEqual(graded_roles, {"web", "social"})
+
+    def test_e2e_manifest_judge_ok_true(self):
+        """manifest.judge_ok == True on the end-to-end run."""
+        cfg, result = self._run()
+        save_run(cfg, result, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertIs(manifest["judge_ok"], True)
 
 
 if __name__ == "__main__":
