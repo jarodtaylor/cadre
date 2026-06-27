@@ -146,6 +146,24 @@ def parse_grades(judge_text: str, surviving_lanes: list[tuple[str, str]]) -> Par
 
     if judge_text:
         matches = list(_LANE_RE.finditer(judge_text))
+        # Count markers per surviving role FIRST. A role whose `=== LANE: <role> ===`
+        # marker appears more than once is AMBIGUOUS and is left ungraded — there is no
+        # safe way to tell the judge's real block from a duplicate the judge quoted out
+        # of untrusted specialist text (e.g. a lane that embedded a fake
+        # `=== LANE: <sibling> === / Grade: F` block which the judge then echoed).
+        # Picking the first would let an injected/quoted block forge a grade for a lane
+        # the judge never graded and report it as graded — a false-FULL, the one
+        # direction KTD9 forbids. Counting first turns that into a false-PARTIAL (the
+        # lane lands in `ungraded`). Honest output names each lane once, so it is
+        # unaffected. The single-injected-marker case (a quoted block with no real
+        # sibling block, count==1) still slips through — its fix is an engine-side
+        # nonce in the marker, deferred to the trust-safety pass (#5).
+        label_counts: dict[str, int] = {}
+        for m in matches:
+            lbl = m.group(1).strip()
+            if lbl in role_to_lane:
+                label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
         for i, m in enumerate(matches):
             label = m.group(1).strip()
             block_start = m.end()
@@ -155,10 +173,10 @@ def parse_grades(judge_text: str, surviving_lanes: list[tuple[str, str]]) -> Par
             # Exact role match (case-sensitive — KTD9).
             if label not in role_to_lane:
                 continue  # drifted or non-survivor label → ignore
+            if label_counts[label] > 1:
+                continue  # ambiguous: marker appears multiple times → leave ungraded
             if label in matched_roles:
-                continue  # already graded by an earlier block — first valid grade wins,
-                          # so a repeated (or injected duplicate) LANE block can't add a
-                          # second entry for one role and pollute the manifest.
+                continue  # defensive (count==1 cannot repeat, but never double-add)
 
             grade, rationale = _parse_block(block_body)
             if not grade:

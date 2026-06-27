@@ -10,6 +10,7 @@ the first — and malformed inputs become errors, never tracebacks.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -199,17 +200,35 @@ class FleetConfig:
                     if role in seen_roles:
                         errors.append(f"duplicate specialist role '{role}'")
                     seen_roles.add(role)
-                    # Role-label hygiene: the role is emitted verbatim as a judge
-                    # per-lane label (`=== LANE: <role> ===`) and matched back on the
-                    # exact stripped string. A role with leading/trailing whitespace,
-                    # control chars, or the `===` delimiter cannot round-trip — the
-                    # judge copies it exactly yet the parser strips/splits it, silently
-                    # losing every grade for an otherwise-valid fleet. Reject loud.
-                    if role != role.strip() or any(ord(c) < 32 for c in role) or "===" in role:
+                    # Role-label hygiene: the role is shown verbatim on the approval
+                    # preview, emitted verbatim as a judge per-lane label
+                    # (`=== LANE: <role> ===`), and matched back on the exact stripped
+                    # string. Its displayed, prompt, and parsed forms must be identical.
+                    # Reject leading/trailing whitespace, `===`, and any character the
+                    # preview sanitizer strips — control/format/bidi/line-separator. The
+                    # category test (`C*` plus Zl/Zp) is a deliberate SUPERSET of
+                    # render._sanitize's strip-set (C0/C1/DEL + the bidi/line-sep chars),
+                    # so any accepted role satisfies `_sanitize(role) == role` without
+                    # importing the renderer (avoids a config→render cycle) and without
+                    # drifting if that set grows. Regular spaces (Zs) are fine mid-role;
+                    # leading/trailing are caught by the strip() check. The cross-role
+                    # "two roles that sanitize to the same display string" collision check
+                    # belongs with the _sanitize→text_safety consolidation (#23).
+                    if (
+                        role != role.strip()
+                        or "===" in role
+                        or any(
+                            unicodedata.category(c)[0] == "C"
+                            or unicodedata.category(c) in ("Zl", "Zp")
+                            for c in role
+                        )
+                    ):
                         errors.append(
                             f"{label}.role {role!r} must not contain leading/trailing "
-                            "whitespace, control characters, or '===' — the role is used "
-                            "verbatim as a per-lane label and must round-trip exactly."
+                            "whitespace, '===', or any control/format/bidi/line-separator "
+                            "character — the role is shown verbatim on the approval "
+                            "surface and matched verbatim as a judge per-lane label, so "
+                            "its displayed, prompt, and parsed forms must be identical."
                         )
 
                 if not raw.get("provider"):

@@ -159,16 +159,21 @@ class TestDuplicateRole(unittest.TestCase):
         self.assertTrue(any("duplicate" in e for e in ctx.exception.errors))
 
     def test_parser_hostile_role_errors(self):
-        """A role with leading/trailing whitespace, a control char, or '===' cannot
-        round-trip as a judge per-lane label, so it would silently lose every grade
-        for an otherwise-valid fleet — config rejects it loudly (cross-model finding)."""
-        for bad in (" security ", "red\nteam", "a===b"):
+        """A role with leading/trailing whitespace, '===', a C0 control, OR a
+        preview-hidden char (DEL/C1, bidi, line separator) cannot round-trip as a
+        judge per-lane label — the approval preview's sanitizer strips it, so the
+        displayed form differs from the prompt/parsed form, silently losing every
+        grade. Config rejects all of them loudly (cross-model + dedicated-Codex finding).
+        \\x7f is DEL (Cc); \\u202e is a right-to-left-override bidi control (Cf) —
+        both invisible/stripped on the approval surface."""
+        for bad in (" security ", "red\nteam", "a===b", "sec\x7frole",
+                    "sec" + chr(0x202E) + "role"):
             with self.assertRaises(ConfigError) as ctx:
                 FleetConfig.from_dict(make_data(specialists=[
                     {"role": bad, "provider": "p", "model": "m", "focus": "x"},
                 ]))
             self.assertTrue(
-                any("round-trip" in e for e in ctx.exception.errors),
+                any("must not contain" in e for e in ctx.exception.errors),
                 f"expected a role-hygiene error for {bad!r}, got {ctx.exception.errors}",
             )
 
