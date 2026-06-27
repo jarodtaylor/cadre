@@ -403,6 +403,7 @@ class TestSeedStarterFleets(unittest.TestCase):
         self.assertTrue((self.cadre_home / "fleets" / "research-swarm.yaml").exists())
         self.assertTrue((self.cadre_home / "fleets" / "code-review.yaml").exists())
         self.assertTrue((self.cadre_home / "fleets" / "doc-review.yaml").exists())
+        self.assertTrue((self.cadre_home / "fleets" / "review-scoring.yaml").exists())
 
     def test_non_utf8_source_warned_and_skipped_no_raise(self):
         """A non-UTF-8 source fleet is warned-and-skipped, never raised (never-raises contract)."""
@@ -453,7 +454,7 @@ class TestSeedStarterFleets(unittest.TestCase):
     def test_seeded_file_permissions_0o600(self):
         """Freshly seeded fleet files are owner-only (0o600)."""
         rv.seed_starter_fleets(self.repo_root, self.cadre_home)
-        for name in ("research-swarm.yaml", "code-review.yaml", "doc-review.yaml"):
+        for name in ("research-swarm.yaml", "code-review.yaml", "doc-review.yaml", "review-scoring.yaml"):
             path = self.cadre_home / "fleets" / name
             mode = stat.S_IMODE(path.stat().st_mode)
             self.assertEqual(mode, 0o600, f"{name}: expected 0o600, got 0o{mode:03o}")

@@ -27,9 +27,13 @@ _REPO = Path(__file__).resolve().parents[1]
 _RESEARCH_SWARM = _REPO / "fleets" / "research-swarm.example.yaml"
 _CODE_REVIEW = _REPO / "fleets" / "code-review.example.yaml"
 _DOC_REVIEW = _REPO / "fleets" / "doc-review.example.yaml"
+_REVIEW_SCORING = _REPO / "fleets" / "review-scoring.example.yaml"
 
 # The five review lenses doc-review ports from ce-doc-review, in fleet order.
 _DOC_REVIEW_ROLES = ["coherence", "feasibility", "scope-guardian", "product", "adversarial"]
+
+# The four code-review lenses review-scoring uses, in fleet order.
+_REVIEW_SCORING_ROLES = ["security", "architecture", "performance", "correctness"]
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +68,14 @@ class TestStarterFleetsLoad(unittest.TestCase):
             self.fail(f"FleetConfig.load raised on doc-review: {exc}")
         self.assertIsInstance(cfg, FleetConfig)
 
+    def test_review_scoring_loads(self):
+        """review-scoring.example.yaml parses without raising ConfigError."""
+        try:
+            cfg = FleetConfig.load(_REVIEW_SCORING)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"FleetConfig.load raised on review-scoring: {exc}")
+        self.assertIsInstance(cfg, FleetConfig)
+
 
 # ---------------------------------------------------------------------------
 # Convergence mode: each fleet parses as the expected shape
@@ -96,6 +108,16 @@ class TestStarterFleetsConvergence(unittest.TestCase):
                          "doc-review must parse as collect convergence")
         self.assertIsNone(cfg.synthesis,
                           "doc-review (collect) must have synthesis=None")
+
+    def test_review_scoring_is_judge(self):
+        """review-scoring uses explicit convergence: judge and has a judge block."""
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        self.assertEqual(cfg.convergence, "judge",
+                         "review-scoring must parse as judge convergence")
+        self.assertIsNotNone(cfg.judge,
+                             "review-scoring (judge) must have a judge block")
+        self.assertIsNone(cfg.synthesis,
+                          "review-scoring (judge) must have synthesis=None")
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +201,23 @@ class TestStarterFleetsLintClean(unittest.TestCase):
             warnings,
             [],
             f"doc-review should have zero focus-lint warnings, got: {warnings}",
+        )
+
+    def test_review_scoring_focus_lint_clean(self):
+        """review-scoring has zero check_focus_grounding warnings.
+
+        All four specialist lanes use toolset: [] (non-retrieval), so the
+        grounding lint checks none of them — the warning list is trivially
+        empty. This guards against a future maintainer adding a retrieval
+        toolset to a reviewer lane without the corresponding sourcing directive.
+        """
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(
+            warnings,
+            [],
+            f"review-scoring should have zero focus-lint warnings, got: {warnings}",
         )
 
 
@@ -315,6 +354,120 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
             1,
             f"doc-review must use more than one model (cross-model spread); "
             f"got all lanes on: {models}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# review-scoring specific invariants: four review lenses, fail-closed toolset,
+# a populated judge block, and a criteria-only judge prompt
+# ---------------------------------------------------------------------------
+
+
+class TestReviewScoringFleetInvariants(unittest.TestCase):
+    """review-scoring carries four review lanes with fail-closed toolset and a judge block."""
+
+    def test_four_lanes_with_expected_roles(self):
+        """review-scoring has exactly four specialist lanes with the expected lens roles."""
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        roles = [s.role for s in cfg.specialists]
+        self.assertEqual(
+            roles,
+            _REVIEW_SCORING_ROLES,
+            f"review-scoring must have the four lenses in order, got: {roles}",
+        )
+
+    def test_every_toolset_is_empty_list_not_none(self):
+        """Each parsed specialist toolset is [] (never None) — fail-closed security control.
+
+        Empty toolset is the load-bearing security control — [] is fail-closed
+        zero tools (not unset). [] vs None matters at the adapter layer (None
+        enables every Hermes toolset; [] is fail-closed zero tools), so assert
+        the explicit empty list here.
+        """
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        for spec in cfg.specialists:
+            self.assertEqual(
+                spec.toolset,
+                [],
+                f"review-scoring lane '{spec.role}' toolset must be [] (got {spec.toolset!r})",
+            )
+            self.assertIsInstance(
+                spec.toolset,
+                list,
+                f"review-scoring lane '{spec.role}' toolset must be a list, not None",
+            )
+
+    def test_yaml_authors_explicit_empty_toolset_per_lane(self):
+        """Every active specialist lane declares the literal ``toolset: []`` in YAML.
+
+        ``config.py`` normalizes ``toolset: null`` / a missing key to ``[]``, so the
+        parsed-config assertion above passes even if a lane were authored with
+        ``toolset: null``. That silently weakens the security posture — ``null``
+        reads to a human as "default." This test reads the raw YAML and requires
+        every non-comment toolset declaration to be exactly ``toolset: []``, and
+        that there are exactly four (one per active specialist lane).
+        """
+        lines = _REVIEW_SCORING.read_text(encoding="utf-8").splitlines()
+        toolset_lines = [
+            stripped
+            for line in lines
+            for stripped in [line.strip()]
+            if stripped.startswith("toolset:")  # comment lines start with '#', so excluded
+        ]
+        self.assertEqual(
+            len(toolset_lines),
+            len(_REVIEW_SCORING_ROLES),
+            f"expected one authored toolset per active lane ({len(_REVIEW_SCORING_ROLES)}), "
+            f"got {len(toolset_lines)}: {toolset_lines}",
+        )
+        for decl in toolset_lines:
+            self.assertEqual(
+                decl,
+                "toolset: []",
+                f"every active review-scoring lane must author the literal 'toolset: []' "
+                f"(fail-closed, not 'toolset: null'); got {decl!r}",
+            )
+
+    def test_judge_block_has_provider_and_model(self):
+        """The judge block carries a non-empty provider and model (R15, KTD1)."""
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        self.assertIsNotNone(cfg.judge, "review-scoring must have a judge block")
+        self.assertTrue(cfg.judge.provider, "judge.provider must be non-empty")
+        self.assertTrue(cfg.judge.model, "judge.model must be non-empty")
+
+    def test_judge_model_distinct_from_specialist_models(self):
+        """The judge uses a different model from all four specialists (cross-model recommendation).
+
+        A same-model judge may over-rate its sibling lane (self-favoring bias).
+        The engine does not enforce distinctness (KTD7), so this test guards the
+        example fleet's cross-model posture as documented.
+        """
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        specialist_models = {s.model for s in cfg.specialists}
+        self.assertNotIn(
+            cfg.judge.model,
+            specialist_models,
+            f"review-scoring judge model '{cfg.judge.model}' must differ from "
+            f"all specialist models {specialist_models} (cross-model recommendation, R16)",
+        )
+
+    def test_judge_prompt_is_criteria_only(self):
+        """The parsed judge prompt must not contain === LANE: format markers.
+
+        The engine's _judge_prompt() automatically appends the canonical
+        per-lane response format (=== LANE: <role> === / Grade: / Rationale:)
+        to whatever config.judge.prompt says. If the prompt also contains a
+        format block, the model receives two conflicting format instructions
+        and the parser may fail. This test reads the PARSED prompt (not raw
+        file text) so YAML comments in the fleet file cannot false-positive.
+        """
+        cfg = FleetConfig.load(_REVIEW_SCORING)
+        prompt = cfg.judge.prompt or ""
+        self.assertNotIn(
+            "=== LANE:",
+            prompt,
+            "judge prompt must not contain '=== LANE:' — the engine appends the "
+            "per-lane format block; two format instructions break the parser",
         )
 
 
