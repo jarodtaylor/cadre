@@ -66,9 +66,14 @@ class ParsedGrades:
 # touched — matching happens on the raw stripped label (case-sensitive, KTD9).
 _LANE_RE = re.compile(r"===\s*LANE:\s*(.+?)\s*===", re.IGNORECASE)
 
-# Matches the first "Grade:" field in a block body (rest of that line only —
-# no DOTALL so .+ stops at the newline).  MULTILINE so ^ anchors per-line.
-_GRADE_RE = re.compile(r"^Grade:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# Matches the first "Grade:" field in a block body (rest of that line only).
+# The value-gap is horizontal whitespace ONLY (`[^\S\n]*`, not `\s*`): a bare
+# "Grade:" with the value on the next line must NOT let `(.+)` reach across the
+# newline and capture the following "Rationale:" line as the grade — that would
+# record a bogus grade AND mark an ungraded lane as graded (a false-full, the one
+# direction KTD9 forbids). An empty grade value now matches nothing, so the lane
+# correctly falls through to `ungraded` (false-partial). MULTILINE anchors ^ per-line.
+_GRADE_RE = re.compile(r"^Grade:[^\S\n]*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 # Matches "Rationale:" and captures everything from there to the end of the
 # block body string.  MULTILINE anchors ^ per-line; DOTALL lets .* cross

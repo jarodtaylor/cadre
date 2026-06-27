@@ -158,6 +158,28 @@ class TestDuplicateRole(unittest.TestCase):
             ]))
         self.assertTrue(any("duplicate" in e for e in ctx.exception.errors))
 
+    def test_parser_hostile_role_errors(self):
+        """A role with leading/trailing whitespace, a control char, or '===' cannot
+        round-trip as a judge per-lane label, so it would silently lose every grade
+        for an otherwise-valid fleet — config rejects it loudly (cross-model finding)."""
+        for bad in (" security ", "red\nteam", "a===b"):
+            with self.assertRaises(ConfigError) as ctx:
+                FleetConfig.from_dict(make_data(specialists=[
+                    {"role": bad, "provider": "p", "model": "m", "focus": "x"},
+                ]))
+            self.assertTrue(
+                any("round-trip" in e for e in ctx.exception.errors),
+                f"expected a role-hygiene error for {bad!r}, got {ctx.exception.errors}",
+            )
+
+    def test_clean_kebab_role_is_valid(self):
+        """A normal role (internal hyphens/dots, no padding) is unaffected by the
+        hygiene check — existing fleets keep parsing."""
+        cfg = FleetConfig.from_dict(make_data(specialists=[
+            {"role": "security-reviewer.v2", "provider": "p", "model": "m", "focus": "x"},
+        ]))
+        self.assertEqual(cfg.specialists[0].role, "security-reviewer.v2")
+
 
 class TestMalformedEntries(unittest.TestCase):
     def test_role_not_a_string_does_not_crash(self):

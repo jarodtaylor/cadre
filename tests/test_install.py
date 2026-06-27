@@ -396,8 +396,8 @@ class TestSeedStarterFleets(unittest.TestCase):
         """All starter fleets are seeded with .example stripped; palette is NOT seeded.
 
         Named "both" historically (two starters shipped first); the allowlist
-        now carries three (research-swarm, code-review, doc-review). Each new
-        starter fleet must be added here.
+        now carries four (research-swarm, code-review, doc-review, review-scoring).
+        Each new starter fleet must be added here.
         """
         rv.seed_starter_fleets(self.repo_root, self.cadre_home)
         self.assertTrue((self.cadre_home / "fleets" / "research-swarm.yaml").exists())

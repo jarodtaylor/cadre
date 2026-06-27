@@ -472,17 +472,27 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
     }
 
     # Judge mode: add per-lane structured grades and partial-coverage metadata.
+    # Parse ONLY on a successful judge (judge_ok True). On judge failure (judge_ok
+    # False) or all-specialists-fail (judge_ok None) no grading was attempted, so
+    # emit empty grades/ungraded — never run parse_grades over an empty/None judge
+    # text, which would list every survivor as ungraded and make a failed-judge run
+    # read identically to a partial-coverage run to a manifest consumer. `ungraded`
+    # non-empty must mean "the judge ran and skipped these lanes", not "no judge ran".
     if result.convergence == "judge":
-        pg = parse_grades(
-            result.judge or "",
-            [(r.role, r.model) for r in result.successes],
-        )
-        manifest["grades"] = pg.entries
-        manifest["ungraded"] = [
-            {"role": role, "model": model} for role, model in pg.ungraded
-        ]
-        if not pg.parsed_ok and result.judge:
-            manifest["parse_failed"] = True
-            manifest["judge_text_raw"] = result.judge
+        if result.judge_ok is True:
+            pg = parse_grades(
+                result.judge or "",
+                [(r.role, r.model) for r in result.successes],
+            )
+            manifest["grades"] = pg.entries
+            manifest["ungraded"] = [
+                {"role": role, "model": model} for role, model in pg.ungraded
+            ]
+            if not pg.parsed_ok and result.judge:
+                manifest["parse_failed"] = True
+                manifest["judge_text_raw"] = result.judge
+        else:
+            manifest["grades"] = []
+            manifest["ungraded"] = []
 
     return manifest

@@ -199,6 +199,18 @@ class FleetConfig:
                     if role in seen_roles:
                         errors.append(f"duplicate specialist role '{role}'")
                     seen_roles.add(role)
+                    # Role-label hygiene: the role is emitted verbatim as a judge
+                    # per-lane label (`=== LANE: <role> ===`) and matched back on the
+                    # exact stripped string. A role with leading/trailing whitespace,
+                    # control chars, or the `===` delimiter cannot round-trip — the
+                    # judge copies it exactly yet the parser strips/splits it, silently
+                    # losing every grade for an otherwise-valid fleet. Reject loud.
+                    if role != role.strip() or any(ord(c) < 32 for c in role) or "===" in role:
+                        errors.append(
+                            f"{label}.role {role!r} must not contain leading/trailing "
+                            "whitespace, control characters, or '===' — the role is used "
+                            "verbatim as a per-lane label and must round-trip exactly."
+                        )
 
                 if not raw.get("provider"):
                     errors.append(f"{label}.provider is required")

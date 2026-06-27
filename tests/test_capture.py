@@ -1476,12 +1476,20 @@ class TestJudgeManifest(unittest.TestCase):
         self.assertEqual(manifest["grades"], [])  # nothing extracted
 
     def test_judge_manifest_degrade_judge_ok_false(self):
-        """Degrade run manifest has judge_ok=False and empty grades/ungraded."""
+        """Degrade run manifest has judge_ok=False and empty grades/ungraded.
+
+        The fixture has two SUCCESSFUL specialists, so a naive parse_grades over the
+        (None) judge text would list both as ungraded — making a judge-FAILURE read
+        like a partial-coverage run. Assert ungraded is empty: no grading was
+        attempted, so the partial-coverage signal must stay silent.
+        """
         result = _judge_result(judge=None, judge_ok=False, ok=False,
                                notes=["judge failed: rate limited"])
         manifest = self._load_manifest(result=result)
         self.assertIs(manifest["judge_ok"], False)
         self.assertEqual(manifest["grades"], [])
+        self.assertEqual(manifest["ungraded"], [])
+        self.assertNotIn("parse_failed", manifest)
 
     def test_judge_manifest_all_failed_judge_ok_none(self):
         """All-fail run manifest has judge_ok=None."""

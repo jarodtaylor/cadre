@@ -369,6 +369,16 @@ class TestDegradePaths(unittest.TestCase):
         ungraded_roles = {r for (r, _) in result.ungraded}
         self.assertIn("role", ungraded_roles)
 
+    def test_empty_grade_value_does_not_capture_rationale_line(self):
+        """A bare 'Grade:' (value on no line) must NOT capture the next 'Rationale:'
+        line as the grade — that would record a bogus grade AND mark an ungraded lane
+        as graded (a false-full). The lane must land in ungraded (false-partial)."""
+        response = "=== LANE: web ===\nGrade:\nRationale: This lane was excellent.\n"
+        result = parse_grades(response, [("web", "m")])
+        self.assertEqual(result.entries, [])
+        self.assertFalse(result.parsed_ok)
+        self.assertEqual({r for (r, _) in result.ungraded}, {"web"})
+
     def test_empty_surviving_lanes_yields_no_entries_no_ungraded(self):
         """No surviving lanes → empty result; the judge block is simply ignored."""
         response = "=== LANE: web ===\nGrade: A\nRationale: Good.\n"
