@@ -1040,6 +1040,134 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+# ---------------------------------------------------------------------------
+# U6 (judge convergence): validate display + run exit-code tests
+# ---------------------------------------------------------------------------
+
+_JUDGE_FLEET_YAML = """\
+name: test-judge
+convergence: judge
+judge:
+  provider: openrouter
+  model: anthropic/claude-opus-4.8
+  prompt: Grade each specialist output.
+specialists:
+  - role: web
+    provider: openrouter
+    model: google/gemini-3-flash
+    toolset: []
+    focus: web research
+  - role: social
+    provider: xai
+    model: grok-4.3
+    toolset: []
+    focus: social scan
+"""
+
+
+class TestValidateJudgeFleet(unittest.TestCase):
+    """validate_command on a judge fleet (synthesis=None) succeeds and shows judge info."""
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(_JUDGE_FLEET_YAML)
+        self.addCleanup(os.unlink, self.path)
+
+    def test_validate_judge_fleet_returns_zero(self):
+        """validate exits 0 for a valid judge fleet."""
+        code, _out = validate_command(self.path)
+        self.assertEqual(code, 0)
+
+    def test_validate_judge_fleet_no_attribute_error(self):
+        """validate_command must not raise AttributeError on cfg.synthesis (None in judge mode)."""
+        try:
+            validate_command(self.path)
+        except AttributeError as exc:
+            self.fail(f"validate_command raised AttributeError on judge fleet: {exc}")
+
+    def test_validate_judge_fleet_shows_convergence_judge(self):
+        """validate output includes the 'convergence: judge' line."""
+        _code, out = validate_command(self.path)
+        self.assertIn("convergence: judge", out)
+
+    def test_validate_judge_fleet_shows_judge_model(self):
+        """validate output includes the judge provider/model string."""
+        _code, out = validate_command(self.path)
+        self.assertIn("judge: openrouter/anthropic/claude-opus-4.8", out)
+
+    def test_validate_judge_fleet_no_synthesis_line(self):
+        """validate output for a judge fleet must not emit a bare 'synthesis:' line."""
+        _code, out = validate_command(self.path)
+        for line in out.splitlines():
+            self.assertFalse(
+                line.strip().startswith("synthesis:"),
+                f"unexpected synthesis line in judge fleet output: {line!r}",
+            )
+
+
+class TestRunCommandJudgeExitCodes(unittest.TestCase):
+    """Judge run exit codes: success→0; partial coverage→0; judge-fail→1; all-fail→1."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        fd, self.fleet_path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(_JUDGE_FLEET_YAML)
+        self.addCleanup(os.unlink, self.fleet_path)
+
+    def test_judge_success_exits_zero(self):
+        """All specialists + judge succeed → exit 0."""
+        client = FakeClient({"judge": ("ok", "GRADE TEXT")})
+        code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
+        self.assertEqual(code, 0)
+
+    def test_judge_failure_exits_nonzero(self):
+        """Judge ran but returned an error → exit 1."""
+        client = FakeClient({"judge": ("fail", "rate limited")})
+        code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
+        self.assertEqual(code, 1)
+
+    def test_all_specialists_failed_exits_nonzero(self):
+        """All specialists failed (judge never ran) → exit 1."""
+        client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
+        code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
+        self.assertEqual(code, 1)
+
+    def test_low_grade_still_exits_zero(self):
+        """Judge call succeeded (ok=True) with a low/critical grade text → exit 0.
+
+        The grade is advisory (R3/KTD5) — grade content never gates the exit code;
+        a low-scored-but-successful judge run is ordinary success.
+        """
+        client = FakeClient({"judge": ("ok", "Grade: F - All lanes failed critically.")})
+        code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
+        self.assertEqual(code, 0)
+
+    def test_partial_coverage_exits_zero_manifest_has_ungraded(self):
+        """Judge succeeded but some lanes were not in the grade text → exit 0;
+        manifest.ungraded carries the ungraded lanes (partial signal in the artifact,
+        not the exit code — KTD5)."""
+        import json
+        # Judge text grades only 'web'; 'social' gets no structured block → ungraded.
+        partial_grade = (
+            "=== LANE: web ===\n"
+            "Grade: A\n"
+            "Rationale: Good work.\n"
+        )
+        run_dir = self.tmp / "partial"
+        client = FakeClient({"judge": ("ok", partial_grade)})
+        code, _out = run_command(self.fleet_path, "task", client=client, run_dir=run_dir)
+        self.assertEqual(code, 0, "partial coverage must still exit 0")
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        ungraded = manifest.get("ungraded", [])
+        self.assertTrue(
+            any(u["role"] == "social" for u in ungraded),
+            f"manifest must list 'social' as ungraded; got: {ungraded}",
+        )
+
+
 class _PromptCapturingClient(FakeClient):
     """FakeClient that also records the prompt each specialist received."""
 

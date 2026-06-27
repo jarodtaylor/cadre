@@ -177,6 +177,16 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
                 f"{palette_hint}"
             )
 
+    # Judge: only for judge-convergence fleets. The judge is a model call, so
+    # palette-validate it like the synthesizer.
+    if config.convergence == "judge" and config.judge is not None:
+        j = config.judge
+        if (j.provider, j.model) not in palette.models:
+            warnings.append(
+                f"judge: ({_sanitize(j.provider)}, {_sanitize(j.model)}) not in palette; "
+                f"{palette_hint}"
+            )
+
     return warnings
 
 

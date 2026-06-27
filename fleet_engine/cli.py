@@ -47,6 +47,9 @@ def validate_command(path: str) -> tuple[int, str]:
         )
     if cfg.convergence == "collect":
         lines.append("  convergence: collect (no synthesizer)")
+    elif cfg.convergence == "judge":
+        lines.append("  convergence: judge")
+        lines.append(f"  judge: {_sanitize(cfg.judge.provider)}/{_sanitize(cfg.judge.model)}")
     else:
         lines.append(f"  synthesis: {_sanitize(cfg.synthesis.provider)}/{_sanitize(cfg.synthesis.model)}")
     # Palette + focus validation — warn-never-block (KTD5). A missing or

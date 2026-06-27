@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.config import FleetConfig, SpecialistSpec, SynthesisSpec
+from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from fleet_engine.personas import resolve
 from fleet_engine.preview_lint import (
     DEFAULT_PALETTE_PATH,
@@ -112,6 +112,36 @@ def _make_config(
         convergence=convergence,
     )
     resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+    return cfg
+
+
+def _make_judge_config(
+    *,
+    specialist_provider="xai",
+    specialist_model="grok-4.3",
+    specialist_toolset=None,
+    judge_provider="openrouter",
+    judge_model="anthropic/claude-opus-4.8",
+) -> FleetConfig:
+    """Build a minimal judge FleetConfig for palette-lint tests (synthesis=None)."""
+    specialists = [
+        SpecialistSpec(
+            role="web",
+            provider=specialist_provider,
+            model=specialist_model,
+            focus="analysis",
+            toolset=specialist_toolset if specialist_toolset is not None else [],
+        )
+    ]
+    judge = JudgeSpec(provider=judge_provider, model=judge_model)
+    cfg = FleetConfig(
+        name="test-judge-fleet",
+        specialists=specialists,
+        synthesis=None,
+        judge=judge,
+        convergence="judge",
+    )
+    resolve(cfg, "/unused")  # sets effective_instruction; zero I/O
     return cfg
 
 
@@ -1131,6 +1161,74 @@ class TestRenderPreviewWarningsWithFocusLint(unittest.TestCase):
         # Focus warning fires.
         self.assertIn("⚠", result)
         self.assertIn("skipped", result.lower())
+
+
+# ---------------------------------------------------------------------------
+# Tests: check_palette — judge convergence (U6)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPaletteJudge(unittest.TestCase):
+    """check_palette palette-validates the judge model for judge-convergence fleets."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.palette = Palette(
+            models={("xai", "grok-4.3"), ("openrouter", "anthropic/claude-opus-4.8")},
+            toolsets={"web", "x_search"},
+        )
+
+    def test_off_palette_judge_warns(self):
+        """Judge fleet with off-palette judge model → a warning mentioning 'judge'."""
+        cfg = _make_judge_config(
+            specialist_provider="xai", specialist_model="grok-4.3",
+            judge_provider="unknown-prov", judge_model="unknown-model",
+        )
+        warnings = check_palette(cfg, self.palette)
+        self.assertTrue(
+            any("judge" in w for w in warnings),
+            f"expected judge warning, got: {warnings}",
+        )
+
+    def test_off_palette_judge_warning_includes_values(self):
+        """The judge warning includes the off-palette provider and model."""
+        cfg = _make_judge_config(
+            judge_provider="unknown-prov", judge_model="unknown-model",
+        )
+        warnings = check_palette(cfg, self.palette)
+        self.assertTrue(
+            any("unknown-prov" in w and "unknown-model" in w for w in warnings),
+            f"expected provider/model in warning, got: {warnings}",
+        )
+
+    def test_on_palette_judge_no_warning(self):
+        """Judge fleet with on-palette judge model → no judge warning."""
+        cfg = _make_judge_config(
+            specialist_provider="xai", specialist_model="grok-4.3",
+            judge_provider="openrouter", judge_model="anthropic/claude-opus-4.8",
+        )
+        warnings = check_palette(cfg, self.palette)
+        judge_warnings = [w for w in warnings if "judge" in w]
+        self.assertEqual(judge_warnings, [])
+
+    def test_judge_fleet_synthesis_none_no_crash(self):
+        """check_palette must not AttributeError when synthesis=None (judge fleet)."""
+        cfg = _make_judge_config()
+        self.assertIsNone(cfg.synthesis)
+        try:
+            check_palette(cfg, self.palette)
+        except AttributeError as exc:
+            self.fail(f"check_palette raised AttributeError on judge fleet: {exc}")
+
+    def test_render_preview_warnings_judge_fleet_no_crash(self):
+        """render_preview_warnings with judge fleet (synthesis=None) must not crash."""
+        cfg = _make_judge_config()
+        missing = self.tmp / "no_palette.yaml"
+        try:
+            render_preview_warnings(cfg, palette_path=missing)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"render_preview_warnings raised on judge fleet: {exc}")
 
 
 # ---------------------------------------------------------------------------
