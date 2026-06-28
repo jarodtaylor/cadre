@@ -26,12 +26,13 @@ import unittest
 from pathlib import Path
 
 from fleet_engine.capture import save_run
-from fleet_engine.engine import run_fleet
+from fleet_engine.engine import FleetStatus, run_fleet
 from fleet_engine.render import render_result
 from tests.test_engine import (
     FakeClient,
     _collect_config,
     _config,
+    _derive_status,
     _judge_config,
 )
 
@@ -422,6 +423,54 @@ class TestJudgeFailed(unittest.TestCase):
 
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
+
+
+# ---------------------------------------------------------------------------
+# Coupling guard — engine status correctness AND _derive_status shim fidelity
+# ---------------------------------------------------------------------------
+
+class TestStatusAndShimFidelity(unittest.TestCase):
+    """The real engine sets the expected status AND the test-only `_derive_status`
+    shim reproduces it from the engine's own (ok, synth_ok, judge_ok, convergence).
+
+    The shim (used by the render/capture test factories) duplicates the engine's
+    status-assignment logic. This binds the two with the real `run_fleet` as oracle:
+    a future topology (#17/#18) that updates the engine's status assignment but not
+    the shim fails HERE — loudly — instead of silently letting the factory tests
+    freeze a status the engine never produces (cross-module coupling-test pattern,
+    docs/solutions/design-patterns/coupling-test-for-cross-module-format-contracts.md).
+    Also pins `result.status` directly for DEGRADED/FAILED, which the manifest/header
+    assertions above cannot distinguish via `result.ok` alone.
+    """
+
+    _ALL_FAIL_3 = {"web": ("fail", "e"), "social": ("fail", "e"), "analysis": ("fail", "e")}
+    _ALL_FAIL_2 = {"web": ("fail", "e"), "social": ("fail", "e")}
+
+    def _cases(self):
+        return [
+            ("synthesize SUCCESS", _config, {"synthesizer": ("ok", "S")}, FleetStatus.SUCCESS),
+            ("synthesize DEGRADED", _config, {"synthesizer": ("fail", "e")}, FleetStatus.DEGRADED),
+            ("synthesize FAILED", _config, self._ALL_FAIL_3, FleetStatus.FAILED),
+            ("collect SUCCESS", _collect_config, {}, FleetStatus.SUCCESS),
+            ("collect FAILED", _collect_config, self._ALL_FAIL_3, FleetStatus.FAILED),
+            ("judge SUCCESS", _judge_config, {"judge": ("ok", "G")}, FleetStatus.SUCCESS),
+            ("judge DEGRADED", _judge_config, {"judge": ("fail", "e")}, FleetStatus.DEGRADED),
+            ("judge FAILED", _judge_config, self._ALL_FAIL_2, FleetStatus.FAILED),
+        ]
+
+    def test_engine_status_and_shim_agree(self):
+        for name, cfg_factory, behavior, expected in self._cases():
+            with self.subTest(case=name):
+                result = run_fleet(cfg_factory(), "fidelity task", FakeClient(behavior))
+                # (a) the engine sets the expected status at this return point
+                self.assertIs(result.status, expected)
+                # (b) the shim reproduces it from the engine's own fields — drift guard
+                self.assertIs(
+                    _derive_status(
+                        result.ok, result.synth_ok, result.judge_ok, result.convergence
+                    ),
+                    result.status,
+                )
 
 
 if __name__ == "__main__":

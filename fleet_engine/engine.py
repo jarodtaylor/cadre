@@ -441,7 +441,7 @@ def run_fleet(
 
     if config.convergence == "collect":
         # Collect: return raw specialist lanes; synthesizer is never invoked.
-        # ok = True here (past the all-fail guard, so >=1 specialist succeeded).
+        # status = SUCCESS here (past the all-fail guard, so >=1 specialist succeeded).
         # synthesis stays None, synth_ok stays None — read result.convergence to
         # distinguish from an all-failed synthesize run (KTD2).
         result.status = FleetStatus.SUCCESS  # guaranteed past the all-fail guard above (>=1 specialist succeeded)

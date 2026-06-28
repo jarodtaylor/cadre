@@ -91,7 +91,8 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   re-derive it** from `ok`, `synth_ok is None`, or `synthesis is None`. Derived reads:
   `ok` (`status is SUCCESS`) is the exit-code signal; `has_usable_output()` (`status is
   not FAILED`) covers SUCCESS and DEGRADED. `synth_ok`/`judge_ok` remain as mode-specific
-  detail; `manifest.json` also carries a top-level `"status"` string alongside them.
+  detail; `manifest.json` also carries a top-level `"status"` string (serialized as
+  `success`/`degraded`/`failed`) alongside them.
   Every consumer — process exit code, `render` header, `capture` manifest, `cli` — still
   reads `result.convergence` to understand what the result *contains* (synthesize →
   `synthesis` populated; collect → attributed specialist blocks, no synthesis; judge →
