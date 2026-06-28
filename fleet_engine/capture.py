@@ -34,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult
+from fleet_engine.engine import FleetResult, FleetStatus
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.render import _sanitize
 
@@ -372,11 +372,11 @@ def _synthesis_md(result: FleetResult) -> str:
 
     # Judge mode: write raw grade text (KTD8 — UNMUTATED, no _sanitize) + attributed blocks.
     if result.convergence == "judge":
-        if result.judge_ok is None:
+        if result.status is FleetStatus.FAILED:
             # All specialists failed; judge was never invoked.
             n = len(result.specialists)
             return f"No specialist outputs — all {n} specialists failed (judge mode)."
-        if result.judge_ok is False:
+        if result.status is FleetStatus.DEGRADED:
             # Judge ran but failed (degrade path). Match the note by its exact
             # prefix — the engine emits "judge failed: <error>". A loose substring
             # ("judge failed" in note) could match a specialist failure note whose
@@ -387,7 +387,7 @@ def _synthesis_md(result: FleetResult) -> str:
                 "judge failed",
             )
             return f"No judge grade — {judge_note}."
-        # judge_ok is True — success.
+        # status is SUCCESS — judge ran and succeeded.
         # KTD8: the judge text is written UNMUTATED so the record is accurate;
         # _sanitize is the render boundary's job, not capture's.
         # Identity fields on the delimiter (role/provider/model) are still
@@ -409,14 +409,14 @@ def _synthesis_md(result: FleetResult) -> str:
         return result.synthesis
 
     # synthesis is None in two cases:
-    #   synth_ok is None  → all specialists failed, synthesis never attempted
-    #   synth_ok is False → synthesizer ran and failed
-    if result.synth_ok is None:
+    #   status is FAILED  → all specialists failed, synthesis never attempted
+    #   status is DEGRADED → synthesizer ran and failed
+    if result.status is FleetStatus.FAILED:
         n_failed = len(result.failures)
         n_total = len(result.specialists)
         return f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted."
 
-    # synth_ok is False
+    # status is DEGRADED — synthesizer ran and failed.
     # Pull the synthesizer-failed note from result.notes if present.
     synth_note = next(
         (n for n in result.notes if "synthesizer failed" in n),
@@ -465,6 +465,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "judge": {"provider": cfg.judge.provider, "model": cfg.judge.model}
                  if result.convergence == "judge" else None,
         "convergence": result.convergence,
+        "status": result.status.value,
         "synth_ok": result.synth_ok,
         "judge_ok": result.judge_ok,
         "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),

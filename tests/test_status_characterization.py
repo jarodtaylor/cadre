@@ -105,6 +105,10 @@ class TestSynthesizeSuccess(unittest.TestCase):
         for lane in self.manifest["lanes"]:
             self.assertTrue(lane["ok"])
 
+    def test_manifest_status_success(self):
+        self.assertEqual(self.manifest["status"], "success")
+        self.assertIsInstance(self.manifest["status"], str)
+
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
 
@@ -147,6 +151,9 @@ class TestSynthesizeDegraded(unittest.TestCase):
         # Specialists all succeeded; degradation was in the synthesizer only.
         for lane in self.manifest["lanes"]:
             self.assertTrue(lane["ok"])
+
+    def test_manifest_status_degraded(self):
+        self.assertEqual(self.manifest["status"], "degraded")
 
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
@@ -191,6 +198,9 @@ class TestSynthesizeFailed(unittest.TestCase):
         for lane in self.manifest["lanes"]:
             self.assertFalse(lane["ok"])
 
+    def test_manifest_status_failed(self):
+        self.assertEqual(self.manifest["status"], "failed")
+
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
 
@@ -234,6 +244,9 @@ class TestCollectSuccess(unittest.TestCase):
         for lane in self.manifest["lanes"]:
             self.assertTrue(lane["ok"])
 
+    def test_manifest_status_success(self):
+        self.assertEqual(self.manifest["status"], "success")
+
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
 
@@ -270,6 +283,9 @@ class TestCollectFailed(unittest.TestCase):
         self.assertEqual(len(self.manifest["lanes"]), 3)
         for lane in self.manifest["lanes"]:
             self.assertFalse(lane["ok"])
+
+    def test_manifest_status_failed(self):
+        self.assertEqual(self.manifest["status"], "failed")
 
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
@@ -315,6 +331,9 @@ class TestJudgeSuccess(unittest.TestCase):
         for lane in self.manifest["lanes"]:
             self.assertTrue(lane["ok"])
 
+    def test_manifest_status_success(self):
+        self.assertEqual(self.manifest["status"], "success")
+
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
 
@@ -356,6 +375,9 @@ class TestJudgeDegraded(unittest.TestCase):
         for lane in self.manifest["lanes"]:
             self.assertTrue(lane["ok"])
 
+    def test_manifest_status_degraded(self):
+        self.assertEqual(self.manifest["status"], "degraded")
+
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
 
@@ -394,6 +416,9 @@ class TestJudgeFailed(unittest.TestCase):
         self.assertEqual(len(self.manifest["lanes"]), 2)
         for lane in self.manifest["lanes"]:
             self.assertFalse(lane["ok"])
+
+    def test_manifest_status_failed(self):
+        self.assertEqual(self.manifest["status"], "failed")
 
     def test_manifest_timing(self):
         _assert_timing(self, self.manifest)
