@@ -25,7 +25,8 @@ from fleet_engine.capture import (
     save_run,
 )
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, run_fleet
+from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
+from tests.test_engine import _derive_status
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
 from fleet_engine.render import render_result
@@ -88,9 +89,9 @@ def _result(task="What is the best AI design tool?",
         task=task,
         specialists=specialists,
         synthesis=synthesis,
-        ok=ok,
         synth_ok=synth_ok,
         notes=notes or [],
+        status=_derive_status(ok, synth_ok, None, "synthesize"),
     )
 
 
@@ -1034,10 +1035,10 @@ def _collect_result(specialists=None, ok=True, text_suffix="") -> FleetResult:
         task="Find design tools",
         specialists=specialists,
         synthesis=None,
-        ok=ok,
         synth_ok=None,
         notes=[],
         convergence="collect",
+        status=_derive_status(ok, None, None, "collect"),
     )
 
 
@@ -1113,7 +1114,8 @@ class TestCollectSynthesisMd(unittest.TestCase):
         ]
         result = FleetResult(
             fleet="test-collect", task="t", specialists=specialists,
-            synthesis=None, ok=False, synth_ok=None, convergence="collect",
+            synthesis=None, synth_ok=None, convergence="collect",
+            status=FleetStatus.FAILED,
         )
         content = self._synthesis_content(result)
         self.assertNotIn("synthesis was not attempted", content)
@@ -1128,7 +1130,8 @@ class TestCollectSynthesisMd(unittest.TestCase):
         ]
         result = FleetResult(
             fleet="test-collect", task="t", specialists=specialists,
-            synthesis=None, ok=False, synth_ok=None, convergence="collect",
+            synthesis=None, synth_ok=None, convergence="collect",
+            status=FleetStatus.FAILED,
         )
         content = self._synthesis_content(result)
         self.assertIn("2", content)
@@ -1197,8 +1200,9 @@ class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
         ]
         synth_result = FleetResult(
             fleet="test-swarm", task="Find design tools", specialists=specialists,
-            synthesis=None, ok=False, synth_ok=None,
+            synthesis=None, synth_ok=None,
             convergence="synthesize",
+            status=FleetStatus.FAILED,
         )
         save_run(_cfg(), synth_result, self.synthesize_dir)
         with open(self.synthesize_dir / "manifest.json", encoding="utf-8") as f:
@@ -1261,10 +1265,10 @@ def _judge_result(
         task="Score design tools",
         specialists=specialists,
         synthesis=None,
-        ok=ok,
         synth_ok=None,
         notes=notes or [],
         convergence="judge",
+        status=_derive_status(ok, None, judge_ok, "judge"),
         judge=judge,
         judge_ok=judge_ok,
     )

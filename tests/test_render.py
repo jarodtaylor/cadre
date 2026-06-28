@@ -17,6 +17,7 @@ from pathlib import Path
 
 from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from fleet_engine.engine import FleetResult
+from tests.test_engine import _derive_status
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
 from fleet_engine.progress import (
@@ -93,7 +94,7 @@ def make_result(
         synthesis=synthesis,
         synth_ok=synth_ok,
         notes=notes or [],
-        ok=ok,
+        status=_derive_status(ok, synth_ok, judge_ok, convergence),
         convergence=convergence,
         judge=judge,
         judge_ok=judge_ok,
