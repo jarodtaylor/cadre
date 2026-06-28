@@ -1989,5 +1989,82 @@ class TestJudgeProgressBreadcrumbs(unittest.TestCase):
         self.assertEqual(lines[0], "[cadre] validated fleet 'collect-fleet' — 2 specialists, 0 synthesizer(s)")
 
 
+# ---------------------------------------------------------------------------
+# Absence tests — DEGRADED must not render FAILED-only framing (U3 / KTD5)
+# ---------------------------------------------------------------------------
+
+
+class TestDegradedSynthesizeAbsence(unittest.TestCase):
+    """A DEGRADED synthesize result (synthesizer ran + failed, specialists survived)
+    must render 'partial result (no synthesis)' but must NOT emit the FAILED-only
+    'synthesis was not attempted' preamble.
+
+    This tests ABSENCE: the status-repoint gate is that DEGRADED (status is not
+    FAILED) no longer accidentally passes the old `synth_ok is None` guard.
+    """
+
+    def setUp(self):
+        lanes = [make_lane(role="web", text="web output")]
+        self.result = make_result(
+            specialists=lanes,
+            synthesis=None,
+            synth_ok=False,
+            ok=False,
+            convergence="synthesize",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_header_is_partial_result(self):
+        """DEGRADED synthesize result uses the 'partial result (no synthesis)' header."""
+        self.assertIn("partial result (no synthesis)", self.rendered)
+
+    def test_no_synthesis_was_not_attempted_preamble(self):
+        """The 'synthesis was not attempted' preamble is FAILED-only and must NOT
+        appear for a DEGRADED result where the synthesizer ran but failed."""
+        self.assertNotIn("synthesis was not attempted", self.rendered)
+
+    def test_surviving_specialist_output_visible(self):
+        """The surviving specialist's output is still surfaced on DEGRADED."""
+        self.assertIn("web output", self.rendered)
+
+
+class TestDegradedJudgeAbsence(unittest.TestCase):
+    """A DEGRADED judge result (judge ran + failed, specialists survived)
+    must render 'judge result — judge failed' but must NOT emit the FAILED-only
+    'all specialists failed' header.
+
+    This tests ABSENCE: the status-repoint gate is that DEGRADED maps to the
+    middle branch (judge failed), not the final branch (all specialists failed).
+    """
+
+    def setUp(self):
+        lanes = [
+            make_lane(role="web", text="web output"),
+            make_lane(role="analysis", text="analysis output"),
+        ]
+        self.result = make_result(
+            specialists=lanes,
+            judge=None,
+            judge_ok=False,
+            ok=False,
+            convergence="judge",
+        )
+        self.rendered = render_result(self.result)
+
+    def test_header_is_judge_failed(self):
+        """DEGRADED judge result uses the 'judge result — judge failed' header."""
+        self.assertIn("judge result — judge failed", self.rendered)
+
+    def test_no_all_specialists_failed_header(self):
+        """'all specialists failed' is FAILED-only and must NOT appear for a DEGRADED
+        judge result where specialists survived but the judge failed."""
+        self.assertNotIn("all specialists failed", self.rendered)
+
+    def test_surviving_specialist_outputs_visible(self):
+        """The surviving specialists' outputs are still surfaced on DEGRADED judge."""
+        self.assertIn("web output", self.rendered)
+        self.assertIn("analysis output", self.rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
