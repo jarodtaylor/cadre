@@ -41,6 +41,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable
 
 from fleet_engine.config import FleetConfig, SpecialistSpec
@@ -68,6 +69,19 @@ from fleet_engine.progress import (
 DEFAULT_CALL_TIMEOUT = 600.0
 
 
+class FleetStatus(str, Enum):
+    """Explicit tri-state for a completed fleet run.
+
+    SUCCESS  — the convergence step produced output (synthesis, collect ≥1, judge ok).
+    DEGRADED — specialists survived but the convergence step failed; partial result.
+    FAILED   — all specialists failed; convergence never ran.
+    """
+
+    SUCCESS = "success"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
 @dataclass
 class FleetResult:
     fleet: str
@@ -75,11 +89,29 @@ class FleetResult:
     specialists: list[AgentResult]                   # every specialist, success or failure (provenance)
     synthesis: str | None = None                     # synthesized text, or None if synthesis didn't happen
     notes: list[str] = field(default_factory=list)   # failure / degradation notes
-    ok: bool = False                                 # True when synthesis produced (synthesize), >=1 specialist succeeded (collect), or judge succeeded (judge)
     synth_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
     convergence: str = "synthesize"                  # "synthesize", "collect", or "judge" — always set; consumers must read this to disambiguate
+    status: FleetStatus = FleetStatus.FAILED         # explicit tri-state; set at every run_fleet return point
     judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
+
+    def __post_init__(self) -> None:
+        # Normalize status to the FleetStatus enum so the identity checks (`is`)
+        # in ok / has_usable_output() / render / capture stay correct even when
+        # status arrives as a raw string — e.g. the manifest's serialized
+        # "success"/"degraded"/"failed" form round-tripped back into a result.
+        # Idempotent on enum members; raises ValueError on an unknown value
+        # (fail-fast, matching the config normalize-at-the-boundary posture).
+        self.status = FleetStatus(self.status)
+
+    @property
+    def ok(self) -> bool:
+        """True iff the run succeeded (backward-compat alias for status is SUCCESS)."""
+        return self.status is FleetStatus.SUCCESS
+
+    def has_usable_output(self) -> bool:
+        """True when the result has something useful: SUCCESS or DEGRADED (not all-failed)."""
+        return self.status is not FleetStatus.FAILED
 
     @property
     def successes(self) -> list[AgentResult]:
@@ -381,7 +413,8 @@ def run_fleet(
         # notes (bot review). synthesize keeps its existing "no synthesis" text.
         step = {"synthesize": "synthesis", "judge": "judge grade"}.get(config.convergence, "output")
         result.notes.append(f"all specialists failed — no {step}")
-        return result  # ok stays False; the convergence step never runs
+        result.status = FleetStatus.FAILED
+        return result
 
     if config.convergence == "judge":
         # Judge: one independent critic call over the surviving specialists — synthesizer-shaped
@@ -407,19 +440,20 @@ def run_fleet(
         result.judge_ok = judge_outcome.ok
         if judge_outcome.ok:
             result.judge = judge_outcome.text
-            result.ok = True
+            result.status = FleetStatus.SUCCESS
         else:
             # Judge failed (error or timeout): degrade to attributed outputs + note (R10/KTD5).
             result.notes.append(f"judge failed: {judge_outcome.error}")
+            result.status = FleetStatus.DEGRADED
         progress(JudgeDone(outcome=outcome_label(judge_outcome), elapsed_s=judge_outcome.elapsed_s or 0.0))
         return result
 
     if config.convergence == "collect":
         # Collect: return raw specialist lanes; synthesizer is never invoked.
-        # ok = True here (past the all-fail guard, so >=1 specialist succeeded).
+        # status = SUCCESS here (past the all-fail guard, so >=1 specialist succeeded).
         # synthesis stays None, synth_ok stays None — read result.convergence to
         # distinguish from an all-failed synthesize run (KTD2).
-        result.ok = True  # guaranteed past the all-fail guard above (>=1 specialist succeeded)
+        result.status = FleetStatus.SUCCESS  # guaranteed past the all-fail guard above (>=1 specialist succeeded)
         return result
 
     if len(successes) == 1:
@@ -448,12 +482,13 @@ def run_fleet(
     result.synth_ok = synth.ok
     if synth.ok:
         result.synthesis = synth.text
-        result.ok = True
+        result.status = FleetStatus.SUCCESS
     else:
         # Synthesizer failed (error or timeout): return the labeled specialist
         # outputs plus a note, no synthesized text. Still a usable partial result
         # that honors R9.
         result.notes.append(f"synthesizer failed: {synth.error}")
+        result.status = FleetStatus.DEGRADED
 
     progress(SynthDone(outcome=outcome_label(synth), elapsed_s=synth.elapsed_s or 0.0))
 

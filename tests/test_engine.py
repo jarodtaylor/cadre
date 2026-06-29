@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import run_fleet
+from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
 from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone
@@ -54,6 +54,22 @@ class FakeClient:
 
     def prompt_for(self, role):
         return next(p for (r, p) in self.calls if r == role)
+
+
+def _derive_status(ok, synth_ok, judge_ok, convergence):
+    """Shim: derive FleetStatus from the legacy ok/synth_ok/judge_ok kwargs used by test factories.
+
+    Keeps factory external signatures unchanged while passing status= to FleetResult.
+    Used by make_result (test_render.py), _result/_collect_result/_judge_result (test_capture.py),
+    and directly here. Must stay in sync with the engine's status-assignment logic.
+    """
+    if ok:
+        return FleetStatus.SUCCESS
+    if convergence == "synthesize" and synth_ok is False:
+        return FleetStatus.DEGRADED
+    if convergence == "judge" and judge_ok is False:
+        return FleetStatus.DEGRADED
+    return FleetStatus.FAILED
 
 
 class TestHappyPath(unittest.TestCase):
@@ -725,6 +741,126 @@ class TestJudgeConvergence(unittest.TestCase):
             progress=lambda e: events.append(e))
         started = [e for e in events if isinstance(e, JudgeStarted)]
         self.assertEqual(started[0].survivors, 1)
+
+
+class TestFleetStatus(unittest.TestCase):
+    """status field, ok property, and has_usable_output() across the eight convergence/outcome states (synthesize 3, collect 2, judge 3)."""
+
+    # ------------------------------------------------------------------
+    # ok ≡ (status is SUCCESS) — per-mode return points
+    # ------------------------------------------------------------------
+
+    def test_synthesize_ok_is_success(self):
+        result = run_fleet(_config(), "t", FakeClient({"synthesizer": ("ok", "FINAL")}))
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.ok)
+
+    def test_synthesize_synth_fail_is_degraded(self):
+        result = run_fleet(_config(), "t", FakeClient({"synthesizer": ("fail", "err")}))
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertFalse(result.ok)
+
+    def test_synthesize_all_fail_is_failed(self):
+        # All three specialists fail → no synthesis attempted → FAILED
+        result = run_fleet(
+            _config(), "t",
+            FakeClient({"web": ("fail", "e"), "social": ("fail", "e"), "analysis": ("fail", "e")}),
+        )
+        self.assertIs(result.status, FleetStatus.FAILED)
+        self.assertFalse(result.ok)
+
+    def test_collect_ok_is_success(self):
+        result = run_fleet(_collect_config(), "t", FakeClient())
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.ok)
+
+    def test_collect_all_fail_is_failed(self):
+        result = run_fleet(
+            _collect_config(), "t",
+            FakeClient({"web": ("fail", "e"), "social": ("fail", "e"), "analysis": ("fail", "e")}),
+        )
+        self.assertIs(result.status, FleetStatus.FAILED)
+        self.assertFalse(result.ok)
+
+    def test_judge_ok_is_success(self):
+        result = run_fleet(_judge_config(), "t", FakeClient({"judge": ("ok", "GRADES")}))
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.ok)
+
+    def test_judge_fail_is_degraded(self):
+        result = run_fleet(_judge_config(), "t", FakeClient({"judge": ("fail", "err")}))
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertFalse(result.ok)
+
+    def test_judge_all_fail_is_failed(self):
+        result = run_fleet(
+            _judge_config(), "t",
+            FakeClient({"web": ("fail", "e"), "social": ("fail", "e")}),
+        )
+        self.assertIs(result.status, FleetStatus.FAILED)
+        self.assertFalse(result.ok)
+
+    # ------------------------------------------------------------------
+    # collect never produces DEGRADED (no convergence step can fail)
+    # ------------------------------------------------------------------
+
+    def test_collect_status_never_degraded(self):
+        for behavior in ({}, {"web": ("fail", "e")}):
+            with self.subTest(behavior=behavior):
+                result = run_fleet(_collect_config(), "t", FakeClient(behavior))
+                self.assertIsNot(result.status, FleetStatus.DEGRADED)
+
+    # ------------------------------------------------------------------
+    # has_usable_output(): True for SUCCESS and DEGRADED, False for FAILED
+    # ------------------------------------------------------------------
+
+    def test_has_usable_output_success(self):
+        result = run_fleet(_config(), "t", FakeClient({"synthesizer": ("ok", "FINAL")}))
+        self.assertTrue(result.has_usable_output())
+
+    def test_has_usable_output_degraded(self):
+        result = run_fleet(_config(), "t", FakeClient({"synthesizer": ("fail", "err")}))
+        self.assertTrue(result.has_usable_output())
+
+    def test_has_usable_output_failed(self):
+        result = run_fleet(
+            _config(), "t",
+            FakeClient({"web": ("fail", "e"), "social": ("fail", "e"), "analysis": ("fail", "e")}),
+        )
+        self.assertFalse(result.has_usable_output())
+
+    # ------------------------------------------------------------------
+    # ok is a read-only property — no setter
+    # ------------------------------------------------------------------
+
+    def test_ok_property_has_no_setter(self):
+        result = run_fleet(_config(), "t", FakeClient({"synthesizer": ("ok", "x")}))
+        with self.assertRaises(AttributeError):
+            result.ok = False  # type: ignore[misc]
+
+    # ------------------------------------------------------------------
+    # status is coerced to the enum — a raw string (e.g. the manifest's
+    # serialized form) must read identically, because the derived reads
+    # use `is` (identity), not `==`
+    # ------------------------------------------------------------------
+
+    def test_status_string_is_coerced_to_enum(self):
+        # The manifest serializes status as a bare string ("success"/"degraded"/
+        # "failed"). Reconstructed with that raw string, a result must behave
+        # exactly like the enum-built one. Without coercion, `is` misreads on
+        # two of the three values: "success" -> ok wrongly False; "failed" ->
+        # has_usable_output() wrongly True.
+        for value in ("success", "degraded", "failed"):
+            with self.subTest(value=value):
+                from_str = FleetResult(fleet="f", task="t", specialists=[], status=value)
+                from_enum = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus(value))
+                self.assertIs(from_str.status, FleetStatus(value))
+                self.assertEqual(from_str.ok, from_enum.ok)
+                self.assertEqual(from_str.has_usable_output(), from_enum.has_usable_output())
+
+    def test_status_invalid_string_raises(self):
+        with self.assertRaises(ValueError):
+            FleetResult(fleet="f", task="t", specialists=[], status="bogus")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult
+from fleet_engine.engine import FleetResult, FleetStatus
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
     Completion,
@@ -204,25 +204,36 @@ def render_file_inputs(paths: list[str], truncated: list[str] | None = None) -> 
 
 
 def render_result(result: FleetResult) -> str:
-    # Key the header on convergence so a successful collect run (ok=True,
-    # synthesis=None, synth_ok=None) is never mislabeled as a failure.
+    # Key the header on (convergence, status) so every (mode, outcome) pair is read from
+    # the engine-declared status, not re-derived from ok/synth_ok/judge_ok.
     if result.convergence == "collect":
-        header = "collect result" if result.ok else "collect result — all specialists failed"
+        header = (
+            "collect result"
+            if result.status is FleetStatus.SUCCESS
+            else "collect result — all specialists failed"
+        )
     elif result.convergence == "judge":
-        if result.ok:
+        if result.status is FleetStatus.SUCCESS:
             header = "judge result"
-        elif result.judge_ok is False:
+        elif result.status is FleetStatus.DEGRADED:
+            # DEGRADED: judge ran + failed, specialists survived
             header = "judge result — judge failed"
-        else:  # judge_ok is None → all specialists failed, the judge never ran
+        else:
+            # FAILED: all specialists failed, the judge never ran
             header = "judge result — all specialists failed"
     else:
-        header = "synthesized result" if result.ok else "partial result (no synthesis)"
+        header = (
+            "synthesized result"
+            if result.status is FleetStatus.SUCCESS
+            else "partial result (no synthesis)"
+        )
     out = [f"=== {_sanitize(result.fleet)} — {header} ==="]
     # Guard: only emit the "synthesis was not attempted" preamble for synthesize
-    # fleets where synthesis never ran (all specialists failed). On a collect fleet
-    # synth_ok is always None by design — emitting this on collect success is the
-    # load-bearing bug this unit fixes (KTD2).
-    if result.convergence == "synthesize" and result.synth_ok is None:
+    # fleets where all specialists failed (FAILED — synthesis was never attempted).
+    # DEGRADED (synthesizer ran + failed, specialists survived) must NOT emit this.
+    # The convergence guard is preserved: collect-FAILED and judge-FAILED must not
+    # emit a synthesize-specific preamble.
+    if result.convergence == "synthesize" and result.status is FleetStatus.FAILED:
         # All specialists failed — synthesis was never attempted. Surface a
         # prominent line so the caller never mistakes this for a valid result.
         n_failed = len(result.failures)

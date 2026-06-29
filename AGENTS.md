@@ -85,16 +85,20 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   a `judge:` block with provider/model/prompt). `convergence` defaults to synthesize,
   so every pre‑existing fleet parses unchanged. Don't add abstraction for the *deferred*
   topology axes (sequential/iterative — see `CONCEPTS.md`) until a concrete one lands.
-- **Convergence‑aware consumers (`ok`‑aliasing — keep it):** `FleetResult` now has
-  three ok-shapes. A successful collect run: `ok=True, synthesis=None, synth_ok=None`.
-  A successful judge run: `ok=True, judge=<raw text>, judge_ok=True, synthesis=None,
-  synth_ok=None` — the same `synthesis=None` alias as collect, discriminated only by
-  `convergence` (`FleetResult` gains `judge: str|None` and `judge_ok: bool|None`).
-  Every consumer — process exit code, `render` header + the "synthesis was not attempted"
-  preamble, the manifest, the `Validated` breadcrumb, `cli validate` — reads
-  `result.convergence` to disambiguate all three. Do not add a consumer that branches on
-  `ok` / `synth_ok is None` / `synthesis is None` without also reading `convergence`, or
-  a successful collect or judge run reads as a failure.
+- **Convergence‑aware consumers (explicit `status` — keep it):** `FleetResult` carries an
+  explicit `FleetStatus` tri-state (`SUCCESS` / `DEGRADED` / `FAILED`) set at every
+  `run_fleet` return point. Consumers read `result.status` for run outcome — **do not
+  re-derive it** from `ok`, `synth_ok is None`, or `synthesis is None`. Derived reads:
+  `ok` (`status is SUCCESS`) is the exit-code signal; `has_usable_output()` (`status is
+  not FAILED`) covers SUCCESS and DEGRADED. `synth_ok`/`judge_ok` remain as mode-specific
+  detail; `manifest.json` also carries a top-level `"status"` string (serialized as
+  `success`/`degraded`/`failed`) alongside them.
+  Every consumer — process exit code, `render` header, `capture` manifest, `cli` — still
+  reads `result.convergence` to understand what the result *contains* (synthesize →
+  `synthesis` populated; collect → attributed specialist blocks, no synthesis; judge →
+  `judge` raw text + per-lane `judge_ok`). Do not add a consumer that infers mode or
+  outcome from `synthesis is None` / `synth_ok is None` alone — always read `convergence`
+  for shape, `status` for outcome.
 - **Judge‑specific seams:** the engine returns the judge's raw text in `result.judge`
   and stays pure (no parsing). `fleet_engine/judge_grade.py` (caller‑layer) parses it
   into per-lane structure (`{role, model, grade, rationale}`, plus `ungraded` lanes and
