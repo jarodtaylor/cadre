@@ -429,7 +429,9 @@ class TestRenderFleetPreviewSynthesizer(unittest.TestCase):
 
 
 class TestRenderFleetPreviewCostWarning(unittest.TestCase):
-    """render_fleet_preview flags an Anthropic/Opus synthesizer as API-billed."""
+    """render_fleet_preview flags a premium synthesizer/judge with a provider-aware
+    cost note: per-token providers bill at API rates, OAuth-quota providers (copilot,
+    xai, ...) consume quota, and unknown providers default to the API-rates warning."""
 
     def test_anthropic_opus_synthesizer_flags_cost(self):
         cfg = _make_config(
@@ -460,6 +462,45 @@ class TestRenderFleetPreviewCostWarning(unittest.TestCase):
         cfg = FleetConfig.load(_EXAMPLE_FLEET)
         rendered = render_fleet_preview(cfg)
         self.assertIn("bills at API rates", rendered)
+
+    def test_oauth_quota_provider_shows_quota_not_api_rates(self):
+        # copilot/claude-opus is OAuth quota, not per-token API billing (#8): the
+        # premium model still warrants a note, but the wording must be accurate.
+        cfg = _make_config(synth_provider="copilot", synth_model="claude-opus-4.8")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("OAuth quota, not per-token API billing", rendered)
+        self.assertNotIn("bills at API rates", rendered)
+        self.assertIn("copilot", rendered)
+
+    def test_xai_oauth_variant_classified_as_quota(self):
+        cfg = _make_config(synth_provider="xai-oauth", synth_model="claude-opus-4.8")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("OAuth quota, not per-token API billing", rendered)
+        self.assertNotIn("bills at API rates", rendered)
+
+    def test_unknown_provider_with_premium_model_defaults_to_api_rates(self):
+        # False-negative-averse: an unrecognized provider falls through to the
+        # API-rates warning rather than being silently treated as quota.
+        cfg = _make_config(synth_provider="some-new-vendor", synth_model="claude-opus-4.8")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("bills at API rates", rendered)
+        self.assertNotIn("OAuth quota", rendered)
+
+
+class TestRenderJudgePreviewCostWarning(unittest.TestCase):
+    """The judge call site is provider-aware too: a per-token judge bills at API
+    rates; an OAuth-quota judge (e.g. copilot) shows the honest quota note."""
+
+    def test_judge_per_token_provider_bills_at_api_rates(self):
+        cfg = _make_judge_config(judge_provider="openrouter", judge_model="anthropic/claude-opus-4.8")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("bills at API rates", rendered)
+
+    def test_judge_oauth_quota_provider_shows_quota(self):
+        cfg = _make_judge_config(judge_provider="copilot", judge_model="claude-opus-4.8")
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("OAuth quota, not per-token API billing", rendered)
+        self.assertNotIn("bills at API rates", rendered)
 
 
 class TestRenderFleetPreviewPrivilegedTools(unittest.TestCase):
