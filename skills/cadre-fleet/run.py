@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import os
 import sys
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from fleet_engine.capture import DEFAULT_HERMES_HOME, prepare_run_dir, save_run  # noqa: E402
+from fleet_engine.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
 from fleet_engine.model_client import ModelClient  # noqa: E402
@@ -100,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         # config) so the human okays the fleet AND the profile it runs under — an
         # unset HERMES_HOME silently falls back to the default, which is how a run
         # lands on the wrong (e.g. ungrounded) profile unnoticed.
-        print(f"Profile (HERMES_HOME): {os.getenv('HERMES_HOME', DEFAULT_HERMES_HOME)}")
+        print(f"Profile (HERMES_HOME): {resolved_hermes_home()}")
         print(render_fleet_preview(cfg))
         # The --doc paths the run will read into the task, as the caller named them
         # (R7). Skipped when there are none, so a plain preview stays byte-identical.
