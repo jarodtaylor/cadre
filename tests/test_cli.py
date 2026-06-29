@@ -264,6 +264,17 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
 
         self.assertEqual(code, 1)  # run failed → non-zero even if save_run also failed
 
+    def test_run_folder_line_uses_save_run_return(self):
+        """Gate (#4): cli prints the path save_run RETURNS (the possibly-renamed
+        dir), not the one it passed in. A caller that drops the return fails this."""
+        run_dir = self.tmp / "passed-in"
+        sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
+        client = FakeClient({"synthesizer": ("ok", "S")})
+        with patch("fleet_engine.cli.save_run", return_value=sentinel):
+            code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
+        self.assertIn(f"Run folder: {sentinel}", out)
+        self.assertNotIn(f"Run folder: {run_dir}", out)
+
 
 class TestRunCaptureRunDirPermissions(unittest.TestCase):
     """The run dir is created owner-only (0o700)."""
@@ -463,6 +474,24 @@ class TestSkillEntryCapture(unittest.TestCase):
         with patch.object(self.run_mod, "save_run", side_effect=OSError("disk full")):
             code, fake = self._run_skill()
         self.assertEqual(code, 0)
+
+    def test_run_folder_line_uses_save_run_return(self):
+        """Gate (#4): the skill prints the path save_run RETURNS (the possibly-renamed
+        dir), not the one it passed in. A caller that drops the return fails this."""
+        sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.tmp)}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with patch.object(self.run_mod, "save_run", return_value=sentinel):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        fleet_path = str(
+                            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+                        )
+                        self.run_mod.main(["--task", "t", "--fleet", fleet_path])
+        out = stdout_buf.getvalue()
+        self.assertIn(f"Run folder: {sentinel}", out)
+        self.assertNotIn(f"Run folder: {self.tmp}", out)
 
 
 # ---------------------------------------------------------------------------

@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if capture:
         try:
-            save_run(cfg, result, run_dir)
+            run_dir = save_run(cfg, result, run_dir)
             output = f"{output}\n\nRun folder: {run_dir}"
         except Exception as exc:  # noqa: BLE001
             # Best-effort warning on the [cadre] stream: sanitize the exception text

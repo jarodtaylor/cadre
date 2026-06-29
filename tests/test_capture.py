@@ -1733,5 +1733,95 @@ class TestJudgeEndToEnd(unittest.TestCase):
         self.assertIs(manifest["judge_ok"], True)
 
 
+class TestRunTitleRename(unittest.TestCase):
+    """save_run records the synthesizer's H1 as a manifest ``title`` and renames a
+    default ``<stamp>-<slug>`` run folder to ``<stamp>-<title-slug>`` (#4)."""
+
+    _STAMP = "2026-06-29-150719"
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        # These exercise DEFAULT mode (rename fires only when CADRE_RUN_DIR is unset);
+        # make that independent of the ambient env. The CADRE_RUN_DIR test re-sets it.
+        env_patch = patch.dict(os.environ)
+        env_patch.start()
+        os.environ.pop("CADRE_RUN_DIR", None)
+        self.addCleanup(env_patch.stop)
+
+    def _stamped(self, leaf):
+        d = self.root / leaf
+        d.mkdir()
+        return d
+
+    def _manifest(self, run_dir):
+        return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    def test_h1_renames_dir_and_sets_manifest_title(self):
+        run_dir = self._stamped(f"{self._STAMP}-what-is-best")
+        final = save_run(_cfg(), _result(synthesis="# Best AI Design Tool\n\nBody."), run_dir)
+        self.assertEqual(final.name, f"{self._STAMP}-best-ai-design-tool")
+        self.assertFalse(run_dir.exists())             # old leaf is gone
+        self.assertEqual(self._manifest(final)["title"], "Best AI Design Tool")
+
+    def test_no_h1_keeps_slug_and_null_title(self):
+        run_dir = self._stamped(f"{self._STAMP}-some-task")
+        final = save_run(_cfg(), _result(synthesis="Just prose, no heading."), run_dir)
+        self.assertEqual(final, run_dir)
+        self.assertIsNone(self._manifest(final)["title"])
+
+    def test_failed_synthesis_keeps_slug_and_null_title(self):
+        run_dir = self._stamped(f"{self._STAMP}-some-task")
+        result = _result(synthesis=None, ok=False, synth_ok=False)
+        final = save_run(_cfg(), result, run_dir)
+        self.assertEqual(final, run_dir)
+        self.assertIsNone(self._manifest(final)["title"])
+
+    def test_cadre_run_dir_set_never_renames_but_still_titles(self):
+        run_dir = self._stamped(f"{self._STAMP}-some-task")
+        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.root)}):
+            final = save_run(_cfg(), _result(synthesis="# A Real Title\n\nBody."), run_dir)
+        self.assertEqual(final, run_dir)               # caller owns the path → no rename
+        self.assertEqual(self._manifest(final)["title"], "A Real Title")
+
+    def test_rename_collision_appends_counter(self):
+        run_dir = self._stamped(f"{self._STAMP}-orig")
+        (self.root / f"{self._STAMP}-a-real-title").mkdir()   # pre-existing target
+        final = save_run(_cfg(), _result(synthesis="# A Real Title\n\nBody."), run_dir)
+        self.assertEqual(final.name, f"{self._STAMP}-a-real-title-2")
+
+    def test_non_stamped_leaf_is_not_renamed(self):
+        run_dir = self.root / "not-a-stamped-leaf"
+        run_dir.mkdir()
+        final = save_run(_cfg(), _result(synthesis="# A Real Title\n\nBody."), run_dir)
+        self.assertEqual(final, run_dir)
+
+    def test_path_like_h1_cannot_escape_runs_root(self):
+        run_dir = self._stamped(f"{self._STAMP}-orig")
+        final = save_run(_cfg(), _result(synthesis="# ../../etc/passwd\n\nBody."), run_dir)
+        self.assertEqual(final.parent, self.root)      # stays under the runs root
+        self.assertNotIn("..", final.name)             # _slugify defanged it
+        self.assertTrue(final.name.startswith(f"{self._STAMP}-"))
+
+    def test_rename_failure_degrades_to_original_dir(self):
+        run_dir = self._stamped(f"{self._STAMP}-orig")
+        result = _result(synthesis="# A Real Title\n\nBody.")
+        with patch.object(Path, "rename", side_effect=OSError("cross-device")):
+            final = save_run(_cfg(), result, run_dir)
+        self.assertEqual(final, run_dir)               # degrade: keep the completed run
+        self.assertTrue((run_dir / "manifest.json").exists())
+
+    def test_stamp_regex_matches_real_prepare_run_dir_leaf(self):
+        """Coupling guard: the rename's stamp prefix must match what prepare_run_dir
+        actually produces, so the regex can't silently drift from the strftime format."""
+        from fleet_engine.capture import _STAMP_RE
+        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.root)):
+            created = prepare_run_dir("a real task title")
+        self.assertIsNotNone(
+            _STAMP_RE.match(created.name),
+            f"_STAMP_RE must match a real prepare_run_dir leaf: {created.name}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
