@@ -1,7 +1,7 @@
 """
 Characterization suite — frozen baseline (U1 of result-status-enum refactor).
 
-For every (convergence-mode × outcome) pair this file:
+For every (convergence-mode, outcome) pair this file:
   - runs the REAL run_fleet over FakeClient (no live models, no I/O)
   - asserts render_result() output via assertIn on exact header lines and key markers
   - asserts the save_run() manifest JSON on deterministic status-bearing keys

@@ -204,7 +204,7 @@ def render_file_inputs(paths: list[str], truncated: list[str] | None = None) -> 
 
 
 def render_result(result: FleetResult) -> str:
-    # Key the header on (convergence, status) so every mode × outcome is read from
+    # Key the header on (convergence, status) so every (mode, outcome) pair is read from
     # the engine-declared status, not re-derived from ok/synth_ok/judge_ok.
     if result.convergence == "collect":
         header = (

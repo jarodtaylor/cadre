@@ -744,7 +744,7 @@ class TestJudgeConvergence(unittest.TestCase):
 
 
 class TestFleetStatus(unittest.TestCase):
-    """status field, ok property, and has_usable_output() across all six logical states."""
+    """status field, ok property, and has_usable_output() across the eight convergence/outcome states (synthesize 3, collect 2, judge 3)."""
 
     # ------------------------------------------------------------------
     # ok ≡ (status is SUCCESS) — per-mode return points
