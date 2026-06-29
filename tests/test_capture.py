@@ -310,7 +310,8 @@ class TestTimedOutSpecialist(unittest.TestCase):
 
 
 class TestHermesHome(unittest.TestCase):
-    """manifest records HERMES_HOME when set, and the default when unset."""
+    """manifest records the resolved absolute HERMES_HOME (env-sourced) — expanding
+    ~ and making relative values absolute — or the resolved default when unset."""
 
     def setUp(self):
         self.run_dir = Path(tempfile.mkdtemp())
@@ -326,12 +327,41 @@ class TestHermesHome(unittest.TestCase):
         manifest = self._load_manifest()
         self.assertEqual(manifest["hermes_home"], "/custom/hermes")
 
-    def test_hermes_home_default_when_unset(self):
+    def test_hermes_home_default_when_unset_is_resolved(self):
         env_without_hermes = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
         with patch.dict(os.environ, env_without_hermes, clear=True):
             save_run(_cfg(), _result(), self.run_dir)
         manifest = self._load_manifest()
-        self.assertEqual(manifest["hermes_home"], "~/.hermes")
+        expected = os.path.abspath(os.path.expanduser("~/.hermes"))
+        self.assertEqual(manifest["hermes_home"], expected)
+        self.assertTrue(os.path.isabs(manifest["hermes_home"]))
+
+    def test_hermes_home_tilde_is_expanded_to_absolute(self):
+        # The core of #7: a ~ value must resolve to an absolute path so the operator
+        # sees the real profile directory, not an unexpanded "~/...".
+        with patch.dict(os.environ, {"HERMES_HOME": "~/some-profile"}):
+            save_run(_cfg(), _result(), self.run_dir)
+        manifest = self._load_manifest()
+        expected = os.path.abspath(os.path.expanduser("~/some-profile"))
+        self.assertEqual(manifest["hermes_home"], expected)
+        self.assertNotIn("~", manifest["hermes_home"])
+        self.assertTrue(os.path.isabs(manifest["hermes_home"]))
+
+    def test_hermes_home_relative_is_made_absolute(self):
+        with patch.dict(os.environ, {"HERMES_HOME": "rel/profile"}):
+            save_run(_cfg(), _result(), self.run_dir)
+        manifest = self._load_manifest()
+        self.assertTrue(os.path.isabs(manifest["hermes_home"]))
+        self.assertTrue(manifest["hermes_home"].endswith(os.path.join("rel", "profile")))
+
+    def test_hermes_home_empty_falls_back_to_default(self):
+        # Set-but-empty HERMES_HOME must read as the default, not the cwd — the
+        # preview/manifest exist to tell the operator which profile is in play.
+        with patch.dict(os.environ, {"HERMES_HOME": ""}):
+            save_run(_cfg(), _result(), self.run_dir)
+        manifest = self._load_manifest()
+        expected = os.path.abspath(os.path.expanduser("~/.hermes"))
+        self.assertEqual(manifest["hermes_home"], expected)
 
 
 class TestFullyFailedRun(unittest.TestCase):

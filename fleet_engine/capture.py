@@ -42,6 +42,18 @@ from fleet_engine.render import _sanitize
 # fleet preview when HERMES_HOME is unset.
 DEFAULT_HERMES_HOME = "~/.hermes"
 
+
+def resolved_hermes_home() -> str:
+    """The Hermes profile home as an absolute path (env-sourced) for the preview
+    and manifest. Expands ``~`` and makes a relative value absolute so the operator
+    sees the real directory the run uses — an unresolved ``~/.hermes`` or a relative
+    path can hide which profile (and thus which tools/providers) is in play. An unset
+    or empty ``HERMES_HOME`` falls back to the default. Symlinks are left unresolved:
+    the named target is what the operator reasons about.
+    """
+    return os.path.abspath(os.path.expanduser(os.getenv("HERMES_HOME") or DEFAULT_HERMES_HOME))
+
+
 # Default root for run folders when CADRE_RUN_DIR is not set.
 _DEFAULT_RUNS_ROOT = "~/.cadre/runs"
 
@@ -468,7 +480,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "status": result.status.value,
         "synth_ok": result.synth_ok,
         "judge_ok": result.judge_ok,
-        "hermes_home": os.getenv("HERMES_HOME", DEFAULT_HERMES_HOME),
+        "hermes_home": resolved_hermes_home(),
         "lanes": lanes,
     }
 
