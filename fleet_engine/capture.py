@@ -288,7 +288,7 @@ def _synthesis_title(result: FleetResult) -> str | None:
     synthesis prompt does not mandate one, so this is best-effort. Sanitized (the H1
     is model-generated) and length-capped for the manifest.
     """
-    if not result.synthesis:
+    if result.convergence != "synthesize" or not result.synthesis:
         return None
     for line in result.synthesis.splitlines():
         stripped = line.strip()

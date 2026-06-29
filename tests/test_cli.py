@@ -271,7 +271,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
         client = FakeClient({"synthesizer": ("ok", "S")})
         with patch("fleet_engine.cli.save_run", return_value=sentinel):
-            code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
+            _, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
         self.assertIn(f"Run folder: {sentinel}", out)
         self.assertNotIn(f"Run folder: {run_dir}", out)
 
