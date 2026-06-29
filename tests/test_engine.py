@@ -838,6 +838,30 @@ class TestFleetStatus(unittest.TestCase):
         with self.assertRaises(AttributeError):
             result.ok = False  # type: ignore[misc]
 
+    # ------------------------------------------------------------------
+    # status is coerced to the enum — a raw string (e.g. the manifest's
+    # serialized form) must read identically, because the derived reads
+    # use `is` (identity), not `==`
+    # ------------------------------------------------------------------
+
+    def test_status_string_is_coerced_to_enum(self):
+        # The manifest serializes status as a bare string ("success"/"degraded"/
+        # "failed"). Reconstructed with that raw string, a result must behave
+        # exactly like the enum-built one. Without coercion, `is` misreads on
+        # two of the three values: "success" -> ok wrongly False; "failed" ->
+        # has_usable_output() wrongly True.
+        for value in ("success", "degraded", "failed"):
+            with self.subTest(value=value):
+                from_str = FleetResult(fleet="f", task="t", specialists=[], status=value)
+                from_enum = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus(value))
+                self.assertIs(from_str.status, FleetStatus(value))
+                self.assertEqual(from_str.ok, from_enum.ok)
+                self.assertEqual(from_str.has_usable_output(), from_enum.has_usable_output())
+
+    def test_status_invalid_string_raises(self):
+        with self.assertRaises(ValueError):
+            FleetResult(fleet="f", task="t", specialists=[], status="bogus")
+
 
 if __name__ == "__main__":
     unittest.main()

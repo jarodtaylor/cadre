@@ -95,6 +95,15 @@ class FleetResult:
     judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
 
+    def __post_init__(self) -> None:
+        # Normalize status to the FleetStatus enum so the identity checks (`is`)
+        # in ok / has_usable_output() / render / capture stay correct even when
+        # status arrives as a raw string — e.g. the manifest's serialized
+        # "success"/"degraded"/"failed" form round-tripped back into a result.
+        # Idempotent on enum members; raises ValueError on an unknown value
+        # (fail-fast, matching the config normalize-at-the-boundary posture).
+        self.status = FleetStatus(self.status)
+
     @property
     def ok(self) -> bool:
         """True iff the run succeeded (backward-compat alias for status is SUCCESS)."""
