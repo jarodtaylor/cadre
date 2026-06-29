@@ -33,16 +33,40 @@ from fleet_engine.progress import (
     outcome_label,
 )
 
-# Predicate: synthesizer looks API-billed (Anthropic/Claude/Opus) inside Hermes.
-# False-negatives (missed expensive runs) are worse than false-positives (extra
-# warnings), so we err toward flagging. The raw provider/model string is always
-# shown so a missed heuristic can never hide an expensive run.
-_BILLED_KEYWORDS = ("anthropic", "claude", "opus")
+# Premium model-class trigger: an Anthropic/Claude/Opus synthesizer or judge is
+# worth a cost note. False-negatives (missed expensive runs) are worse than
+# false-positives (extra warnings), so we err toward flagging, and the raw
+# provider/model string is always shown so a missed heuristic can never hide it.
+_PREMIUM_MODEL_KEYWORDS = ("anthropic", "claude", "opus")
+
+# Providers that bill against an OAuth / subscription quota, NOT per-token API
+# rates — e.g. a ``copilot/claude-opus`` run is quota, not API $ (the #8 case).
+# Membership is the ONLY thing that downgrades the "bills at API rates" wording,
+# so it is exact-match and conservative: an unknown provider falls through to the
+# API-rates warning (over-warning about cost is the safe direction; wrongly
+# claiming "quota" is not). Matched on the lowercased provider string.
+_OAUTH_QUOTA_PROVIDERS = frozenset({"copilot", "xai", "xai-oauth", "openai-codex", "nous"})
 
 
-def _looks_api_billed(provider: str, model: str) -> bool:
+def _looks_premium(provider: str, model: str) -> bool:
     combined = f"{provider}/{model}".lower()
-    return any(kw in combined for kw in _BILLED_KEYWORDS)
+    return any(kw in combined for kw in _PREMIUM_MODEL_KEYWORDS)
+
+
+def _cost_warning(provider: str, model: str) -> str | None:
+    """The cost note for a premium lane, or ``None`` when no note applies.
+
+    Classifies on the RAW provider (an OAuth/subscription-quota provider gets an
+    honest quota note; everything else — including unknown providers — gets the
+    per-token API-rates warning). The provider is ``_sanitize``-d before it reaches
+    the rendered line: it is fleet-controlled, and this line is part of the
+    human-approval surface a tampered fleet must not be able to spoof.
+    """
+    if not _looks_premium(provider, model):
+        return None
+    if provider.strip().lower() in _OAUTH_QUOTA_PROVIDERS:
+        return f"  ⚠ uses your {_sanitize(provider)} OAuth quota, not per-token API billing"
+    return "  ⚠ bills at API rates inside Hermes"
 
 
 # Unicode line/paragraph separators and bidi format controls are never legitimate
@@ -115,14 +139,16 @@ def render_fleet_preview(config: FleetConfig) -> str:
         judge_str = f"{_sanitize(config.judge.provider)}/{_sanitize(config.judge.model)}"
         out.append("\nConvergence: judge")
         out.append(f"Judge: {judge_str}")
-        if _looks_api_billed(config.judge.provider, config.judge.model):
-            out.append("  ⚠ bills at API rates inside Hermes")
+        cost_note = _cost_warning(config.judge.provider, config.judge.model)
+        if cost_note:
+            out.append(cost_note)
     else:
         # synthesize path — cost predicate runs on the RAW strings; only display is sanitized
         synth_str = f"{_sanitize(config.synthesis.provider)}/{_sanitize(config.synthesis.model)}"
         out.append(f"\nSynthesizer: {synth_str}")
-        if _looks_api_billed(config.synthesis.provider, config.synthesis.model):
-            out.append("  ⚠ bills at API rates inside Hermes")
+        cost_note = _cost_warning(config.synthesis.provider, config.synthesis.model)
+        if cost_note:
+            out.append(cost_note)
 
     # --- privileged tools flag (our text, not fleet-controlled — cannot be spoofed) ---
     # Unconditional: a collect fleet can carry privileged tools, so this must render
