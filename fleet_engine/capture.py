@@ -465,28 +465,37 @@ def _synthesis_md(result: FleetResult) -> str:
                 for lane in successes
             ]
             return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
-        # All specialists failed in collect mode.
+        # No surviving specialist outputs. Under sequential topology this is a
+        # first-lane failure (the rest were skipped), not "all failed".
+        if result.topology == "sequential":
+            return "No specialist outputs — the chain halted at the first lane (collect mode)."
         n = len(result.specialists)
         return f"No specialist outputs — all {n} specialists failed (collect mode)."
 
     # Judge mode: write raw grade text (KTD8 — UNMUTATED, no _sanitize) + attributed blocks.
     if result.convergence == "judge":
         if result.status is FleetStatus.FAILED:
-            # All specialists failed; judge was never invoked.
+            # Judge never invoked (no survivors). Under sequential topology this is a
+            # first-lane failure (the rest were skipped), not "all failed".
+            if result.topology == "sequential":
+                return "No judge grade — the chain halted at the first lane (judge mode)."
             n = len(result.specialists)
             return f"No specialist outputs — all {n} specialists failed (judge mode)."
-        if result.status is FleetStatus.DEGRADED:
-            # Judge ran but failed (degrade path). Match the note by its exact
-            # prefix — the engine emits "judge failed: <error>". A loose substring
-            # ("judge failed" in note) could match a specialist failure note whose
-            # provider error text happens to contain that phrase (specialist notes
-            # are appended first), misattributing the degrade reason on disk.
+        if result.status is FleetStatus.DEGRADED and result.judge is None:
+            # The judge ran and FAILED (judge is None). A sequential chain that broke
+            # mid-run while the judge SUCCEEDED over the survivors carries result.judge —
+            # it falls through to the grade-writing block below so the grade is NOT
+            # discarded. Match the note by its exact prefix — the engine emits "judge
+            # failed: <error>". A loose substring ("judge failed" in note) could match a
+            # specialist failure note whose provider error text happens to contain that
+            # phrase (specialist notes are appended first), misattributing the reason.
             judge_note = next(
                 (note for note in result.notes if note.startswith("judge failed:")),
                 "judge failed",
             )
             return f"No judge grade — {judge_note}."
-        # status is SUCCESS — judge ran and succeeded.
+        # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
+        # over the survivors (DEGRADED with result.judge set — fell through above).
         # KTD8: the judge text is written UNMUTATED so the record is accurate;
         # _sanitize is the render boundary's job, not capture's.
         # Identity fields on the delimiter (role/provider/model) are still

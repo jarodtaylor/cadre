@@ -2457,5 +2457,71 @@ class TestRenderFleetPreviewParallelUnchanged(unittest.TestCase):
         self.assertEqual(rendered_default, rendered_custom)
 
 
+class TestRenderResultSequentialConjunctiveHeaders(unittest.TestCase):
+    """Sequential synth/judge DEGRADED has two meanings, told apart by the mode-detail
+    (synthesis/judge presence), NOT the aggregate status: a chain that broke mid-run but
+    whose convergence step still succeeded over the survivors is DEGRADED yet carries a
+    real body — the header must not claim "no synthesis" / "judge failed". Parallel is
+    unaffected (parallel DEGRADED always has synthesis/judge None). Inputs use explicit
+    status= (KTD6)."""
+
+    def _seq(self, convergence, status, specialists, **kw):
+        return FleetResult(
+            fleet="chain-fleet", task="t", specialists=specialists,
+            convergence=convergence, topology="sequential", status=status, **kw,
+        )
+
+    def test_synthesize_degraded_with_synthesis_present(self):
+        lanes = [
+            make_lane(role="scout", text="found"),
+            make_lane(role="analyst", ok=False),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = self._seq("synthesize", FleetStatus.DEGRADED, lanes,
+                           synthesis="BLENDED REPORT", synth_ok=True, terminal_produced=False)
+        rendered = render_result(result)
+        self.assertIn("synthesized result — chain failed mid-run", rendered)
+        self.assertNotIn("partial result (no synthesis)", rendered)
+        self.assertIn("BLENDED REPORT", rendered)  # the synthesis body is rendered
+
+    def test_synthesize_degraded_without_synthesis_unchanged(self):
+        # Synthesizer ran and failed (synthesis None) → "partial result (no synthesis)".
+        lanes = [make_lane(role="scout", text="a"), make_lane(role="analyst", text="b"),
+                 make_lane(role="writer", text="c")]
+        result = self._seq("synthesize", FleetStatus.DEGRADED, lanes,
+                           synthesis=None, synth_ok=False, terminal_produced=True)
+        self.assertIn("partial result (no synthesis)", render_result(result))
+
+    def test_judge_degraded_with_grade_present(self):
+        lanes = [
+            make_lane(role="scout", text="found"),
+            make_lane(role="analyst", ok=False),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = self._seq("judge", FleetStatus.DEGRADED, lanes,
+                           judge="GRADES TEXT", judge_ok=True, terminal_produced=False)
+        rendered = render_result(result)
+        self.assertIn("judge result — chain failed mid-run", rendered)
+        self.assertNotIn("judge result — judge failed", rendered)
+        self.assertIn("GRADES TEXT", rendered)
+
+    def test_judge_degraded_without_grade_unchanged(self):
+        # Judge ran and failed (judge None) → "judge result — judge failed".
+        lanes = [make_lane(role="scout", text="a"), make_lane(role="analyst", text="b"),
+                 make_lane(role="writer", text="c")]
+        result = self._seq("judge", FleetStatus.DEGRADED, lanes,
+                           judge=None, judge_ok=False, terminal_produced=True)
+        self.assertIn("judge result — judge failed", render_result(result))
+
+    def test_judge_failed_sequential_is_chain_first_lane(self):
+        # Sequential FAILED = first lane failed, rest skipped — not "all specialists failed".
+        lanes = [make_lane(role="scout", ok=False),
+                 make_lane(role="analyst", skipped=True, ok=False)]
+        result = self._seq("judge", FleetStatus.FAILED, lanes, judge=None, judge_ok=None)
+        rendered = render_result(result)
+        self.assertIn("judge result — chain failed at the first lane", rendered)
+        self.assertNotIn("all specialists failed", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2055,5 +2055,71 @@ class TestSkippedLaneMarkdown(unittest.TestCase):
         self.assertIn("rate limited", md)
 
 
+class TestSequentialConjunctiveCapture(unittest.TestCase):
+    """synthesis.md reads the mode-detail, not the aggregate status. A sequential chain
+    that broke mid-run but whose convergence step SUCCEEDED must still write the output
+    (no data loss); a sequential FAILED run is a first-lane failure, not "all failed"."""
+
+    def test_judge_degraded_with_grade_is_written_not_discarded(self):
+        # Data-loss fix: sequential+judge broke mid-run but the judge SUCCEEDED over the
+        # survivors → DEGRADED with result.judge set. The grade MUST land in synthesis.md.
+        lanes = [
+            _lane(role="scout", ok=True, text="found"),
+            _lane(role="analyst", ok=False),
+            _skipped_lane("writer", "openrouter", "w/m"),
+        ]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.DEGRADED,
+            judge="GRADE TEXT HERE", judge_ok=True, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("# Judge grade", md)
+        self.assertIn("GRADE TEXT HERE", md)
+        self.assertNotIn("No judge grade", md)
+
+    def test_judge_degraded_without_grade_still_notes_failure(self):
+        # Judge genuinely ran and failed (judge None) → the "No judge grade" note holds.
+        lanes = [_lane(role="scout", ok=True, text="found"),
+                 _lane(role="analyst", ok=True, text="a"),
+                 _lane(role="writer", ok=True, text="w")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.DEGRADED,
+            judge=None, judge_ok=False, terminal_produced=True,
+            notes=["judge failed: timeout"],
+        )
+        md = _synthesis_md(result)
+        self.assertIn("No judge grade", md)
+        self.assertIn("timeout", md)
+
+    def test_collect_failed_sequential_says_chain_halted(self):
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m"),
+                 _skipped_lane("writer", "openrouter", "w/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="collect", topology="sequential", status=FleetStatus.FAILED,
+            terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("collect mode", md)
+        self.assertNotIn("specialists failed", md)
+
+    def test_judge_failed_sequential_says_chain_halted(self):
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.FAILED,
+            judge=None, judge_ok=None, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("judge mode", md)
+        self.assertNotIn("specialists failed", md)
+
+
 if __name__ == "__main__":
     unittest.main()

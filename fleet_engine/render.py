@@ -270,17 +270,34 @@ def render_result(result: FleetResult) -> str:
         if result.status is FleetStatus.SUCCESS:
             header = "judge result"
         elif result.status is FleetStatus.DEGRADED:
-            # DEGRADED: judge ran + failed, specialists survived
-            header = "judge result — judge failed"
+            # DEGRADED has two meanings under sequential topology, told apart by the
+            # mode-detail (NOT the aggregate status): judge present = the chain broke
+            # mid-run but the judge still succeeded over the survivors; judge None = the
+            # judge ran and failed. Parallel DEGRADED is always the latter (judge None).
+            header = (
+                "judge result — chain failed mid-run"
+                if result.judge is not None
+                else "judge result — judge failed"
+            )
+        elif result.topology == "sequential":
+            # FAILED + sequential: the first lane failed and the rest were skipped.
+            header = "judge result — chain failed at the first lane"
         else:
-            # FAILED: all specialists failed, the judge never ran
+            # FAILED + parallel: all specialists failed, the judge never ran.
             header = "judge result — all specialists failed"
     else:
-        header = (
-            "synthesized result"
-            if result.status is FleetStatus.SUCCESS
-            else "partial result (no synthesis)"
-        )
+        # Gate on the mode-detail (synthesis presence), not the aggregate status: a
+        # sequential chain that broke mid-run but synthesized over its survivors is
+        # DEGRADED yet carries a real synthesis body. Parallel SUCCESS always has a
+        # synthesis and parallel DEGRADED/FAILED never do, so this is unchanged there.
+        if result.synthesis is not None:
+            header = (
+                "synthesized result"
+                if result.status is FleetStatus.SUCCESS
+                else "synthesized result — chain failed mid-run"
+            )
+        else:
+            header = "partial result (no synthesis)"
     out = [f"=== {_sanitize(result.fleet)} — {header} ==="]
     # Guard: only emit the "synthesis was not attempted" preamble for synthesize
     # fleets where all specialists failed (FAILED — synthesis was never attempted).
