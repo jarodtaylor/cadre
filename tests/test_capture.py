@@ -2120,6 +2120,22 @@ class TestSequentialConjunctiveCapture(unittest.TestCase):
         self.assertIn("judge mode", md)
         self.assertNotIn("specialists failed", md)
 
+    def test_synthesize_failed_sequential_says_chain_halted(self):
+        # Sequential+synthesize FAILED = first lane failed, rest skipped — the markdown
+        # must mirror the collect/judge wording, NOT a misleading "1 of 3 failed" count.
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m"),
+                 _skipped_lane("writer", "openrouter", "w/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="synthesize", topology="sequential", status=FleetStatus.FAILED,
+            synthesis=None, synth_ok=None, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("synthesis was not attempted", md)
+        self.assertNotIn("of 3 specialists failed", md)
+
 
 if __name__ == "__main__":
     unittest.main()

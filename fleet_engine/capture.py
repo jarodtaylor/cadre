@@ -520,6 +520,11 @@ def _synthesis_md(result: FleetResult) -> str:
     #   status is FAILED  → all specialists failed, synthesis never attempted
     #   status is DEGRADED → synthesizer ran and failed
     if result.status is FleetStatus.FAILED:
+        # Sequential FAILED = first lane failed, rest skipped — a count would mislead
+        # (reads as if the others succeeded), so mirror the collect/judge wording above.
+        # Parallel keeps the count (n_failed == n_total, nothing skipped — meaningful).
+        if result.topology == "sequential":
+            return "No synthesis — the chain halted at the first lane; synthesis was not attempted."
         n_failed = len(result.failures)
         n_total = len(result.specialists)
         return f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted."

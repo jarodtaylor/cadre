@@ -1321,9 +1321,9 @@ class TestSequentialTopology(unittest.TestCase):
 
     def test_per_stage_truncation_flag(self):
         """Oversize stage output is capped; threading_truncated=True; marker in prompt."""
-        from fleet_engine.engine import _CHAIN_STAGE_CAP
+        from fleet_engine.engine import CHAIN_STAGE_CAP
 
-        long_text = "X" * (_CHAIN_STAGE_CAP + 100)
+        long_text = "X" * (CHAIN_STAGE_CAP + 100)
 
         class VariantClient:
             def __init__(self):
@@ -1346,7 +1346,7 @@ class TestSequentialTopology(unittest.TestCase):
         # Analyst's prompt must contain the truncation marker, not the full text.
         analyst_prompt = next(p for (r, p) in client.calls if r == "analyst")
         self.assertIn("[… stage output truncated …]", analyst_prompt)
-        self.assertNotIn("X" * (_CHAIN_STAGE_CAP + 1), analyst_prompt)
+        self.assertNotIn("X" * (CHAIN_STAGE_CAP + 1), analyst_prompt)
 
     def test_no_truncation_when_output_within_cap(self):
         """Short stage output does not set threading_truncated."""

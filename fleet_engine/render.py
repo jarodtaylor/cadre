@@ -17,7 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, _CHAIN_STAGE_CAP
+from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_CAP
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
     Completion,
@@ -212,7 +212,7 @@ def render_fleet_preview(
             out.append(f"\nTopology: sequential — {stages} stage(s), max wall-clock {ceiling_str}")
         else:
             out.append(f"\nTopology: sequential — {stages} stage(s), no per-stage timeout")
-        out.append(f"  Inter-stage output cap: {_CHAIN_STAGE_CAP:,} chars")
+        out.append(f"  Inter-stage output cap: {CHAIN_STAGE_CAP:,} chars")
 
     out.append("\n=== end preview ===")
     return "\n".join(out)
@@ -305,11 +305,18 @@ def render_result(result: FleetResult) -> str:
     # The convergence guard is preserved: collect-FAILED and judge-FAILED must not
     # emit a synthesize-specific preamble.
     if result.convergence == "synthesize" and result.status is FleetStatus.FAILED:
-        # All specialists failed — synthesis was never attempted. Surface a
-        # prominent line so the caller never mistakes this for a valid result.
-        n_failed = len(result.failures)
-        n_total = len(result.specialists)
-        out.append(f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted.")
+        # Synthesis was never attempted. Surface a prominent line so the caller never
+        # mistakes this for a valid result. Under sequential topology FAILED means the
+        # first lane failed and the rest were skipped, so a count ("1 of 3 failed")
+        # misleads — it reads as if the other 2 succeeded; say what happened instead,
+        # mirroring the collect/judge FAILED wording. Parallel keeps the count (there
+        # n_failed == n_total and nothing was skipped, so it is meaningful).
+        if result.topology == "sequential":
+            out.append("No synthesis — the chain halted at the first lane; synthesis was not attempted.")
+        else:
+            n_failed = len(result.failures)
+            n_total = len(result.specialists)
+            out.append(f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted.")
     if result.convergence == "judge":
         # Judge body: lead with the judge's OWN raw text (KTD2 — the human report
         # always shows the judge's text, even if a parse falls short). Reconstructing
@@ -342,7 +349,7 @@ def render_result(result: FleetResult) -> str:
             out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
     if result.threading_truncated:
         # Our own trusted text — not sanitized. A sequential chain produced inter-stage
-        # output that exceeded _CHAIN_STAGE_CAP chars; downstream stages received a
+        # output that exceeded CHAIN_STAGE_CAP chars; downstream stages received a
         # partial upstream context, which may affect quality.
         out.append("\nnote: inter-stage output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
@@ -461,6 +468,10 @@ class ProgressRenderer:
         only, keeping untrusted model-failure strings off the agent's control
         stream (restriction lives HERE, not in the event dataclass).
         """
+        # _format runs BEFORE _update_tally on purpose: the LaneStarted breadcrumb
+        # reads self._stage as the count of PRIOR started lanes and renders _stage + 1
+        # for a 1-based "stage k/N". Moving _format inside the lock (after the tally
+        # increment) would silently shift every stage number by one — keep it here.
         line = self._format(event)
         if line is None:
             return

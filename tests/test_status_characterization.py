@@ -646,5 +646,45 @@ class TestSequentialChainFirstFailFailed(unittest.TestCase):
         _assert_timing(self, self.manifest)
 
 
+class TestSequentialSynthesizeFirstFailFailed(unittest.TestCase):
+    """sequential+synthesize — scout fails → all downstream skipped → FAILED.
+
+    The FAILED preamble must read like the collect/judge siblings ("chain halted at
+    the first lane"), NOT a misleading count ("1 of 3 specialists failed") that would
+    suggest the other two succeeded when they were skipped.
+    """
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(
+                convergence="synthesize",
+                synthesis={"provider": "openrouter", "model": "syn/m"},
+            ),
+            {"scout": ("fail", "e")},
+        )
+
+    def test_status_is_failed(self):
+        self.assertIs(self.result.status, FleetStatus.FAILED)
+
+    def test_render_preamble_topology_aware(self):
+        self.assertIn("chain halted at the first lane", self.rendered)
+        self.assertIn("synthesis was not attempted", self.rendered)
+        # The misleading count form must NOT appear (the rest were skipped, not ok).
+        self.assertNotIn("of 3 specialists failed", self.rendered)
+
+    def test_manifest_topology_and_status(self):
+        self.assertEqual(self.manifest["topology"], "sequential")
+        self.assertEqual(self.manifest["status"], "failed")
+
+    def test_manifest_downstream_skipped(self):
+        by_role = {l["role"]: l for l in self.manifest["lanes"]}
+        self.assertFalse(by_role["scout"]["skipped"])  # ran and failed
+        self.assertTrue(by_role["analyst"]["skipped"])
+        self.assertTrue(by_role["writer"]["skipped"])
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
+
+
 if __name__ == "__main__":
     unittest.main()
