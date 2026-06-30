@@ -2149,13 +2149,16 @@ class TestRenderResultSequentialCollectHeader(unittest.TestCase):
         self.assertIn("collect result — chain failed mid-run", rendered)
 
     def test_failed_header(self):
+        # Sequential FAILED = first lane failed, the rest skipped (never ran) — the
+        # header must NOT claim "all specialists failed" (the writer was skipped).
         lanes = [
             make_lane(role="scout", ok=False),
             make_lane(role="writer", skipped=True, ok=False),
         ]
         result = self._make_seq_result(FleetStatus.FAILED, lanes)
         rendered = render_result(result)
-        self.assertIn("collect result — all specialists failed", rendered)
+        self.assertIn("collect result — chain failed at the first lane", rendered)
+        self.assertNotIn("all specialists failed", rendered)
 
 
 class TestRenderResultSkipTagInProvenance(unittest.TestCase):

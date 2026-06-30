@@ -416,7 +416,7 @@ def _write(path: Path, content: str) -> None:
 
 
 def _specialist_md(lane) -> str:  # lane: AgentResult
-    """Markdown file for one specialist lane (success or failure)."""
+    """Markdown file for one specialist lane (success, failure, or skipped)."""
     lines = [
         f"# Specialist: {_sanitize(lane.role)}",
         "",
@@ -427,7 +427,18 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
         f"- **Toolset:** {lane.toolset if lane.toolset else '(none)'}",
         "",
     ]
-    if lane.ok:
+    if lane.skipped:
+        # A skipped lane was never dispatched — the chain halted at an upstream
+        # lane before this one was reached.  Write a Skipped section rather than
+        # "## Error\n\n(no error detail)", which would be misleading (no call was
+        # made, so there is no error) and technically incorrect (error is None).
+        lines += [
+            "## Skipped",
+            "",
+            "This lane did not run — the chain halted at an upstream lane. "
+            "No model call was made.",
+        ]
+    elif lane.ok:
         lines += ["## Output", "", lane.text or ""]
     else:
         lines += ["## Error", "", lane.error or "(no error detail)"]
@@ -537,6 +548,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             "elapsed_s": lane.elapsed_s,
             "toolset": list(lane.toolset),  # explicit list — never coerce [] to None
             "timed_out": lane.timed_out,
+            "skipped": lane.skipped,   # True = chain never ran this lane; distinct from a real failure
             "file": filename,
         })
 
@@ -554,7 +566,10 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "judge": {"provider": cfg.judge.provider, "model": cfg.judge.model}
                  if result.convergence == "judge" else None,
         "convergence": result.convergence,
+        "topology": result.topology,                     # "parallel" or "sequential"
         "status": result.status.value,
+        "terminal_produced": result.terminal_produced,   # None (not-a-chain), True, or False
+        "threading_truncated": result.threading_truncated,
         "synth_ok": result.synth_ok,
         "judge_ok": result.judge_ok,
         "hermes_home": resolved_hermes_home(),

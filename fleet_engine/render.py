@@ -260,6 +260,10 @@ def render_result(result: FleetResult) -> str:
         elif result.status is FleetStatus.DEGRADED:
             # Sequential+collect: chain broke mid-run (some stages ran, terminal skipped).
             header = "collect result — chain failed mid-run"
+        elif result.topology == "sequential":
+            # FAILED + sequential: the FIRST lane failed and the rest were skipped
+            # (never ran) — "all specialists failed" would be false here.
+            header = "collect result — chain failed at the first lane"
         else:
             header = "collect result — all specialists failed"
     elif result.convergence == "judge":
