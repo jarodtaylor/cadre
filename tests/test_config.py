@@ -310,6 +310,45 @@ class TestConvergenceField(unittest.TestCase):
         self.assertIsNotNone(cfg.synthesis)
 
 
+class TestTopologyField(unittest.TestCase):
+    def test_absent_topology_defaults_to_parallel(self):
+        # R1: omitting topology parses cleanly and yields the default.
+        cfg = FleetConfig.from_dict(make_data())
+        self.assertEqual(cfg.topology, "parallel")
+
+    def test_sequential_and_collect_set_independently(self):
+        # R2: both axes settable on one fleet; neither constrains the other.
+        data = make_data(convergence="collect")
+        del data["synthesis"]
+        data["topology"] = "sequential"
+        cfg = FleetConfig.from_dict(data)
+        self.assertEqual(cfg.topology, "sequential")
+        self.assertEqual(cfg.convergence, "collect")
+
+    def test_bogus_topology_accumulates_error(self):
+        # R3: invalid topology value → ConfigError, error names the problem.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(topology="diagonal"))
+        self.assertTrue(any("topology" in e for e in ctx.exception.errors))
+
+    def test_topology_error_accumulates_with_convergence_error(self):
+        # R3 / accumulating path: a bad topology AND a bad convergence both appear
+        # in the single raised ConfigError — proving the accumulating-error path.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(topology="diagonal", convergence="bogus"))
+        errors = ctx.exception.errors
+        self.assertTrue(any("topology" in e for e in errors))
+        self.assertTrue(any("convergence" in e for e in errors))
+        self.assertGreaterEqual(len(errors), 2)
+
+    def test_non_string_topology_accumulates_error_not_typeerror(self):
+        # isinstance guard: a list value for topology must not raise TypeError on the
+        # set membership test — the loader's malformed-input-never-tracebacks contract.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(topology=["sequential"]))
+        self.assertTrue(any("topology" in e for e in ctx.exception.errors))
+
+
 class TestDescriptionField(unittest.TestCase):
     def test_description_parses_when_present(self):
         cfg = FleetConfig.from_dict(make_data(description="A research fleet"))
