@@ -28,6 +28,7 @@ _RESEARCH_SWARM = _REPO / "fleets" / "research-swarm.example.yaml"
 _CODE_REVIEW = _REPO / "fleets" / "code-review.example.yaml"
 _DOC_REVIEW = _REPO / "fleets" / "doc-review.example.yaml"
 _REVIEW_SCORING = _REPO / "fleets" / "review-scoring.example.yaml"
+_RESEARCH_BRIEF = _REPO / "fleets" / "research-brief.example.yaml"
 
 # The five review lenses doc-review ports from ce-doc-review, in fleet order.
 _DOC_REVIEW_ROLES = ["coherence", "feasibility", "scope-guardian", "product", "adversarial"]
@@ -76,6 +77,14 @@ class TestStarterFleetsLoad(unittest.TestCase):
             self.fail(f"FleetConfig.load raised on review-scoring: {exc}")
         self.assertIsInstance(cfg, FleetConfig)
 
+    def test_research_brief_loads(self):
+        """research-brief.example.yaml parses without raising ConfigError."""
+        try:
+            cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"FleetConfig.load raised on research-brief: {exc}")
+        self.assertIsInstance(cfg, FleetConfig)
+
 
 # ---------------------------------------------------------------------------
 # Convergence mode: each fleet parses as the expected shape
@@ -118,6 +127,16 @@ class TestStarterFleetsConvergence(unittest.TestCase):
                              "review-scoring (judge) must have a judge block")
         self.assertIsNone(cfg.synthesis,
                           "review-scoring (judge) must have synthesis=None")
+
+    def test_research_brief_is_collect_sequential(self):
+        """research-brief uses convergence: collect + topology: sequential, with no synthesis."""
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        self.assertEqual(cfg.convergence, "collect",
+                         "research-brief must parse as collect convergence")
+        self.assertEqual(cfg.topology, "sequential",
+                         "research-brief must parse as sequential topology")
+        self.assertIsNone(cfg.synthesis,
+                          "research-brief (collect) must have synthesis=None")
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +237,23 @@ class TestStarterFleetsLintClean(unittest.TestCase):
             warnings,
             [],
             f"review-scoring should have zero focus-lint warnings, got: {warnings}",
+        )
+
+    def test_research_brief_focus_lint_clean(self):
+        """research-brief has zero check_focus_grounding warnings.
+
+        Scout (web, search) and Analyst (web) are retrieval lanes — both focuses
+        contain explicit sourcing directives (cite, source, link, primary source),
+        so the grounding lint passes for both. Writer (toolset: []) is a
+        non-retrieval lane and is skipped by the lint entirely.
+        """
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(
+            warnings,
+            [],
+            f"research-brief should have zero focus-lint warnings, got: {warnings}",
         )
 
 
@@ -468,6 +504,94 @@ class TestReviewScoringFleetInvariants(unittest.TestCase):
             prompt,
             "judge prompt must not contain '=== LANE:' — the engine appends the "
             "per-lane format block; two format instructions break the parser",
+        )
+
+
+# ---------------------------------------------------------------------------
+# research-brief specific invariants: three sequential lanes, correct toolsets,
+# cross-provider spread, and the Analyst's non-collapsibility control
+# ---------------------------------------------------------------------------
+
+
+class TestResearchBriefFleetInvariants(unittest.TestCase):
+    """research-brief carries three sequential lanes with the correct toolsets."""
+
+    def test_three_lanes_with_expected_roles(self):
+        """research-brief has exactly three lanes: scout, analyst, writer — in order."""
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        roles = [s.role for s in cfg.specialists]
+        self.assertEqual(
+            roles,
+            ["scout", "analyst", "writer"],
+            f"research-brief must have three lanes in order (scout, analyst, writer), got: {roles}",
+        )
+
+    def test_scout_toolset_is_web_and_search(self):
+        """Scout lane uses toolset: [web, search] (retrieval lane for gathering sources)."""
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        scout = cfg.specialists[0]
+        self.assertEqual(scout.role, "scout")
+        self.assertEqual(
+            scout.toolset,
+            ["web", "search"],
+            f"scout toolset must be ['web', 'search'], got: {scout.toolset!r}",
+        )
+
+    def test_analyst_toolset_is_web(self):
+        """Analyst lane uses toolset: [web] (retrieval lane for live verification)."""
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        analyst = cfg.specialists[1]
+        self.assertEqual(analyst.role, "analyst")
+        self.assertEqual(
+            analyst.toolset,
+            ["web"],
+            f"analyst toolset must be ['web'], got: {analyst.toolset!r}",
+        )
+
+    def test_writer_toolset_is_empty_list_not_none(self):
+        """Writer lane uses toolset: [] — fail-closed zero tools (not None, not unset).
+
+        The writer reasons over prior-stage context only; [] is the deliberate
+        fail-closed posture (None enables every Hermes toolset). The [] vs None
+        distinction matters at the adapter layer.
+        """
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        writer = cfg.specialists[2]
+        self.assertEqual(writer.role, "writer")
+        self.assertEqual(
+            writer.toolset,
+            [],
+            f"writer toolset must be [] (fail-closed zero tools), got {writer.toolset!r}",
+        )
+        self.assertIsInstance(
+            writer.toolset,
+            list,
+            "writer toolset must be a list, not None",
+        )
+
+    def test_topology_is_sequential(self):
+        """research-brief uses topology: sequential (chain, not parallel fan-out)."""
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        self.assertEqual(
+            cfg.topology,
+            "sequential",
+            "research-brief topology must be 'sequential'",
+        )
+
+    def test_cross_provider_spread(self):
+        """Scout and Analyst use different providers (retrieval independence).
+
+        Cross-provider retrieval prevents a shared failure mode from silently
+        confirming the Scout's findings in the Analyst's verification pass.
+        """
+        cfg = FleetConfig.load(_RESEARCH_BRIEF)
+        scout_provider = cfg.specialists[0].provider
+        analyst_provider = cfg.specialists[1].provider
+        self.assertNotEqual(
+            scout_provider,
+            analyst_provider,
+            f"Scout and Analyst must use different providers (cross-provider independence); "
+            f"both are on '{scout_provider}'",
         )
 
 

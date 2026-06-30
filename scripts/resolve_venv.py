@@ -38,6 +38,7 @@ _STARTER_FLEETS = (
     "code-review.example.yaml",
     "doc-review.example.yaml",
     "review-scoring.example.yaml",
+    "research-brief.example.yaml",
 )
 
 # Explicit allowlist of persona files to seed. Personas have no .example infix —
