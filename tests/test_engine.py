@@ -863,5 +863,141 @@ class TestFleetStatus(unittest.TestCase):
             FleetResult(fleet="f", task="t", specialists=[], status="bogus")
 
 
+class TestU2ResultTypePlumbing(unittest.TestCase):
+    """U2 result-type plumbing: skipped lane state, topology/terminal_produced on FleetResult.
+
+    These tests cover the additive fields only — no execution logic, no chain logic.
+    All existing parallel-path behaviour must be unaffected (verified by the full suite).
+    """
+
+    # ------------------------------------------------------------------
+    # AgentResult.skipped field
+    # ------------------------------------------------------------------
+
+    def test_skipped_default_false(self):
+        """skipped defaults to False — mirrors timed_out; existing callers unaffected."""
+        r = AgentResult(role="web", provider="p", model="m", ok=True, text="out")
+        self.assertFalse(r.skipped)
+
+    def test_skipped_set_true(self):
+        """skipped=True can be constructed; used by _run_chain (U3) for unrun lanes."""
+        r = AgentResult(role="web", provider="p", model="m", ok=False, skipped=True)
+        self.assertTrue(r.skipped)
+
+    # ------------------------------------------------------------------
+    # FleetResult.failures excludes skipped lanes (R11)
+    # ------------------------------------------------------------------
+
+    def test_failures_excludes_skipped_lane(self):
+        """A skipped lane (ok=False, skipped=True) must not appear in failures.
+
+        This is the load-bearing change: the failure-notes loop iterates
+        result.failures, so once failures excludes skipped, no
+        "specialist '<role>' failed" note is produced for the skipped lane.
+        """
+        skipped = AgentResult(role="skipped-lane", provider="p", model="m", ok=False, skipped=True)
+        failed = AgentResult(role="real-fail", provider="p", model="m", ok=False, error="boom")
+        result = FleetResult(
+            fleet="f", task="t",
+            specialists=[skipped, failed],
+            status=FleetStatus.FAILED,
+        )
+        failure_roles = [r.role for r in result.failures]
+        self.assertNotIn("skipped-lane", failure_roles,
+                         "skipped lane must be excluded from failures")
+        self.assertIn("real-fail", failure_roles,
+                      "real failure must remain in failures")
+
+    def test_skipped_vs_real_failure_distinguishable(self):
+        """skipped and real-failure are distinct: only the real failure appears in failures."""
+        skipped = AgentResult(role="s", provider="p", model="m", ok=False, skipped=True)
+        real = AgentResult(role="r", provider="p", model="m", ok=False, skipped=False, error="err")
+        result = FleetResult(
+            fleet="f", task="t",
+            specialists=[skipped, real],
+            status=FleetStatus.FAILED,
+        )
+        self.assertTrue(skipped.skipped)
+        self.assertFalse(real.skipped)
+        # Only the real failure is in failures
+        self.assertNotIn(skipped, result.failures)
+        self.assertIn(real, result.failures)
+
+    def test_all_skipped_failures_means_empty_failures(self):
+        """If every non-ok lane is skipped, failures is empty."""
+        lanes = [
+            AgentResult(role=f"lane-{i}", provider="p", model="m", ok=False, skipped=True)
+            for i in range(3)
+        ]
+        result = FleetResult(fleet="f", task="t", specialists=lanes, status=FleetStatus.FAILED)
+        self.assertEqual(result.failures, [])
+
+    # ------------------------------------------------------------------
+    # The failure-notes loop omits skipped lanes (via failures exclusion)
+    # ------------------------------------------------------------------
+
+    def test_skipped_lane_produces_no_failure_note(self):
+        """The run_fleet notes loop iterates result.failures. Since failures excludes
+        skipped lanes, a skipped lane must produce no "specialist '...' failed" note.
+        We verify this at the FleetResult level (the notes loop will consume failures).
+        """
+        skipped = AgentResult(role="skipped-role", provider="p", model="m", ok=False, skipped=True)
+        result = FleetResult(
+            fleet="f", task="t",
+            specialists=[skipped],
+            status=FleetStatus.FAILED,
+        )
+        # Simulate the notes loop (engine.py lines 406-407):
+        # for failed in result.failures: result.notes.append(f"specialist '{failed.role}' failed: ...")
+        for failed in result.failures:
+            result.notes.append(f"specialist '{failed.role}' failed: {failed.error}")
+        note_text = " ".join(result.notes)
+        self.assertNotIn("skipped-role", note_text,
+                         "skipped lane must not produce a failure note")
+
+    # ------------------------------------------------------------------
+    # FleetResult.topology field
+    # ------------------------------------------------------------------
+
+    def test_topology_defaults_to_parallel(self):
+        """topology defaults to 'parallel' — existing FleetResult callers unaffected."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertEqual(result.topology, "parallel")
+
+    def test_topology_round_trips_sequential(self):
+        """topology='sequential' can be constructed and read back (set by _run_chain in U3)."""
+        result = FleetResult(
+            fleet="f", task="t", specialists=[], status=FleetStatus.FAILED,
+            topology="sequential",
+        )
+        self.assertEqual(result.topology, "sequential")
+
+    # ------------------------------------------------------------------
+    # FleetResult.terminal_produced field
+    # ------------------------------------------------------------------
+
+    def test_terminal_produced_defaults_to_none(self):
+        """terminal_produced=None signals 'not a chain run' so the manifest builder
+        never reads an undeclared attribute on a parallel result."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertIsNone(result.terminal_produced)
+
+    def test_terminal_produced_can_be_set_true(self):
+        """terminal_produced=True: chain ran and the terminal lane produced output."""
+        result = FleetResult(
+            fleet="f", task="t", specialists=[], status=FleetStatus.SUCCESS,
+            topology="sequential", terminal_produced=True,
+        )
+        self.assertTrue(result.terminal_produced)
+
+    def test_terminal_produced_can_be_set_false(self):
+        """terminal_produced=False: chain ran but the terminal lane was skipped or produced nothing."""
+        result = FleetResult(
+            fleet="f", task="t", specialists=[], status=FleetStatus.FAILED,
+            topology="sequential", terminal_produced=False,
+        )
+        self.assertIs(result.terminal_produced, False)
+
+
 if __name__ == "__main__":
     unittest.main()

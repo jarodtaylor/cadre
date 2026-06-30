@@ -91,9 +91,11 @@ class FleetResult:
     notes: list[str] = field(default_factory=list)   # failure / degradation notes
     synth_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
     convergence: str = "synthesize"                  # "synthesize", "collect", or "judge" — always set; consumers must read this to disambiguate
+    topology: str = "parallel"                       # "parallel" or "sequential" — the execution-order axis; always set; orthogonal to convergence
     status: FleetStatus = FleetStatus.FAILED         # explicit tri-state; set at every run_fleet return point
     judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
+    terminal_produced: bool | None = None            # None=not a chain run (parallel); True=terminal lane produced output; False=terminal lane ran but produced nothing, or chain broke before reaching it (terminal lane skipped)
 
     def __post_init__(self) -> None:
         # Normalize status to the FleetStatus enum so the identity checks (`is`)
@@ -119,7 +121,10 @@ class FleetResult:
 
     @property
     def failures(self) -> list[AgentResult]:
-        return [r for r in self.specialists if not r.ok]
+        # Skipped lanes (chain never ran them) are excluded: they have no error to
+        # report and should not appear in the "specialist '<role>' failed" notes. A
+        # skipped lane is distinct from a real failure — it did not receive a model call.
+        return [r for r in self.specialists if not r.ok and not r.skipped]
 
 
 def _specialist_prompt(spec: SpecialistSpec, task: str) -> str:
