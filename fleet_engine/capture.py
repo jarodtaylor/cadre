@@ -61,6 +61,15 @@ _DEFAULT_RUNS_ROOT = "~/.cadre/runs"
 # cuts on a word boundary (see _slugify), so a long task never ends mid-word.
 _SLUG_MAX = 40
 
+# Max length of the synthesizer-derived run title recorded in the manifest. The
+# folder leaf built from it is bounded separately by _slugify's word-boundary cut.
+_TITLE_MAX = 120
+
+# A default run-dir leaf is "<YYYY-MM-DD-HHMMSS>-<slug>". This matches the fixed
+# timestamp prefix so a post-run rename can preserve it (the prefix is the sort key
+# under ~/.cadre/runs/); a leaf without it is caller-controlled and never renamed.
+_STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{6})-")
+
 
 def _safe_role(role: str) -> str:
     """Return a filesystem-safe version of ``role`` for use in filenames ONLY.
@@ -272,7 +281,60 @@ def save_lane(lane, filename: str, run_dir: Path) -> None:  # lane: AgentResult
     _write(run_dir / filename, _specialist_md(lane))
 
 
-def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
+def _synthesis_title(result: FleetResult) -> str | None:
+    """The run's semantic title: the synthesizer's leading H1, reused at no extra
+    model cost (#4). ``None`` when synthesis produced no report (collect or all-failed
+    run — ``result.synthesis is None``) or the report did not open with an H1; the
+    synthesis prompt does not mandate one, so this is best-effort. Sanitized (the H1
+    is model-generated) and length-capped for the manifest.
+    """
+    if result.convergence != "synthesize" or not result.synthesis:
+        return None
+    for line in result.synthesis.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("# "):
+            title = _sanitize(stripped[2:]).strip()
+            return title[:_TITLE_MAX].strip() or None
+        return None  # first non-blank line is not an H1 — no title
+    return None
+
+
+def _rename_to_title(run_dir: Path, title: str) -> Path:
+    """Rename a default ``<stamp>-<slug>`` run dir to ``<stamp>-<title-slug>``,
+    preserving the timestamp prefix and reusing the ``-2``/``-3`` collision suffix.
+
+    Returns the new Path, or ``run_dir`` unchanged when the rename does not apply or
+    fails — degrade, never crash a completed run. Skipped for caller-controlled dirs
+    (``CADRE_RUN_DIR`` set, or a leaf without the stamp prefix). The folder name is
+    built ONLY from ``_slugify(title)``: the title is model-generated, and slugifying
+    is what defangs a path-like H1 (e.g. ``# ../../etc``) into a safe leaf — never use
+    the raw title here.
+    """
+    if os.getenv("CADRE_RUN_DIR"):
+        return run_dir  # caller owns the path
+    match = _STAMP_RE.match(run_dir.name)
+    if not match:
+        return run_dir  # not a default stamped leaf
+    title_slug = _slugify(title)
+    if title_slug == "run":
+        return run_dir  # _slugify's empty fallback — nothing better than the slug
+    base = run_dir.parent / f"{match.group(1)}-{title_slug}"
+    if base == run_dir:
+        return run_dir  # title-slug already equals the current leaf
+    target, counter = base, 2
+    try:
+        while target.exists():
+            target = base.parent / f"{base.name}-{counter}"
+            counter += 1
+        run_dir.rename(target)
+        return target
+    except OSError:
+        return run_dir  # rename failed — keep the completed run where it is
+
+
+def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> Path:
     """Write ``synthesis.md`` and ``manifest.json`` into ``run_dir`` (run-completion step).
 
     In a live run the edge has already written each specialist's ``.md`` via
@@ -297,6 +359,11 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
         cfg: The validated fleet configuration for this run.
         result: The FleetResult returned by run_fleet.
         run_dir: The directory to write artifacts into (injected — caller resolves).
+
+    Returns:
+        The final run directory — ``run_dir`` itself, or a sibling renamed to the
+        synthesizer's H1 title (#4) when synthesis produced one and the dir is a
+        default ``<stamp>-<slug>`` leaf. Callers print this for the ``Run folder:`` line.
     """
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -316,6 +383,15 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> None:
         run_dir / "manifest.json",
         json.dumps(_build_manifest(cfg, result, lane_filenames), indent=2),
     )
+
+    # Semantic run title (#4): if synthesis produced an H1, rename the default run
+    # folder to <stamp>-<title-slug> so `ls ~/.cadre/runs/` reads well. The manifest
+    # (the completion marker, written above) moves intact with the dir — no path is
+    # stored in it. Return the final dir; the caller prints THIS for "Run folder:".
+    title = _synthesis_title(result)
+    if title:
+        return _rename_to_title(run_dir, title)
+    return run_dir
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +546,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
     manifest: dict = {
         "fleet": result.fleet,
         "task": result.task,
+        "title": _synthesis_title(result),
         "timestamp": datetime.now().isoformat(),
         "models": participating_models,
         "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model}
