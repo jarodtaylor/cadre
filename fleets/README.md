@@ -5,13 +5,14 @@ library to use it:
 
 ```bash
 cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
+cp fleets/research-brief.example.yaml ~/.cadre/fleets/research-brief.yaml
 cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
 cp fleets/doc-review.example.yaml ~/.cadre/fleets/doc-review.yaml
 cp fleets/review-scoring.example.yaml ~/.cadre/fleets/review-scoring.yaml
 # then set provider/model strings to your host-verified values (see ~/.cadre/palette.yaml)
 ```
 
-All four starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
+All five starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
 `.example` from the filename) so they are ready to configure without copying
 manually.
 
@@ -32,6 +33,40 @@ calls out conflicts.
 
 Shape: **fan-out → synthesize**. `convergence` is absent (defaults to
 `synthesize`), so every existing fleet that omits the field parses identically.
+
+---
+
+### `research-brief.example.yaml` — sequential (chain) shape
+
+A three-stage dependent pipeline that chains a **scout**, an **analyst**, and a
+**writer** in sequence — each stage receives all prior stages' attributed output,
+accumulated through the chain:
+
+- **scout** (`[web, search]`) — gathers primary sources on the topic and cites
+  them.
+- **analyst** (different provider, `[web]`) — audits and **verifies the scout's
+  specific findings** against live sources, framed as an independent critic rather
+  than a parallel researcher.
+- **writer** (no tools) — synthesizes the verified, attributed evidence into a
+  polished brief.
+
+The key advantage over a parallel fan-out: the analyst performs a **mid-chain
+correction** of the scout's exact claims, and both the scout's raw output and the
+analyst's corrections survive as **auditable intermediate stages** in the run
+folder and report. A parallel swarm produces two independent views of the topic;
+a chain produces an independent verification of one — a qualitatively different
+result.
+
+Assigning the scout and analyst to different providers makes their retrieval
+independence visible — a secondary benefit on top of the chain's verification
+structure.
+
+To run: pass `--task "topic to research"`. Add `--doc PATH` to seed the scout
+with a starting document (its content is threaded into the first lane's prompt).
+
+Shape: **chain → collect**. Both `topology: sequential` and `convergence: collect`
+are explicit in the spec; the run folder holds each stage's output as a separate
+file.
 
 ---
 
