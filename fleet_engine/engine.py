@@ -375,6 +375,89 @@ def _fan_out(
     return [collected[i] for i in range(n)]
 
 
+def _run_convergence(
+    result: FleetResult,
+    config: FleetConfig,
+    task: str,
+    client: ModelClient,
+    call_timeout: float | None,
+    progress: ProgressHook,
+    successes: list[AgentResult],
+) -> bool | None:
+    """Run the convergence OUTPUT step for the configured mode, mutating ``result``
+    (mode-detail fields + failure note) and emitting progress events. Does NOT set
+    result.status — the caller owns that.
+
+    Returns the convergence step's ok-ness (True/False) for synthesize/judge;
+    None for collect (no convergence call).
+    """
+    if config.convergence == "judge":
+        # Judge: one independent critic call over the surviving specialists — synthesizer-shaped
+        # (daemon thread + deadline), but with toolset=[] explicit (KTD6) and its own progress
+        # events and result fields (KTD2).
+        progress(JudgeStarted(survivors=len(successes)))
+        judge_started = _start_daemon(
+            lambda: client.run(
+                role="judge",
+                provider=config.judge.provider,
+                model=config.judge.model,
+                toolset=[],  # fail-closed zero tools over untrusted specialist text (KTD6)
+                prompt=_judge_prompt(config, task, successes),
+            ),
+            name="fleet-judge",
+        )
+        judge_deadline = None if call_timeout is None else time.monotonic() + call_timeout
+        judge_outcome = _collect(
+            judge_started, judge_deadline,
+            "judge", config.judge.provider, config.judge.model, call_timeout,
+            toolset=[],
+        )
+        result.judge_ok = judge_outcome.ok
+        if judge_outcome.ok:
+            result.judge = judge_outcome.text
+        else:
+            # Judge failed (error or timeout): degrade to attributed outputs + note (R10/KTD5).
+            result.notes.append(f"judge failed: {judge_outcome.error}")
+        progress(JudgeDone(outcome=outcome_label(judge_outcome), elapsed_s=judge_outcome.elapsed_s or 0.0))
+        return judge_outcome.ok
+
+    if config.convergence == "collect":
+        # Collect: no convergence step — raw specialist lanes are the output.
+        # synthesis stays None, synth_ok stays None — read result.convergence to
+        # distinguish from an all-failed synthesize run (KTD2).
+        return None
+
+    # synthesize (fall-through): synthesize over the survivors with the strong model — also
+    # timed, in a daemon thread. A hung synthesizer would otherwise stall the main thread with
+    # nothing to abandon (worse than a stuck specialist: the process could not even exit).
+    progress(SynthStarted(survivors=len(successes)))
+    synth_started = _start_daemon(
+        lambda: client.run(
+            role="synthesizer",
+            provider=config.synthesis.provider,
+            model=config.synthesis.model,
+            prompt=_synthesis_prompt(config, task, successes),
+        ),
+        name="fleet-synthesizer",
+    )
+    synth_deadline = None if call_timeout is None else time.monotonic() + call_timeout
+    synth = _collect(
+        synth_started, synth_deadline,
+        "synthesizer", config.synthesis.provider, config.synthesis.model, call_timeout,
+        toolset=[],  # synthesizer has no configured toolset; [] = fail-closed zero tools
+    )
+    result.synth_ok = synth.ok
+    if synth.ok:
+        result.synthesis = synth.text
+    else:
+        # Synthesizer failed (error or timeout): return the labeled specialist
+        # outputs plus a note, no synthesized text. Still a usable partial result
+        # that honors R9.
+        result.notes.append(f"synthesizer failed: {synth.error}")
+    progress(SynthDone(outcome=outcome_label(synth), elapsed_s=synth.elapsed_s or 0.0))
+    return synth.ok
+
+
 def run_fleet(
     config: FleetConfig,
     task: str,
@@ -421,81 +504,13 @@ def run_fleet(
         result.status = FleetStatus.FAILED
         return result
 
-    if config.convergence == "judge":
-        # Judge: one independent critic call over the surviving specialists — synthesizer-shaped
-        # (daemon thread + deadline), but with toolset=[] explicit (KTD6) and its own progress
-        # events and result fields (KTD2). Returns before reaching collect or synthesizer.
-        progress(JudgeStarted(survivors=len(successes)))
-        judge_started = _start_daemon(
-            lambda: client.run(
-                role="judge",
-                provider=config.judge.provider,
-                model=config.judge.model,
-                toolset=[],  # fail-closed zero tools over untrusted specialist text (KTD6)
-                prompt=_judge_prompt(config, task, successes),
-            ),
-            name="fleet-judge",
-        )
-        judge_deadline = None if call_timeout is None else time.monotonic() + call_timeout
-        judge_outcome = _collect(
-            judge_started, judge_deadline,
-            "judge", config.judge.provider, config.judge.model, call_timeout,
-            toolset=[],
-        )
-        result.judge_ok = judge_outcome.ok
-        if judge_outcome.ok:
-            result.judge = judge_outcome.text
-            result.status = FleetStatus.SUCCESS
-        else:
-            # Judge failed (error or timeout): degrade to attributed outputs + note (R10/KTD5).
-            result.notes.append(f"judge failed: {judge_outcome.error}")
-            result.status = FleetStatus.DEGRADED
-        progress(JudgeDone(outcome=outcome_label(judge_outcome), elapsed_s=judge_outcome.elapsed_s or 0.0))
-        return result
-
-    if config.convergence == "collect":
-        # Collect: return raw specialist lanes; synthesizer is never invoked.
-        # status = SUCCESS here (past the all-fail guard, so >=1 specialist succeeded).
-        # synthesis stays None, synth_ok stays None — read result.convergence to
-        # distinguish from an all-failed synthesize run (KTD2).
-        result.status = FleetStatus.SUCCESS  # guaranteed past the all-fail guard above (>=1 specialist succeeded)
-        return result
-
-    if len(successes) == 1:
+    if config.convergence == "synthesize" and len(successes) == 1:
         result.notes.append("synthesized from a single surviving specialist (degenerate fan-out)")
-
-    progress(SynthStarted(survivors=len(successes)))
-
-    # Synthesize over the survivors with the strong model — also timed, in a daemon
-    # thread. A hung synthesizer would otherwise stall the main thread with nothing
-    # to abandon (worse than a stuck specialist: the process could not even exit).
-    synth_started = _start_daemon(
-        lambda: client.run(
-            role="synthesizer",
-            provider=config.synthesis.provider,
-            model=config.synthesis.model,
-            prompt=_synthesis_prompt(config, task, successes),
-        ),
-        name="fleet-synthesizer",
-    )
-    synth_deadline = None if call_timeout is None else time.monotonic() + call_timeout
-    synth = _collect(
-        synth_started, synth_deadline,
-        "synthesizer", config.synthesis.provider, config.synthesis.model, call_timeout,
-        toolset=[],  # synthesizer has no configured toolset; [] = fail-closed zero tools
-    )
-    result.synth_ok = synth.ok
-    if synth.ok:
-        result.synthesis = synth.text
-        result.status = FleetStatus.SUCCESS
+    convergence_ok = _run_convergence(result, config, task, client, call_timeout, progress, successes)
+    if config.convergence == "collect":
+        result.status = FleetStatus.SUCCESS  # past the all-fail guard → ≥1 survivor
     else:
-        # Synthesizer failed (error or timeout): return the labeled specialist
-        # outputs plus a note, no synthesized text. Still a usable partial result
-        # that honors R9.
-        result.notes.append(f"synthesizer failed: {synth.error}")
-        result.status = FleetStatus.DEGRADED
-
-    progress(SynthDone(outcome=outcome_label(synth), elapsed_s=synth.elapsed_s or 0.0))
+        result.status = FleetStatus.SUCCESS if convergence_ok else FleetStatus.DEGRADED
 
     # Seam (R12): an independent-critic stage composes here — take this
     # FleetResult, add a critique/confidence score — without touching the

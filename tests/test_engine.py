@@ -99,6 +99,12 @@ class TestHappyPath(unittest.TestCase):
         self.assertEqual(roles[3], "synthesizer")
         self.assertEqual(len(client.calls), 4)
 
+    def test_parallel_topology_tag(self):
+        """AE4: a default parallel fleet run carries topology='parallel' on the result."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "what's new in agents?", client)
+        self.assertEqual(result.topology, "parallel")
+
 
 class TestPersonaPrompt(unittest.TestCase):
     """Engine reads effective_instruction for specialist prompts.
