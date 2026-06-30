@@ -17,7 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, FleetStatus
+from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, _CHAIN_STAGE_CAP
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
     Completion,
@@ -25,6 +25,7 @@ from fleet_engine.progress import (
     JudgeStarted,
     LaneDone,
     LaneLaunched,
+    LaneStarted,
     ProgressEvent,
     RunFolder,
     SynthDone,
@@ -110,7 +111,10 @@ def _sanitize(text: str, *, multiline: bool = False) -> str:
     )
 
 
-def render_fleet_preview(config: FleetConfig) -> str:
+def render_fleet_preview(
+    config: FleetConfig,
+    call_timeout: float | None = DEFAULT_CALL_TIMEOUT,
+) -> str:
     """Render a human-readable preview of a FleetConfig.
 
     Derived MECHANICALLY from the validated ``FleetConfig`` object — never from
@@ -118,6 +122,11 @@ def render_fleet_preview(config: FleetConfig) -> str:
     summary of it, which is why it must be complete and exact. Every
     fleet-controlled string is passed through ``_sanitize`` so a tampered fleet
     cannot use terminal escapes to spoof or hide any part of the preview.
+
+    ``call_timeout`` is the per-stage wall-clock budget (seconds); for sequential
+    fleets, the max total wall-clock ceiling is shown as ``call_timeout × N stages``.
+    Pass ``None`` to indicate an unlimited per-stage budget.  Parallel fleets ignore
+    this parameter — the parallel preview stays byte-identical.
 
     Returns a multi-line string suitable for terminal display.
     """
@@ -192,6 +201,19 @@ def render_fleet_preview(config: FleetConfig) -> str:
                 # Focus lane: single-line (focus text is always a one-liner).
                 out.append(f"    focus: {_sanitize(s.effective_instruction)}")
 
+    # Sequential-specific summary (parallel preview stays byte-identical — no new line).
+    if config.topology == "sequential":
+        stages = len(config.specialists)
+        if call_timeout is not None:
+            total_s = call_timeout * stages
+            mm = int(total_s) // 60
+            ss = int(total_s) % 60
+            ceiling_str = f"{mm}m{ss:02d}s" if mm > 0 else f"{ss}s"
+            out.append(f"\nTopology: sequential — {stages} stage(s), max wall-clock {ceiling_str}")
+        else:
+            out.append(f"\nTopology: sequential — {stages} stage(s), no per-stage timeout")
+        out.append(f"  Inter-stage output cap: {_CHAIN_STAGE_CAP:,} chars")
+
     out.append("\n=== end preview ===")
     return "\n".join(out)
 
@@ -233,11 +255,13 @@ def render_result(result: FleetResult) -> str:
     # Key the header on (convergence, status) so every (mode, outcome) pair is read from
     # the engine-declared status, not re-derived from ok/synth_ok/judge_ok.
     if result.convergence == "collect":
-        header = (
-            "collect result"
-            if result.status is FleetStatus.SUCCESS
-            else "collect result — all specialists failed"
-        )
+        if result.status is FleetStatus.SUCCESS:
+            header = "collect result"
+        elif result.status is FleetStatus.DEGRADED:
+            # Sequential+collect: chain broke mid-run (some stages ran, terminal skipped).
+            header = "collect result — chain failed mid-run"
+        else:
+            header = "collect result — all specialists failed"
     elif result.convergence == "judge":
         if result.status is FleetStatus.SUCCESS:
             header = "judge result"
@@ -295,19 +319,29 @@ def render_result(result: FleetResult) -> str:
         # provenance rows.
         for r in result.successes:
             out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+    if result.threading_truncated:
+        # Our own trusted text — not sanitized. A sequential chain produced inter-stage
+        # output that exceeded _CHAIN_STAGE_CAP chars; downstream stages received a
+        # partial upstream context, which may affect quality.
+        out.append("\nnote: inter-stage output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
     # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
     # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,
     # result.synthesis) is deliberately NOT stripped here — that's the deferred
     # injection->terminal chain (GH #5), not this surface's job.
     for r in result.specialists:
-        if r.ok:
+        if r.skipped:
+            tag = "SKIP"
+            suffix = ""
+        elif r.ok:
             tag = "ok  "
+            suffix = ""
         elif r.timed_out:
             tag = "TIMEOUT"
+            suffix = f": {r.error}" if r.error else ""
         else:
             tag = "FAIL"
-        suffix = "" if r.ok else f": {r.error}"
+            suffix = f": {r.error}" if r.error else ""
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")
@@ -379,10 +413,12 @@ class ProgressRenderer:
         # or writing its line — one lock, one critical section.
         self._lock = threading.Lock()
 
-        # Live tally — updated under self._lock on LaneLaunched and LaneDone.
+        # Live tally — updated under self._lock on LaneLaunched, LaneStarted, and LaneDone.
         self._total: int = 0
         self._done: int = 0
         self._failed: int = 0
+        self._skipped: int = 0   # chain lanes that never ran (sequential only)
+        self._stage: int = 0     # count of LaneStarted events seen (used to format "stage k/N")
 
         # Heartbeat timer state — set by start_heartbeat, consumed by stop.
         self._stop_event: threading.Event = threading.Event()
@@ -486,17 +522,27 @@ class ProgressRenderer:
             self._stream_dead = True
 
     def _update_tally(self, event: ProgressEvent) -> None:
-        """Update the active/done/failed tally from an event.
+        """Update the active/done/failed/skipped tally from an event.
 
         Must be called under ``self._lock``, BEFORE writing the line for this
-        event.  Only LaneLaunched and LaneDone change the tally.
+        event (``emit`` calls ``_format`` then acquires the lock, then calls
+        ``_update_tally`` then ``_write``).  For ``LaneStarted``, this ordering
+        means ``self._stage`` in ``_format`` still holds the count of PRIOR started
+        lanes — ``_stage + 1`` is the 1-based display index.  ``LaneLaunched``,
+        ``LaneStarted``, and ``LaneDone`` change the tally; all other event types
+        are no-ops.
         """
         if isinstance(event, LaneLaunched):
             self._total = len(event.roles)
+        elif isinstance(event, LaneStarted):
+            # Increment AFTER _format so the "stage k/N" display uses the prior count.
+            self._stage += 1
         elif isinstance(event, LaneDone):
             label = outcome_label(event.result)
             if label == "ok":
                 self._done += 1
+            elif label == "skipped":
+                self._skipped += 1
             else:
                 # Both "failed" and "timed-out" count toward the failure tally.
                 self._failed += 1
@@ -533,7 +579,17 @@ class ProgressRenderer:
 
         if isinstance(event, LaneLaunched):
             roles = ", ".join(_sanitize(r) for r in event.roles)
+            if event.queued:
+                # Sequential roster: all stages announced up front but not yet started.
+                return f"[cadre] queued {len(event.roles)} stages: {roles}"
             return f"[cadre] launched {len(event.roles)} specialists: {roles}"
+
+        if isinstance(event, LaneStarted):
+            role = _sanitize(event.role)
+            # _update_tally hasn't run yet for this event, so self._stage is the count
+            # of PRIOR started lanes — add 1 for the 1-based display index.
+            stage_num = self._stage + 1
+            return f"[cadre] stage {stage_num}/{self._total}: {role}"
 
         if isinstance(event, LaneDone):
             role = _sanitize(event.result.role)
@@ -593,11 +649,12 @@ class ProgressRenderer:
                 elapsed_s = int(time.monotonic() - self._heartbeat_start)
                 mm = elapsed_s // 60
                 ss = elapsed_s % 60
-                active = self._total - self._done - self._failed
+                active = self._total - self._done - self._failed - self._skipped
                 line = (
                     f"[cadre] heartbeat {mm:02d}:{ss:02d}"
                     f" active={active}/{self._total}"
                     f" done={self._done}"
                     f" failed={self._failed}"
+                    f" skipped={self._skipped}"
                 )
                 self._write(line)

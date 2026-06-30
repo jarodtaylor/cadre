@@ -150,9 +150,13 @@ def noop(event: ProgressEvent) -> None:
 def outcome_label(result: AgentResult) -> str:
     """Map a collected result to a stable outcome label for breadcrumbs.
 
-    ``timed-out`` takes precedence (a timed-out lane is also ``ok=False``), then
-    ``ok``, else ``failed``. An internal label only — never the raw error string.
+    ``skipped`` takes precedence (a chain lane that never ran; skipped implies
+    ``ok=False`` and ``timed_out=False``).  Then ``timed-out`` (a timed-out lane
+    is also ``ok=False``), then ``ok``, else ``failed``.  An internal label only
+    — never the raw error string.
     """
+    if result.skipped:
+        return "skipped"
     if result.timed_out:
         return "timed-out"
     return "ok" if result.ok else "failed"

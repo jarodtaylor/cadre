@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
-from fleet_engine.engine import FleetResult
+from fleet_engine.engine import FleetResult, FleetStatus
 from tests.test_engine import _derive_status
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
@@ -26,6 +26,7 @@ from fleet_engine.progress import (
     JudgeStarted,
     LaneDone,
     LaneLaunched,
+    LaneStarted,
     RunFolder,
     SynthDone,
     SynthStarted,
@@ -59,6 +60,7 @@ def make_lane(
     timed_out=False,
     elapsed_s=1.0,
     toolset=None,
+    skipped=False,
 ):
     """Return an AgentResult with sensible defaults; caller overrides what it cares about."""
     return AgentResult(
@@ -67,10 +69,12 @@ def make_lane(
         model=model,
         ok=ok,
         text=text if ok else None,
-        error=None if ok else (error or "some error"),
+        # Skipped lanes have no error (they never ran); ok=False lanes get a default.
+        error=None if (ok or skipped) else (error or "some error"),
         timed_out=timed_out,
         elapsed_s=elapsed_s,
         toolset=toolset if toolset is not None else [],
+        skipped=skipped,
     )
 
 
@@ -1292,8 +1296,8 @@ class TestProgressRendererHeartbeat(unittest.TestCase):
 
         hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
         self.assertGreater(len(hb_lines), 0, "at least one heartbeat line must appear")
-        # Shape: [cadre] heartbeat mm:ss active=A/T done=D failed=F
-        pattern = r"^\[cadre\] heartbeat \d{2}:\d{2} active=\d+/\d+ done=\d+ failed=\d+$"
+        # Shape: [cadre] heartbeat mm:ss active=A/T done=D failed=F skipped=S
+        pattern = r"^\[cadre\] heartbeat \d{2}:\d{2} active=\d+/\d+ done=\d+ failed=\d+ skipped=\d+$"
         for ln in hb_lines:
             self.assertRegex(ln, pattern, f"heartbeat line has wrong shape: {ln!r}")
 
@@ -2105,6 +2109,349 @@ class TestDegradedJudgeAbsence(unittest.TestCase):
         """The surviving specialists' outputs are still surfaced on DEGRADED judge."""
         self.assertIn("web output", self.rendered)
         self.assertIn("analysis output", self.rendered)
+
+
+# ---------------------------------------------------------------------------
+# Sequential topology — render_result header + provenance + threading_truncated
+# ---------------------------------------------------------------------------
+
+
+class TestRenderResultSequentialCollectHeader(unittest.TestCase):
+    """render_result header for sequential+collect reflects (SUCCESS / DEGRADED / FAILED)."""
+
+    def _make_seq_result(self, status, specialists):
+        """Build a FleetResult directly (not via _derive_status shim — KTD6)."""
+        return FleetResult(
+            fleet="chain-fleet",
+            task="test task",
+            specialists=specialists,
+            convergence="collect",
+            topology="sequential",
+            status=status,
+        )
+
+    def test_success_header(self):
+        lanes = [make_lane(role="scout", text="found things"), make_lane(role="writer", text="draft")]
+        result = self._make_seq_result(FleetStatus.SUCCESS, lanes)
+        rendered = render_result(result)
+        self.assertIn("collect result", rendered)
+        self.assertNotIn("chain failed", rendered)
+        self.assertNotIn("all specialists failed", rendered)
+
+    def test_degraded_header(self):
+        lanes = [
+            make_lane(role="scout", text="found things"),
+            make_lane(role="analyst", ok=False),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = self._make_seq_result(FleetStatus.DEGRADED, lanes)
+        rendered = render_result(result)
+        self.assertIn("collect result — chain failed mid-run", rendered)
+
+    def test_failed_header(self):
+        lanes = [
+            make_lane(role="scout", ok=False),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = self._make_seq_result(FleetStatus.FAILED, lanes)
+        rendered = render_result(result)
+        self.assertIn("collect result — all specialists failed", rendered)
+
+
+class TestRenderResultSkipTagInProvenance(unittest.TestCase):
+    """Skipped lanes render [SKIP] in provenance; suffix must not be ': None'."""
+
+    def test_skip_tag_appears(self):
+        lanes = [
+            make_lane(role="scout", text="found"),
+            make_lane(role="analyst", ok=False),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.DEGRADED,
+        )
+        rendered = render_result(result)
+        self.assertIn("[SKIP]", rendered)
+        self.assertIn("writer", rendered)
+
+    def test_skip_suffix_is_not_none(self):
+        """A skipped lane must not produce ': None' in the provenance row."""
+        lanes = [make_lane(role="scout", ok=False), make_lane(role="writer", skipped=True, ok=False)]
+        result = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.FAILED,
+        )
+        rendered = render_result(result)
+        self.assertNotIn(": None", rendered)
+
+    def test_ok_and_fail_tags_unchanged(self):
+        """ok  / FAIL tags still appear alongside SKIP (parallel path unchanged)."""
+        lanes = [
+            make_lane(role="scout", text="ok output"),
+            make_lane(role="analyst", ok=False, error="boom"),
+            make_lane(role="writer", skipped=True, ok=False),
+        ]
+        result = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.DEGRADED,
+        )
+        rendered = render_result(result)
+        self.assertIn("[ok  ]", rendered)
+        self.assertIn("[FAIL]", rendered)
+        self.assertIn("[SKIP]", rendered)
+
+
+class TestRenderResultThreadingTruncated(unittest.TestCase):
+    """threading_truncated=True adds a disclosure note before provenance."""
+
+    def test_disclosure_present_when_true(self):
+        lanes = [make_lane(role="scout", text="long text")]
+        result = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.SUCCESS,
+            threading_truncated=True,
+        )
+        rendered = render_result(result)
+        self.assertIn("inter-stage output was capped", rendered)
+        # Disclosure must appear BEFORE provenance.
+        cap_pos = rendered.index("inter-stage output was capped")
+        prov_pos = rendered.index("--- provenance ---")
+        self.assertLess(cap_pos, prov_pos, "cap disclosure must precede provenance")
+
+    def test_disclosure_absent_when_false(self):
+        lanes = [make_lane(role="scout", text="short")]
+        result = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.SUCCESS,
+            threading_truncated=False,
+        )
+        rendered = render_result(result)
+        self.assertNotIn("inter-stage output was capped", rendered)
+
+    def test_parallel_result_never_discloses(self):
+        """threading_truncated defaults to False for parallel FleetResult — no disclosure."""
+        lanes = [make_lane(role="web", text="result")]
+        result = FleetResult(
+            fleet="parallel-fleet",
+            task="t",
+            specialists=lanes,
+            convergence="collect",
+            topology="parallel",
+            status=FleetStatus.SUCCESS,
+        )
+        rendered = render_result(result)
+        self.assertNotIn("inter-stage output was capped", rendered)
+
+
+# ---------------------------------------------------------------------------
+# Sequential topology — ProgressRenderer breadcrumbs + tally
+# ---------------------------------------------------------------------------
+
+
+class TestProgressRendererSequentialFormat(unittest.TestCase):
+    """LaneLaunched(queued=True) and LaneStarted render correct breadcrumbs."""
+
+    def _emit_and_get(self, event):
+        r, stream = _make_renderer()
+        r.emit(event)
+        return _lines(stream)
+
+    def test_lane_launched_queued_format(self):
+        """LaneLaunched(queued=True) renders 'queued N stages' not 'launched N specialists'."""
+        lines = self._emit_and_get(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] queued 3 stages: scout, analyst, writer")
+
+    def test_lane_launched_parallel_format_unchanged(self):
+        """LaneLaunched(queued=False) still renders 'launched N specialists' (backward-compat)."""
+        lines = self._emit_and_get(LaneLaunched(roles=["web", "social"]))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] launched 2 specialists: web, social")
+
+    def test_lane_started_format_stage_1(self):
+        """The first LaneStarted renders 'stage 1/N' using the roster total."""
+        r, stream = _make_renderer()
+        r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        r.emit(LaneStarted(role="scout"))
+        lines = _lines(stream)
+        # Last line is the LaneStarted breadcrumb.
+        self.assertEqual(lines[-1], "[cadre] stage 1/3: scout")
+
+    def test_lane_started_counter_increments(self):
+        """Each LaneStarted increments the stage counter correctly."""
+        r, stream = _make_renderer()
+        r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        r.emit(LaneStarted(role="scout"))
+        r.emit(LaneDone(result=make_lane(role="scout", text="found")))
+        r.emit(LaneStarted(role="analyst"))
+        lines = _lines(stream)
+        started_lines = [ln for ln in lines if ln.startswith("[cadre] stage ")]
+        self.assertEqual(started_lines[0], "[cadre] stage 1/3: scout")
+        self.assertEqual(started_lines[1], "[cadre] stage 2/3: analyst")
+
+    def test_lane_started_sanitizes_role(self):
+        """ESC byte in role must not appear in the LaneStarted breadcrumb."""
+        r, stream = _make_renderer()
+        r.emit(LaneLaunched(roles=["evil\x1b[31mrole"], queued=True))
+        r.emit(LaneStarted(role="evil\x1b[31mrole"))
+        self.assertNotIn("\x1b", stream.getvalue())
+
+
+class TestProgressRendererSkippedTally(unittest.TestCase):
+    """Skipped LaneDone events increment _skipped, not _failed."""
+
+    def setUp(self):
+        self.r, self.stream = _make_renderer()
+
+    def test_skipped_lane_increments_skipped_not_failed(self):
+        self.r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        self.r.emit(LaneDone(result=make_lane(role="writer", skipped=True, ok=False)))
+        self.assertEqual(self.r._skipped, 1)
+        self.assertEqual(self.r._failed, 0)
+
+    def test_skipped_and_failed_are_separate_buckets(self):
+        self.r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        self.r.emit(LaneDone(result=make_lane(role="scout", text="ok")))
+        self.r.emit(LaneDone(result=make_lane(role="analyst", ok=False)))
+        self.r.emit(LaneDone(result=make_lane(role="writer", skipped=True, ok=False)))
+        self.assertEqual(self.r._done, 1)
+        self.assertEqual(self.r._failed, 1)
+        self.assertEqual(self.r._skipped, 1)
+
+    def test_active_excludes_skipped(self):
+        """Active count = total - done - failed - skipped (not total - done - failed)."""
+        self.r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        self.r.emit(LaneDone(result=make_lane(role="scout", text="ok")))
+        self.r.emit(LaneDone(result=make_lane(role="writer", skipped=True, ok=False)))
+        # analyst still "active" by raw arithmetic; scout done=1, writer skipped=1
+        active = self.r._total - self.r._done - self.r._failed - self.r._skipped
+        self.assertEqual(active, 1)
+
+    def test_heartbeat_shows_skipped_count(self):
+        """A heartbeat line after a skipped lane shows skipped=1 (not skipped=0)."""
+        r, stream = _make_renderer(interval_s=_HB_INTERVAL)
+        r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        r.emit(LaneDone(result=make_lane(role="writer", skipped=True, ok=False)))
+        r.start_heartbeat()
+        time.sleep(_HB_INTERVAL * 3)
+        r.stop_heartbeat()
+
+        hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
+        self.assertGreater(len(hb_lines), 0)
+        for ln in hb_lines:
+            self.assertIn("skipped=1", ln, f"expected skipped=1 in heartbeat: {ln!r}")
+
+
+# ---------------------------------------------------------------------------
+# Sequential topology — render_fleet_preview sequential block
+# ---------------------------------------------------------------------------
+
+
+def _make_sequential_config(stages=3):
+    """Build a sequential FleetConfig for preview tests."""
+    specialists = [
+        SpecialistSpec(role=f"stage{i}", provider="openrouter", model="google/gemini-2-flash", toolset=[])
+        for i in range(1, stages + 1)
+    ]
+    cfg = FleetConfig(
+        name="chain-fleet",
+        synthesis=SynthesisSpec(provider="openrouter", model="google/gemini-2-flash", prompt="Summarise."),
+        specialists=specialists,
+        topology="sequential",
+    )
+    resolve(cfg, "/unused")
+    return cfg
+
+
+class TestRenderFleetPreviewSequential(unittest.TestCase):
+    """render_fleet_preview adds a sequential block for topology=sequential."""
+
+    def setUp(self):
+        self.cfg = _make_sequential_config(stages=3)
+        # 3 stages × 600s default = 1800s = 30m00s
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_topology_line_present(self):
+        self.assertIn("Topology: sequential", self.rendered)
+
+    def test_stage_count_shown(self):
+        self.assertIn("3 stage(s)", self.rendered)
+
+    def test_wall_clock_ceiling_shown(self):
+        """3 stages × 600s = 1800s = 30m00s."""
+        self.assertIn("30m00s", self.rendered)
+
+    def test_inter_stage_cap_shown(self):
+        self.assertIn("Inter-stage output cap", self.rendered)
+        # The cap is 4,000 chars (formatted with comma separator).
+        self.assertIn("4,000", self.rendered)
+
+    def test_sequential_block_after_specialists(self):
+        """Topology block must appear after the Specialists section."""
+        spec_pos = self.rendered.index("Specialists (")
+        topo_pos = self.rendered.index("Topology: sequential")
+        self.assertLess(spec_pos, topo_pos)
+
+    def test_sequential_block_before_end_preview(self):
+        topo_pos = self.rendered.index("Topology: sequential")
+        end_pos = self.rendered.index("=== end preview ===")
+        self.assertLess(topo_pos, end_pos)
+
+    def test_wall_clock_single_stage(self):
+        """1 stage × 600s = 600s = 10m00s."""
+        cfg = _make_sequential_config(stages=1)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("10m00s", rendered)
+
+    def test_custom_call_timeout(self):
+        """Explicit call_timeout overrides the default in the ceiling calculation."""
+        cfg = _make_sequential_config(stages=2)
+        rendered = render_fleet_preview(cfg, call_timeout=30.0)
+        # 2 × 30 = 60s = 1m00s
+        self.assertIn("1m00s", rendered)
+
+    def test_no_timeout(self):
+        """call_timeout=None shows 'no per-stage timeout'."""
+        cfg = _make_sequential_config(stages=2)
+        rendered = render_fleet_preview(cfg, call_timeout=None)
+        self.assertIn("no per-stage timeout", rendered)
+
+
+class TestRenderFleetPreviewParallelUnchanged(unittest.TestCase):
+    """Parallel preview stays byte-identical — no Topology line added."""
+
+    def test_no_topology_line_for_parallel(self):
+        cfg = _make_config()  # topology defaults to "parallel"
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("Topology:", rendered)
+
+    def test_parallel_preview_call_timeout_ignored(self):
+        """Passing call_timeout to a parallel config has no effect on the output."""
+        cfg = _make_config()
+        rendered_default = render_fleet_preview(cfg)
+        rendered_custom = render_fleet_preview(cfg, call_timeout=120.0)
+        self.assertEqual(rendered_default, rendered_custom)
 
 
 if __name__ == "__main__":
