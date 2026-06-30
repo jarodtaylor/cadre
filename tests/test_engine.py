@@ -1005,5 +1005,381 @@ class TestU2ResultTypePlumbing(unittest.TestCase):
         self.assertIs(result.terminal_produced, False)
 
 
+def _chain_config(**overrides):
+    """Build a 3-lane sequential+collect FleetConfig (the common chain test base).
+
+    Roles: scout → analyst → writer, mirroring the research-brief flagship.
+    No synthesis block — topology=sequential, convergence=collect by default.
+    Use overrides to swap convergence to "synthesize" / add a synthesis block, or
+    pass a different "specialists" list for shorter chains.
+    """
+    data = {
+        "name": "t",
+        "convergence": "collect",
+        "topology": "sequential",
+        "specialists": [
+            {"role": "scout", "provider": "openrouter", "model": "s/m", "toolset": ["web"],
+             "focus": "gather sources"},
+            {"role": "analyst", "provider": "xai", "model": "grok", "toolset": ["web"],
+             "focus": "audit and verify"},
+            {"role": "writer", "provider": "openrouter", "model": "w/m", "toolset": [],
+             "focus": "write prose"},
+        ],
+    }
+    data.update(overrides)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")
+    return cfg
+
+
+class TestSequentialTopology(unittest.TestCase):
+    """_run_chain: serial execution, prompt threading, status logic, skipped lanes."""
+
+    # ------------------------------------------------------------------
+    # AE1: happy path — all 3 lanes succeed
+    # ------------------------------------------------------------------
+
+    def test_ae1_all_lanes_succeed(self):
+        """All 3 lanes succeed → SUCCESS, terminal_produced=True, prompts contain prior output."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.terminal_produced)
+        self.assertEqual(len(result.successes), 3)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.topology, "sequential")
+
+        # Analyst's prompt must contain scout's output and the delimiter.
+        analyst_prompt = client.prompt_for("analyst")
+        self.assertIn("scout-output", analyst_prompt)
+        self.assertIn("===== UPSTREAM STAGE: scout =====", analyst_prompt)
+
+        # Writer's prompt must contain both prior outputs.
+        writer_prompt = client.prompt_for("writer")
+        self.assertIn("scout-output", writer_prompt)
+        self.assertIn("analyst-output", writer_prompt)
+        self.assertIn("===== UPSTREAM STAGE: scout =====", writer_prompt)
+        self.assertIn("===== UPSTREAM STAGE: analyst =====", writer_prompt)
+
+    def test_ae1_scout_prompt_has_no_prior_stages(self):
+        """First lane gets only the base specialist prompt — no prior stages block."""
+        client = FakeClient()
+        run_fleet(_chain_config(), "task", client)
+        scout_prompt = client.prompt_for("scout")
+        self.assertNotIn("Prior chain stages", scout_prompt)
+        self.assertNotIn("UPSTREAM STAGE", scout_prompt)
+
+    def test_ae1_all_lanes_called_once_in_order(self):
+        """Each lane called exactly once; no synthesizer call for collect topology."""
+        client = FakeClient()
+        run_fleet(_chain_config(), "task", client)
+        called_roles = [r for (r, _) in client.calls]
+        self.assertEqual(called_roles, ["scout", "analyst", "writer"])
+
+    # ------------------------------------------------------------------
+    # AE2: mid-chain failure — middle lane fails
+    # ------------------------------------------------------------------
+
+    def test_ae2_mid_chain_fail_breaks_chain(self):
+        """Analyst fails → writer is skipped; status is DEGRADED; terminal_produced=False."""
+        client = FakeClient({"analyst": ("fail", "error-msg")})
+        result = run_fleet(_chain_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertFalse(result.ok)
+        self.assertIs(result.terminal_produced, False)
+
+        by_role = {r.role: r for r in result.specialists}
+        self.assertTrue(by_role["analyst"].ok is False)
+        self.assertFalse(by_role["analyst"].skipped)   # analyst ran and failed (real failure)
+        self.assertTrue(by_role["writer"].skipped)     # writer never ran
+
+    def test_ae2_skipped_lane_not_in_failures(self):
+        """Skipped writer must not appear in failures (excluded by design)."""
+        client = FakeClient({"analyst": ("fail", "e")})
+        result = run_fleet(_chain_config(), "task", client)
+        failure_roles = [r.role for r in result.failures]
+        self.assertIn("analyst", failure_roles)
+        self.assertNotIn("writer", failure_roles)
+
+    def test_ae2_skipped_lane_has_no_failure_note(self):
+        """Skipped lane produces no 'specialist ... failed' note in notes."""
+        client = FakeClient({"analyst": ("fail", "e")})
+        result = run_fleet(_chain_config(), "task", client)
+        note_text = " ".join(result.notes)
+        self.assertIn("analyst", note_text)
+        self.assertNotIn("writer", note_text)
+
+    # ------------------------------------------------------------------
+    # AE3: first-lane failure — chain halted immediately
+    # ------------------------------------------------------------------
+
+    def test_ae3_first_lane_fail_is_failed_status(self):
+        """Scout fails → all downstream skipped; status=FAILED; no successes."""
+        client = FakeClient({"scout": ("fail", "boom")})
+        result = run_fleet(_chain_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.FAILED)
+        self.assertEqual(result.successes, [])
+
+        by_role = {r.role: r for r in result.specialists}
+        self.assertFalse(by_role["scout"].skipped)  # scout ran and failed
+        self.assertTrue(by_role["analyst"].skipped)
+        self.assertTrue(by_role["writer"].skipped)
+
+    def test_ae3_first_lane_fail_note_says_chain_halted(self):
+        """'first lane failed — chain halted' note is appended on a first-lane failure."""
+        client = FakeClient({"scout": ("fail", "e")})
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertTrue(any("first lane failed" in n for n in result.notes))
+        self.assertTrue(any("chain halted" in n for n in result.notes))
+
+    # ------------------------------------------------------------------
+    # AE7: terminal-lane failure — ran, but returned a failure
+    # ------------------------------------------------------------------
+
+    def test_ae7_terminal_lane_fail_is_degraded(self):
+        """Writer fails (real failure, not skipped) → DEGRADED; terminal_produced=False."""
+        client = FakeClient({"writer": ("fail", "rate-limited")})
+        result = run_fleet(_chain_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertIs(result.terminal_produced, False)
+
+        by_role = {r.role: r for r in result.specialists}
+        self.assertFalse(by_role["writer"].skipped)  # writer ran and failed (not skipped)
+        self.assertFalse(by_role["writer"].ok)
+        self.assertFalse(by_role["scout"].skipped)
+        self.assertFalse(by_role["analyst"].skipped)
+
+    # ------------------------------------------------------------------
+    # AE6: non-terminal timeout — hung middle lane times out
+    # ------------------------------------------------------------------
+
+    def test_ae6_non_terminal_timeout_breaks_chain(self):
+        """A hung analyst times out → writer is skipped; analyst.timed_out=True; chain DEGRADED."""
+        client = HangingClient(hang_roles={"analyst"})
+        start = time.monotonic()
+        result = run_fleet(_chain_config(), "task", client, call_timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 2.0)  # returned promptly despite the hang
+
+        by_role = {r.role: r for r in result.specialists}
+        self.assertTrue(by_role["analyst"].timed_out)
+        self.assertTrue(by_role["writer"].skipped)
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+
+    # ------------------------------------------------------------------
+    # AE5: sequential + synthesize, healthy run
+    # ------------------------------------------------------------------
+
+    def test_ae5_sequential_synthesize_healthy(self):
+        """3-lane chain with convergence=synthesize → synthesizer called once; SUCCESS."""
+        data = {
+            "name": "t",
+            "convergence": "synthesize",
+            "topology": "sequential",
+            "synthesis": {"provider": "openrouter", "model": "synth/m"},
+            "specialists": [
+                {"role": "scout", "provider": "openrouter", "model": "s/m",
+                 "toolset": ["web"], "focus": "gather"},
+                {"role": "analyst", "provider": "xai", "model": "grok",
+                 "toolset": ["web"], "focus": "analyze"},
+                {"role": "writer", "provider": "openrouter", "model": "w/m",
+                 "toolset": [], "focus": "write"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        client = FakeClient({"synthesizer": ("ok", "FINAL REPORT")})
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertEqual(result.synthesis, "FINAL REPORT")
+        self.assertTrue(result.terminal_produced)
+        synth_calls = [r for (r, _) in client.calls if r == "synthesizer"]
+        self.assertEqual(len(synth_calls), 1)
+
+    def test_sequential_synthesize_synth_fails_is_degraded(self):
+        """Chain completes but synthesizer fails → DEGRADED; synthesis=None."""
+        data = {
+            "name": "t",
+            "convergence": "synthesize",
+            "topology": "sequential",
+            "synthesis": {"provider": "openrouter", "model": "synth/m"},
+            "specialists": [
+                {"role": "scout", "provider": "openrouter", "model": "s/m",
+                 "toolset": ["web"], "focus": "gather"},
+                {"role": "analyst", "provider": "xai", "model": "grok",
+                 "toolset": ["web"], "focus": "analyze"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        client = FakeClient({"synthesizer": ("fail", "rate limited")})
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertIsNone(result.synthesis)
+
+    def test_sequential_synthesize_mid_break_synth_still_degraded(self):
+        """Chain breaks mid-way + synth succeeds over survivors → DEGRADED (conjunctive status)."""
+        data = {
+            "name": "t",
+            "convergence": "synthesize",
+            "topology": "sequential",
+            "synthesis": {"provider": "openrouter", "model": "synth/m"},
+            "specialists": [
+                {"role": "scout", "provider": "openrouter", "model": "s/m",
+                 "toolset": ["web"], "focus": "gather"},
+                {"role": "analyst", "provider": "xai", "model": "grok",
+                 "toolset": ["web"], "focus": "analyze"},
+                {"role": "writer", "provider": "openrouter", "model": "w/m",
+                 "toolset": [], "focus": "write"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        # Analyst fails → writer skipped → terminal_produced=False.
+        # Synth runs over the sole survivor (scout). terminal_ok=False, so DEGRADED.
+        client = FakeClient({"analyst": ("fail", "e"), "synthesizer": ("ok", "PARTIAL")})
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        # Synthesizer should still have been called (chain has ≥1 survivor)
+        synth_calls = [r for (r, _) in client.calls if r == "synthesizer"]
+        self.assertEqual(len(synth_calls), 1)
+
+    # ------------------------------------------------------------------
+    # sequential + judge
+    # ------------------------------------------------------------------
+
+    def test_sequential_judge_healthy(self):
+        """Sequential chain with convergence=judge → judge called once over survivors."""
+        data = {
+            "name": "t",
+            "convergence": "judge",
+            "topology": "sequential",
+            "judge": {"provider": "openrouter", "model": "judge/m"},
+            "specialists": [
+                {"role": "scout", "provider": "openrouter", "model": "s/m",
+                 "toolset": ["web"], "focus": "gather"},
+                {"role": "analyst", "provider": "xai", "model": "grok",
+                 "toolset": ["web"], "focus": "analyze"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        client = FakeClient({"judge": ("ok", "GRADES HERE")})
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIsNotNone(result.judge)
+        self.assertIs(result.judge_ok, True)
+        judge_calls = [r for (r, _) in client.calls if r == "judge"]
+        self.assertEqual(len(judge_calls), 1)
+
+    # ------------------------------------------------------------------
+    # Per-lane deadline — no false timeout (KTD5)
+    # ------------------------------------------------------------------
+
+    def test_per_lane_deadline_no_false_timeout(self):
+        """Each lane gets its OWN fresh call_timeout — no starvation of later lanes.
+
+        Band: t=0.1s per call, call_timeout=0.2s (> t, so each lane ok under its own
+        deadline). A shared-deadline bug would give lane 3 ~0s remaining and time it
+        out — the per-lane recompute prevents that. Tests all 3 succeed.
+        """
+
+        class SleepyClient:
+            def __init__(self, delay):
+                self.delay = delay
+
+            def run(self, *, role, provider, model, prompt, toolset=()):
+                time.sleep(self.delay)
+                return AgentResult(role=role, provider=provider, model=model,
+                                   ok=True, text=f"{role}-output")
+
+        t = 0.1  # each lane takes ~0.1s
+        client = SleepyClient(delay=t)
+        result = run_fleet(_chain_config(), "task", client, call_timeout=0.2)
+
+        self.assertEqual(len(result.successes), 3, "all 3 lanes must succeed with per-lane deadline")
+        for lane in result.specialists:
+            self.assertFalse(lane.timed_out, f"{lane.role} must not time out with per-lane deadline")
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+
+    # ------------------------------------------------------------------
+    # Per-stage truncation
+    # ------------------------------------------------------------------
+
+    def test_per_stage_truncation_flag(self):
+        """Oversize stage output is capped; threading_truncated=True; marker in prompt."""
+        from fleet_engine.engine import _CHAIN_STAGE_CAP
+
+        long_text = "X" * (_CHAIN_STAGE_CAP + 100)
+
+        class VariantClient:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, *, role, provider, model, prompt, toolset=()):
+                self.calls.append((role, prompt))
+                if role == "scout":
+                    return AgentResult(role=role, provider=provider, model=model,
+                                       ok=True, text=long_text)
+                return AgentResult(role=role, provider=provider, model=model,
+                                   ok=True, text=f"{role}-output")
+
+        client = VariantClient()
+        result = run_fleet(_chain_config(), "task", client)
+
+        # threading_truncated must be True since scout's output exceeds the cap.
+        self.assertTrue(result.threading_truncated)
+
+        # Analyst's prompt must contain the truncation marker, not the full text.
+        analyst_prompt = next(p for (r, p) in client.calls if r == "analyst")
+        self.assertIn("[… stage output truncated …]", analyst_prompt)
+        self.assertNotIn("X" * (_CHAIN_STAGE_CAP + 1), analyst_prompt)
+
+    def test_no_truncation_when_output_within_cap(self):
+        """Short stage output does not set threading_truncated."""
+        client = FakeClient()  # default outputs are short ("scout-output" etc.)
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertFalse(result.threading_truncated)
+
+    # ------------------------------------------------------------------
+    # Status precedence: broken sequential+collect chain is NOT SUCCESS
+    # ------------------------------------------------------------------
+
+    def test_status_precedence_broken_collect_is_degraded_not_success(self):
+        """A sequential+collect chain that breaks mid-way → DEGRADED, NOT SUCCESS.
+
+        The parallel-collect unconditional-SUCCESS rule does NOT apply to sequential
+        chains: surviving lanes do not guarantee the terminal lane completed.
+        """
+        client = FakeClient({"analyst": ("fail", "e")})
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertNotEqual(result.status, FleetStatus.SUCCESS)
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+
+    # ------------------------------------------------------------------
+    # Parallel path is untouched — a parallel run returns topology="parallel"
+    # ------------------------------------------------------------------
+
+    def test_parallel_topology_unchanged(self):
+        """A parallel fleet returns topology='parallel'; the chain code is never entered."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertEqual(result.topology, "parallel")
+        self.assertIsNone(result.terminal_produced)  # None = not a chain
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,9 +34,29 @@ from fleet_engine.model_client import AgentResult
 
 @dataclass(frozen=True)
 class LaneLaunched:
-    """Every specialist lane has been launched; carries their roles in config order."""
+    """Every specialist lane has been launched; carries their roles in config order.
+
+    For a sequential chain, lanes run one at a time rather than all at once, so
+    ``queued=True`` signals the roster was announced at the start but individual lanes
+    have not yet been launched — they start serially as prior lanes complete.
+    For a parallel run (default), all lanes launch concurrently and ``queued=False``.
+    """
 
     roles: list[str]
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LaneStarted:
+    """One sequential-chain lane is about to run (serial topology only).
+
+    Emitted immediately before the daemon thread launches for this lane. Not emitted
+    for skipped lanes (a chain lane that never ran because an upstream lane failed).
+    One ``LaneDone`` is always emitted per lane including skipped ones, so
+    ``LaneStarted`` count + skipped count == total roster count.
+    """
+
+    role: str
 
 
 @dataclass(frozen=True)
@@ -112,7 +132,7 @@ class Completion:
 
 
 ProgressEvent = Union[
-    LaneLaunched, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
+    LaneLaunched, LaneStarted, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
     Validated, RunFolder, Completion
 ]
 ProgressHook = Callable[[ProgressEvent], None]
