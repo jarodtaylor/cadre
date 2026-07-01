@@ -54,13 +54,25 @@ def run_with_progress(
     # Pre-compute the role->filename map once, before any lane finishes, so the
     # per-lane writer and the breadcrumb agree on every filename (KTD6).
     fmap = lane_filename_map([s.role for s in cfg.specialists]) if capture else None
+    current_round: int = 0  # updated to event.round on each RoundStarted (iterative only)
+
+    # filename_for must name where save_lane ACTUALLY writes — the breadcrumb's
+    # "-> <file>" line means "this file is on disk". For iterative that is
+    # round-<current_round>/<filename>, so the lambda reads current_round at call time;
+    # the serial drainer sets it from the preceding RoundStarted before this round's
+    # LaneDone breadcrumbs render (filename_for and the hook share the same closure cell).
+    if not capture:
+        filename_for = None
+    elif cfg.topology == "iterative":
+        filename_for = lambda role: f"{round_subdir(current_round)}/{fmap[role]}"
+    else:
+        filename_for = lambda role: fmap[role]
 
     renderer = ProgressRenderer(
         stream=stream,
-        filename_for=(lambda role: fmap[role]) if capture else None,
+        filename_for=filename_for,
     )
     capture_errors: list[tuple[str, Exception]] = []
-    current_round: int = 0  # updated to event.round on each RoundStarted (iterative only)
 
     def hook(event):
         # Called only from the engine's single drainer/main thread — never a worker.

@@ -578,13 +578,18 @@ def _representative_file(result: FleetResult, lane, fmap: dict[str, str]) -> str
     A representative (in ``result.specialists``) is the EXACT ``AgentResult`` object
     from the round it represents — its last-surviving-round result, or its drop-round
     failure — so object identity locates its round. Returns ``round-<k>/<filename>``,
-    matching what the edge wrote incrementally. Falls back to the flat filename if the
-    object is not found (defensive — a representative always originates in some round).
+    matching what the edge wrote incrementally. Raises if the representative is not found
+    in any round — an engine invariant violation (every representative originates in some
+    round), surfaced loudly rather than as a silently-wrong path.
     """
     for k, round_list in enumerate(result.rounds, start=1):  # type: ignore[union-attr]
         if any(r is lane for r in round_list):
             return f"{round_subdir(k)}/{fmap[lane.role]}"
-    return fmap[lane.role]
+    raise ValueError(
+        f"iterative representative for role {lane.role!r} not found in any round — "
+        "the engine must place every representative result in result.rounds "
+        "(round-file coupling invariant)"
+    )
 
 
 def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[dict]]:

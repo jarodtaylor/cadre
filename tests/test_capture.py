@@ -2510,6 +2510,29 @@ class TestIterativeIncrementalCapture(unittest.TestCase):
                 f"lanes[].file {lane['file']!r} must exist on disk (not a phantom flat path)",
             )
 
+    def test_breadcrumb_names_round_namespaced_path(self):
+        """The `[cadre] lane … -> <file>` breadcrumb names the round-namespaced path
+        (round-k/…), matching where save_lane actually writes — the "-> <file> is on
+        disk" contract must hold for iterative, not point at a flat path."""
+        import io
+        import re
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        stream = io.StringIO()
+        run_with_progress(
+            cfg, "task", client, run_dir=self.run_dir, progress_stream=stream,
+        )
+        lane_files = re.findall(r"-> (\S+\.md)", stream.getvalue())
+        self.assertTrue(lane_files, "no lane breadcrumbs with '-> <file>' were emitted")
+        for f in lane_files:
+            self.assertTrue(
+                f.startswith("round-"),
+                f"breadcrumb path {f!r} should be round-namespaced (round-k/…)",
+            )
+            self.assertTrue(
+                (self.run_dir / f).exists(), f"breadcrumb path {f!r} must exist on disk",
+            )
+
     def test_round_1_dir_created(self):
         """After run, round-1/ subdirectory exists under run_dir."""
         cfg = _iterative_run_cfg()
