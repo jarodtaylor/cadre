@@ -38,6 +38,11 @@ SAFE_TOOLSETS = frozenset({
     "safe",                           # Hermes's own safe composite (web + vision + image_gen)
 })
 
+# Bounded ceiling on iterative rounds so worst-case spend stays approvable. Example
+# fleets use ~3 rounds; value is intentionally small and visible so a misconfigured
+# fleet fails loud rather than burning an unbounded number of model calls.
+MAX_ROUNDS = 10
+
 # Persona-name allowlist (KTD4 / R10): must start with an alphanumeric char so bare `.`,
 # `..`, leading-dot hidden names, separators (`/`, `\`), absolute paths, spaces, and NUL
 # are all rejected. Validated at parse time (NO file I/O) in ``from_dict``.
@@ -92,6 +97,7 @@ class FleetConfig:
     judge: JudgeSpec | None = None
     convergence: str = "synthesize"
     topology: str = "parallel"
+    rounds: int = 0  # 0 = unset sentinel; validated only when topology == "iterative"
     description: str = ""
     allow_privileged_tools: bool = False
 
@@ -139,11 +145,28 @@ class FleetConfig:
         # isinstance guard FIRST: a non-str value (e.g. `topology: [sequential]`) is
         # unhashable and would raise TypeError on the set membership test — accumulate a
         # ConfigError instead, honoring the loader's malformed-input-never-tracebacks contract.
-        if not isinstance(topo_raw, str) or topo_raw not in {"parallel", "sequential"}:
-            errors.append("`topology` must be one of: parallel, sequential")
+        if not isinstance(topo_raw, str) or topo_raw not in {"parallel", "sequential", "iterative"}:
+            errors.append("`topology` must be one of: parallel, sequential, iterative")
             topology = "parallel"
         else:
             topology = topo_raw
+
+        rounds_raw = data.get("rounds", 0)
+        # bool is a subclass of int in Python, so `rounds: true` would pass isinstance(x, int).
+        # Reject booleans explicitly so a YAML boolean can't silently become a round count.
+        if not isinstance(rounds_raw, int) or isinstance(rounds_raw, bool):
+            errors.append("`rounds` must be an integer")
+            rounds = 0
+        else:
+            rounds = rounds_raw
+
+        # rounds is validated only for iterative topology; parallel/sequential fleets
+        # may carry a stray rounds value with no error (it is simply not used).
+        if topology == "iterative" and not (1 <= rounds <= MAX_ROUNDS):
+            errors.append(
+                f"`rounds` is required for topology: iterative and must be an integer "
+                f"from 1 to {MAX_ROUNDS}"
+            )
 
         # An explicit but empty `description:` parses as YAML null (None); str(None)
         # would render the literal "None" in the preview, so map null -> "".
@@ -335,6 +358,7 @@ class FleetConfig:
             judge=judge,
             convergence=convergence,
             topology=topology,
+            rounds=rounds,
             description=description,
             allow_privileged_tools=allow_priv,
         )

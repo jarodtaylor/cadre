@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from fleet_engine.config import ConfigError, FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
+from fleet_engine.config import MAX_ROUNDS, ConfigError, FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 
 
 def make_data(**overrides):
@@ -650,6 +650,102 @@ class TestJudgeConvergence(unittest.TestCase):
         self.assertEqual(cfg.convergence, "judge")
         self.assertIsNone(cfg.synthesis)
         self.assertIsNotNone(cfg.judge)
+
+
+def make_iterative_data(**overrides):
+    """Minimal valid iterative fleet dict with synthesis; override per test."""
+    data = {
+        "name": "test-debate",
+        "topology": "iterative",
+        "rounds": 3,
+        "synthesis": {
+            "provider": "openrouter",
+            "model": "anthropic/claude-opus-4.8",
+        },
+        "specialists": [
+            {"role": "alpha", "provider": "openrouter", "model": "google/gemini-3-flash",
+             "toolset": ["web"], "focus": "argue position A"},
+            {"role": "beta", "provider": "xai", "model": "grok-4.3",
+             "toolset": [], "focus": "argue position B"},
+        ],
+    }
+    data.update(overrides)
+    return data
+
+
+class TestIterativeTopology(unittest.TestCase):
+    """topology: iterative + rounds validation (R1, R2, R3 for the new topology)."""
+
+    def test_valid_iterative_config_parses(self):
+        # topology: iterative with rounds: 3 → FleetConfig with correct fields.
+        cfg = FleetConfig.from_dict(make_iterative_data())
+        self.assertEqual(cfg.topology, "iterative")
+        self.assertEqual(cfg.rounds, 3)
+
+    def test_iterative_without_rounds_key_errors(self):
+        # rounds key absent on an iterative fleet → ConfigError mentioning rounds.
+        data = make_iterative_data()
+        del data["rounds"]
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(data)
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_iterative_rounds_zero_errors(self):
+        # rounds: 0 is the unset sentinel — not a valid round count.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_iterative_data(rounds=0))
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_iterative_rounds_negative_errors(self):
+        # rounds: -1 is below the minimum of 1.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_iterative_data(rounds=-1))
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_iterative_rounds_above_max_errors(self):
+        # rounds: MAX_ROUNDS + 1 exceeds the ceiling.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_iterative_data(rounds=MAX_ROUNDS + 1))
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_iterative_rounds_string_errors(self):
+        # rounds: "3" (a string) is not a real int — must be rejected, not coerced.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_iterative_data(rounds="3"))
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_iterative_rounds_bool_errors(self):
+        # rounds: true is a Python bool, which is an int subclass — must be rejected
+        # explicitly so `rounds: true` can't silently become rounds=1.
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_iterative_data(rounds=True))
+        self.assertTrue(any("rounds" in e for e in ctx.exception.errors))
+
+    def test_parallel_with_stray_rounds_parses_fine(self):
+        # A parallel fleet carrying a stray rounds: 5 must not error; rounds is
+        # parsed but ignored (not validated) for non-iterative topologies.
+        cfg = FleetConfig.from_dict(make_data(rounds=5))
+        self.assertEqual(cfg.topology, "parallel")
+        self.assertEqual(cfg.rounds, 5)
+
+    def test_unknown_topology_error_mentions_iterative(self):
+        # The error message for an unknown topology must name all three accepted values,
+        # including the newly added "iterative".
+        with self.assertRaises(ConfigError) as ctx:
+            FleetConfig.from_dict(make_data(topology="debate"))
+        errors = ctx.exception.errors
+        self.assertTrue(any("topology" in e for e in errors))
+        self.assertTrue(any("iterative" in e for e in errors))
+
+    def test_iterative_empty_toolset_stays_empty_list(self):
+        # []-vs-None invariant: an explicit toolset: [] on an iterative fleet must
+        # remain [] after parse, never coerced to None.
+        cfg = FleetConfig.from_dict(make_iterative_data(specialists=[
+            {"role": "debater", "provider": "p", "model": "m",
+             "toolset": [], "focus": "no tools needed"},
+        ]))
+        self.assertEqual(cfg.topology, "iterative")
+        self.assertEqual(cfg.specialists[0].toolset, [])
 
 
 if __name__ == "__main__":
