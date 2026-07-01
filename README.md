@@ -2,7 +2,7 @@
 
 Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and toolset, then **synthesize** them into one grounded, attributed result, **collect** their independent findings side by side, or have an independent model **judge** each one. Run the lanes in parallel, or as a **sequential chain** where each stage audits the last. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 
-> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, cross-model **review fleets** (code-review + doc-review), and a **sequential research-brief chain** — across `synthesize`, `collect`, and `judge` convergence and both **parallel** and **sequential** topology. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
+> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, cross-model **review fleets** (code-review + doc-review), a **sequential research-brief chain**, and **iterative debate and critique-revise fleets** — across `synthesize`, `collect`, and `judge` convergence and **parallel**, **sequential**, and **iterative** topology. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
 
 ## Why
 
@@ -16,7 +16,7 @@ A single-vendor runtime can only fan a task out across one provider's own tiers.
 
 A *fleet* is defined entirely in YAML — specialists (each a role + provider + model + toolset) plus an optional synthesizer — and has two independent **shape axes**:
 
-- **Topology** — how lanes relate in time: **parallel** (independent and concurrent, the default fan-out) or **sequential** (a dependent chain where each stage consumes all preceding stages' output — e.g. a scout gathers sources, then an analyst *audits the scout's specific claims* against live verification, then a writer synthesizes the audited brief).
+- **Topology** — how lanes relate in time: **parallel** (independent and concurrent, the default fan-out), **sequential** (a dependent chain where each stage consumes all preceding stages' output — e.g. a scout gathers sources, then an analyst *audits the scout's specific claims* against live verification, then a writer synthesizes the audited brief), or **iterative** (lanes run for multiple rounds; from round 2 each lane sees the prior round's attributed outputs from all other lanes — enabling debate, critique-revise loops, and self-refinement; the round-by-round transcript is preserved in the run folder).
 - **Convergence** — what happens to the outputs: **synthesize** (a strong model combines the survivors into one grounded report), **collect** (no synthesizer — return each specialist's attributed output side by side, as the review fleets do), or **judge** (an independent critic grades each surviving specialist in place, attributed per lane).
 
 Synthesize degrades rather than crashing: if some lanes fail it synthesizes the rest and reports the failures, failing outright only when none survive. A sequential chain breaks on the first failed stage and marks the rest skipped.

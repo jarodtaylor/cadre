@@ -20,11 +20,11 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from fleet_engine.capture import lane_filename_map, save_lane, save_prompt
+from fleet_engine.capture import lane_filename_map, round_subdir, save_lane, save_prompt
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult, run_fleet
 from fleet_engine.model_client import ModelClient
-from fleet_engine.progress import Completion, LaneDone, RunFolder, Validated
+from fleet_engine.progress import Completion, LaneDone, RoundStarted, RunFolder, Validated
 from fleet_engine.render import ProgressRenderer
 
 
@@ -54,10 +54,23 @@ def run_with_progress(
     # Pre-compute the role->filename map once, before any lane finishes, so the
     # per-lane writer and the breadcrumb agree on every filename (KTD6).
     fmap = lane_filename_map([s.role for s in cfg.specialists]) if capture else None
+    current_round: int = 0  # updated to event.round on each RoundStarted (iterative only)
+
+    # filename_for must name where save_lane ACTUALLY writes — the breadcrumb's
+    # "-> <file>" line means "this file is on disk". For iterative that is
+    # round-<current_round>/<filename>, so the lambda reads current_round at call time;
+    # the serial drainer sets it from the preceding RoundStarted before this round's
+    # LaneDone breadcrumbs render (filename_for and the hook share the same closure cell).
+    if not capture:
+        filename_for = None
+    elif cfg.topology == "iterative":
+        filename_for = lambda role: f"{round_subdir(current_round)}/{fmap[role]}"
+    else:
+        filename_for = lambda role: fmap[role]
 
     renderer = ProgressRenderer(
         stream=stream,
-        filename_for=(lambda role: fmap[role]) if capture else None,
+        filename_for=filename_for,
     )
     capture_errors: list[tuple[str, Exception]] = []
 
@@ -67,9 +80,20 @@ def run_with_progress(
         # "lane … -> <file>" line a supervisor parses reliably means the file is
         # already on disk (success case). A write failure is collected and warned
         # later — it must not crash the run.
+        nonlocal current_round
+        if isinstance(event, RoundStarted):
+            current_round = event.round
         if capture and isinstance(event, LaneDone):
             try:
-                save_lane(event.result, fmap[event.result.role], run_dir)
+                if cfg.topology == "iterative":
+                    # Write under round-N/ so each round's files are distinct;
+                    # current_round is always set by the preceding RoundStarted.
+                    save_lane(
+                        event.result, fmap[event.result.role], run_dir,
+                        subdir=round_subdir(current_round),
+                    )
+                else:
+                    save_lane(event.result, fmap[event.result.role], run_dir)
             except Exception as exc:  # noqa: BLE001
                 capture_errors.append((event.result.role, exc))
         renderer.emit(event)

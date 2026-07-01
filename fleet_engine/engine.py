@@ -53,6 +53,7 @@ from fleet_engine.progress import (
     LaneLaunched,
     LaneStarted,
     ProgressHook,
+    RoundStarted,
     SynthDone,
     SynthStarted,
     noop,
@@ -105,8 +106,10 @@ class FleetResult:
     status: FleetStatus = FleetStatus.FAILED         # explicit tri-state; set at every run_fleet return point
     judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
-    threading_truncated: bool = False                # True iff any inter-stage output was capped at CHAIN_STAGE_CAP (sequential only; always False for parallel)
+    threading_truncated: bool = False                # True iff any inter-stage output was capped at CHAIN_STAGE_CAP (sequential inter-stage or iterative inter-round; always False for parallel)
     terminal_produced: bool | None = None            # None=not a chain run (parallel); True=terminal lane produced output; False=terminal lane ran but produced nothing, or chain broke before reaching it (terminal lane skipped)
+    rounds: list[list[AgentResult]] | None = None   # per-round list of per-lane results (iterative audit transcript); None for non-iterative runs (parallel/sequential)
+    diversity_collapsed: bool = False                # True iff the iterative executor detected a debate collapse (≤1 surviving lane in the last-surviving round, or zero cross-round iterations); always False for non-iterative runs
 
     def __post_init__(self) -> None:
         # Normalize status to the FleetStatus enum so the identity checks (`is`)
@@ -330,19 +333,25 @@ def _chain_lane_call(
     )
 
 
-def _fan_out(
-    config: FleetConfig,
-    task: str,
-    client: ModelClient,
+def _run_round(
+    lanes: list[SpecialistSpec],
+    call_for: Callable[[SpecialistSpec], Callable[[], AgentResult]],
     call_timeout: float | None,
     progress: ProgressHook,
 ) -> list[AgentResult]:
-    """Run every specialist concurrently; return results in CONFIG order.
+    """Reusable concurrency core: run a set of lanes concurrently; return results in LANES order.
+
+    Parameterized by (a) an explicit lane list — the full specialist list for a
+    parallel fan-out, or a surviving-round subset for iterative topology — and (b) a
+    per-lane call-thunk builder: ``call_for(spec)`` is called once per lane at start
+    (in the launch comprehension, not inside the daemon) and returns the zero-argument
+    thunk the daemon thread calls. This keeps ``call_for`` closed over its own frame
+    at call time, so no loop-variable capture bug is possible.
 
     Each lane's daemon pushes ``(idx, result, completed_at)`` onto ``done_q`` on
     arrival; this thread drains them, stamps the capture signals, and emits one
     ``LaneDone`` per lane in ARRIVAL order — so a slow lane never hides a fast one and
-    the live counts stay honest (R4). The returned list is CONFIG-ordered: capture
+    the live counts stay honest (R4). The returned list is LANES-ordered: capture
     dedup and the manifest depend on that stable order, independent of arrival.
 
     Timeout accounting is decoupled from progress-hook latency. The production hook
@@ -360,15 +369,15 @@ def _fan_out(
     All emission happens from THIS thread — never a worker — so the hook sees events
     serially and the edge guards only the heartbeat.
     """
-    n = len(config.specialists)
+    n = len(lanes)
     done_q: "queue.Queue[tuple[int, AgentResult, float]]" = queue.Queue()
     # Start every lane before draining any, so they run concurrently under one shared
     # deadline (total ~= call_timeout, not N x call_timeout).
     launched_at = [
-        _start_lane(idx, _specialist_call(client, spec, task), done_q, name=f"fleet-{spec.role}")
-        for idx, spec in enumerate(config.specialists)
+        _start_lane(idx, call_for(spec), done_q, name=f"fleet-{spec.role}")
+        for idx, spec in enumerate(lanes)
     ]
-    progress(LaneLaunched(roles=[spec.role for spec in config.specialists]))
+    progress(LaneLaunched(roles=[spec.role for spec in lanes]))
 
     collected: dict[int, AgentResult] = {}
 
@@ -379,7 +388,7 @@ def _fan_out(
         # regardless of what the client left on the field.
         lane.timed_out = False
         lane.elapsed_s = completed_at - launched_at[idx]
-        lane.toolset = list(config.specialists[idx].toolset)
+        lane.toolset = list(lanes[idx].toolset)
         collected[idx] = lane
         progress(LaneDone(result=lane))
 
@@ -415,7 +424,7 @@ def _fan_out(
     # fabricates — a None timeout blocks in Phase 1 until all arrive, so n are
     # collected and this loop is a no-op; the format is safe.)
     fabricated_at = time.monotonic()
-    for idx, spec in enumerate(config.specialists):
+    for idx, spec in enumerate(lanes):
         if idx in collected:
             continue
         timed = _timed_out_result(spec.role, spec.provider, spec.model, call_timeout)
@@ -425,6 +434,27 @@ def _fan_out(
         progress(LaneDone(result=timed))
 
     return [collected[i] for i in range(n)]
+
+
+def _fan_out(
+    config: FleetConfig,
+    task: str,
+    client: ModelClient,
+    call_timeout: float | None,
+    progress: ProgressHook,
+) -> list[AgentResult]:
+    """Run every specialist concurrently; return results in CONFIG order.
+
+    Thin delegator: builds the per-spec call thunk and delegates to ``_run_round``,
+    which owns the daemon-thread / three-phase drain / single-emit LaneDone machinery.
+    See ``_run_round`` for the full concurrency contract and timeout accounting rationale.
+    """
+    return _run_round(
+        config.specialists,
+        lambda spec: _specialist_call(client, spec, task),
+        call_timeout,
+        progress,
+    )
 
 
 def _run_convergence(
@@ -613,6 +643,152 @@ def _run_chain(
     return result
 
 
+def _representative_results(
+    original_lanes: list[SpecialistSpec],
+    rounds_results: list[list[AgentResult]],
+    R_star: int | None,
+) -> list[AgentResult]:
+    """Map each original lane to its representative result (KTD3).
+
+    For the last-surviving round R* (1-based), every lane that appears there —
+    whether ok or a failure-in-R* — takes its R* result as its representative.
+    A lane absent from R* dropped before R* and takes its failure record from
+    the last round it appeared in (its drop-round failure).
+
+    Every original lane ran in round 1, so a dropped lane always has a last
+    appearance. Roles are unique per fleet, so matching is by role.
+
+    Why this shape (verify against the AEs):
+    - AE2 (lane X fails round 2, R*=3) → X not in R* → its round-2 failure →
+      in result.failures; Y,Z in R* → round-3 results → in result.successes.
+    - AE6 (all 3 ok round 1, all fail round 2, R*=1) → all 3 ARE in R*=round1
+      with ok results → representatives = round-1 SUCCESSES → result.failures
+      empty; the round-2 wipeout surfaces via diversity_collapsed, NOT failures.
+    - AE3 (all fail round 1, R*=None) → star_results=[] → each lane's last
+      appearance = round-1 failure → all failures → FAILED.
+    """
+    star_results = rounds_results[R_star - 1] if R_star else []
+    reps = []
+    for spec in original_lanes:
+        in_star = next((r for r in star_results if r.role == spec.role), None)
+        if in_star is not None:
+            reps.append(in_star)
+        else:
+            drop = None
+            for round_list in reversed(rounds_results):
+                m = next((r for r in round_list if r.role == spec.role), None)
+                if m is not None:
+                    drop = m
+                    break
+            if drop is None:
+                # Unreachable in a correct engine: every lane runs round 1, so a lane
+                # absent from R* still has a drop-round result. Fail loud rather than
+                # append None, which would violate list[AgentResult] downstream (Copilot review).
+                raise ValueError(
+                    f"lane {spec.role!r} appears in no round — iterative engine invariant "
+                    "violation (every lane runs round 1)"
+                )
+            reps.append(drop)
+    return reps
+
+
+def _run_iterate(
+    config: FleetConfig,
+    task: str,
+    client: ModelClient,
+    call_timeout: float | None,
+    progress: ProgressHook,
+) -> FleetResult:
+    """Run the fleet's lanes as a bounded-round iterative loop; return a provenance-tagged result.
+
+    Round 1 runs all lanes on the task alone (same as a parallel fan-out). Rounds 2+
+    re-run every surviving lane with the previous round's outputs threaded in as
+    role-attributed, per-stage-capped untrusted-data context. A lane that fails a round
+    is dropped from all later rounds; surviving lanes continue (drop-and-continue, R5).
+    The loop ends after the configured round count OR when all lanes are exhausted.
+
+    Within each round, lanes run CONCURRENTLY under one shared per-round deadline
+    (≈ call_timeout per round), so wall-clock ≈ (rounds + 1) × call_timeout rather
+    than lanes × rounds × call_timeout (KTD1). `_run_round` is reused verbatim —
+    the same three-phase drain and decoupled-timeout logic that powers the parallel
+    fan-out guarantees no false timeouts from slow progress hooks (KTD7).
+
+    ``specialists`` on the result holds each lane's representative result: its
+    last-surviving-round (R*) result if it ran in R*, otherwise its drop-round
+    failure record (KTD3). ``rounds`` carries the full per-round transcript for
+    run-capture. Status follows the parallel model — iterative is drop-and-continue,
+    so SUCCESS/DEGRADED/FAILED parallel the parallel-fan-out rules.
+    """
+    survivors = list(config.specialists)          # SpecialistSpec list; shrinks each round
+    prev_round: list[tuple[str, str]] | None = None  # ok outputs from the previous round
+    rounds_results: list[list[AgentResult]] = []  # transcript carrier (KTD3)
+    chain_truncated = False
+
+    for k in range(1, config.rounds + 1):
+        progress(RoundStarted(round=k, total=config.rounds))
+        if k == 1:
+            call_for = lambda spec: _specialist_call(client, spec, task)
+        else:
+            # Pre-build threaded prompts (PURE string ops) so the truncation flag is
+            # captured here, not lost inside the concurrent thunk. prev_round carries
+            # only the PREVIOUS round's ok outputs (previous-round visibility, KTD1).
+            threaded: dict[str, str] = {}
+            for spec in survivors:
+                prompt, trunc = _thread_prompt(spec, task, prev_round or [])
+                threaded[spec.role] = prompt
+                chain_truncated |= trunc
+            # _t=threaded closes over THIS round's dict (not the loop's last).
+            call_for = lambda spec, _t=threaded: _chain_lane_call(client, spec, _t[spec.role])
+
+        this_round = _run_round(survivors, call_for, call_timeout, progress)
+        rounds_results.append(this_round)
+
+        # drop-and-continue (R5): only ok lanes survive to the next round
+        ok_pairs = [(spec, r) for spec, r in zip(survivors, this_round) if r.ok]
+        survivors = [spec for spec, r in ok_pairs]
+        prev_round = [(r.role, r.text or "") for _, r in ok_pairs]
+        if not survivors:
+            break   # total exhaustion — stop early (R2/R8)
+
+    # R_star = 1-based index of the LAST round with >=1 ok lane, else None
+    R_star: int | None = None
+    for i in range(len(rounds_results) - 1, -1, -1):
+        if any(r.ok for r in rounds_results[i]):
+            R_star = i + 1
+            break
+
+    specialists = _representative_results(config.specialists, rounds_results, R_star)
+    result = FleetResult(
+        fleet=config.name, task=task, specialists=specialists,
+        convergence=config.convergence, topology="iterative",
+        rounds=rounds_results, terminal_produced=None,
+        threading_truncated=chain_truncated,
+    )
+    for failed in result.failures:
+        result.notes.append(f"specialist '{failed.role}' failed: {failed.error}")
+
+    if R_star is None:          # no lane ever succeeded (AE3)
+        step = {"synthesize": "synthesis", "judge": "judge grade"}.get(config.convergence, "output")
+        result.notes.append(f"all specialists failed — no {step}")
+        result.status = FleetStatus.FAILED
+        return result
+
+    # diversity_collapsed (KTD2): a MULTI-lane debate whose last-surviving round has <=1 ok lane,
+    # OR that completed zero cross-round iterations (R_star == 1). N=1 self-refine never collapses.
+    n_ok_star = sum(1 for r in rounds_results[R_star - 1] if r.ok)
+    result.diversity_collapsed = (
+        len(config.specialists) >= 2 and (n_ok_star <= 1 or R_star == 1)
+    )
+
+    successes = result.successes    # == R_star's ok representatives
+    if config.convergence == "collect":     # survivors exist → SUCCESS (collect is never DEGRADED)
+        result.status = FleetStatus.SUCCESS
+        return result
+    convergence_ok = _run_convergence(result, config, task, client, call_timeout, progress, successes)
+    result.status = FleetStatus.SUCCESS if convergence_ok else FleetStatus.DEGRADED
+    return result
+
+
 def run_fleet(
     config: FleetConfig,
     task: str,
@@ -642,6 +818,17 @@ def run_fleet(
             + " have no resolved instruction — the caller must resolve instructions "
             "before run_fleet"
         )
+
+    if config.topology == "iterative":
+        # Defense-in-depth (like the missing-instruction precondition above): config
+        # validation enforces rounds in 1..MAX_ROUNDS for iterative, but a caller that
+        # built FleetConfig directly could bypass it — fail loud rather than run zero
+        # rounds and silently degrade to FAILED (CodeRabbit review).
+        if config.rounds < 1:
+            raise ValueError(
+                f"topology 'iterative' requires rounds >= 1, got {config.rounds}"
+            )
+        return _run_iterate(config, task, client, call_timeout, progress)
 
     if config.topology == "sequential":
         return _run_chain(config, task, client, call_timeout, progress)

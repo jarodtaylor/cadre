@@ -27,6 +27,7 @@ from fleet_engine.progress import (
     LaneLaunched,
     LaneStarted,
     ProgressEvent,
+    RoundStarted,
     RunFolder,
     SynthDone,
     SynthStarted,
@@ -236,6 +237,55 @@ def render_fleet_preview(
                 " — a prompt injection upstream can steer their tool use (GH #5 hardens this seam)"
             )
 
+    # Iterative-specific summary: paid-call count + wall-clock differ from sequential
+    # because within-round lanes run CONCURRENTLY (wall-clock per round ≈ 1 × timeout,
+    # not lanes × timeout). Show both the call count AND the wall-clock ceiling so the
+    # human approving the preview can evaluate the cost before okaying the run.
+    if config.topology == "iterative":
+        rounds = config.rounds  # validated int (1..MAX_ROUNDS) for iterative fleets
+        lanes = len(config.specialists)
+        has_convergence_call = config.convergence in ("synthesize", "judge")
+        # Paid calls: specialist lanes run in each round (concurrent within a round);
+        # synthesize/judge adds one convergence call over the survivors after all rounds.
+        calls = lanes * rounds + (1 if has_convergence_call else 0)
+        # Wall-clock: concurrent within-round → one timeout per round; +1 for convergence.
+        wall_rounds = rounds + (1 if has_convergence_call else 0)
+        if call_timeout is not None:
+            total_s = call_timeout * wall_rounds
+            mm = int(total_s) // 60
+            ss = int(total_s) % 60
+            ceiling_str = f"{mm}m{ss:02d}s" if mm > 0 else f"{ss}s"
+            out.append(
+                f"\nTopology: iterative — {rounds} round(s), {lanes} lane(s),"
+                f" {calls} paid call(s), max wall-clock {ceiling_str}"
+            )
+        else:
+            out.append(
+                f"\nTopology: iterative — {rounds} round(s), {lanes} lane(s),"
+                f" {calls} paid call(s), no per-round timeout"
+            )
+        out.append(f"  Inter-round output cap: {CHAIN_STAGE_CAP:,} chars")
+        # Cross-round trust: ALL lanes from round 2+ consume prior-round outputs — unlike
+        # sequential, even lane 0 receives upstream model output in later rounds.
+        # role labels are fleet-controlled → sanitized.
+        tool_lanes = [s.role for s in config.specialists if s.toolset]
+        # Only rounds >= 2 actually thread prior-round output into a later round; at
+        # rounds == 1 no lane consumes another's output, so the cross-round exposure
+        # warning would be misleading (CodeRabbit review).
+        if tool_lanes and rounds >= 2:
+            out.append(
+                "  ⚠ cross-round tool exposure: "
+                + ", ".join(_sanitize(r) for r in tool_lanes)
+                + " run tools after consuming prior rounds' untrusted output"
+                " — a prompt injection upstream can steer their tool use (GH #5 hardens this seam)"
+            )
+        if rounds == 1 and lanes >= 2:
+            out.append(
+                "  note: rounds=1 — zero cross-round iterations;"
+                " run will flag diversity_collapsed"
+            )
+        out.append("  Stopping: fixed round count; early stop if all lanes fail")
+
     out.append("\n=== end preview ===")
     return "\n".join(out)
 
@@ -339,6 +389,15 @@ def render_result(result: FleetResult) -> str:
             n_failed = len(result.failures)
             n_total = len(result.specialists)
             out.append(f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted.")
+    # Diversity-collapse advisory: iterative only; never gates or discards output.
+    # Placed after the "all failed" preamble (if any) and before the body so the
+    # human sees it regardless of whether a synthesis body follows. Static trusted
+    # text — NOT passed through _sanitize (same pattern as threading_truncated).
+    if result.topology == "iterative" and result.diversity_collapsed:
+        out.append(
+            "\n⚠ Diversity collapsed — the debate ended with ≤1 distinct position"
+            " or ran zero cross-round iterations; treat the result with caution."
+        )
     if result.convergence == "judge":
         # Judge body: lead with the judge's OWN raw text (KTD2 — the human report
         # always shows the judge's text, even if a parse falls short). Reconstructing
@@ -370,10 +429,11 @@ def render_result(result: FleetResult) -> str:
         for r in result.successes:
             out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
     if result.threading_truncated:
-        # Our own trusted text — not sanitized. A sequential chain produced inter-stage
-        # output that exceeded CHAIN_STAGE_CAP chars; downstream stages received a
-        # partial upstream context, which may affect quality.
-        out.append("\nnote: inter-stage output was capped — some context may have been truncated")
+        # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
+        # iterative round (inter-round) produced threaded output that exceeded
+        # CHAIN_STAGE_CAP chars; the downstream lane received partial upstream context.
+        unit = "inter-round" if result.topology == "iterative" else "inter-stage"
+        out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
     # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
     # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,
@@ -587,7 +647,18 @@ class ProgressRenderer:
         are no-ops.
         """
         if isinstance(event, LaneLaunched):
+            # A LaneLaunched marks a fresh fan-out — parallel/sequential emit it once,
+            # iterative emits it once PER ROUND. Reset the per-fan-out tally so the
+            # heartbeat's active count is relative to THIS round's lanes. Without the
+            # reset, iterative rounds 2+ subtract cumulative completions from the new
+            # round's total and report active=0 (or negative) while lanes are in flight
+            # (Codex cross-model finding). No-op for parallel/sequential: their single
+            # LaneLaunched fires while the counters are already 0.
             self._total = len(event.roles)
+            self._done = 0
+            self._failed = 0
+            self._skipped = 0
+            self._stage = 0
         elif isinstance(event, LaneStarted):
             # Increment AFTER _format so the "stage k/N" display uses the prior count.
             self._stage += 1
@@ -675,6 +746,12 @@ class ProgressRenderer:
             # JudgeDone.outcome is already a label string — do NOT call outcome_label().
             elapsed = f"{event.elapsed_s:.1f}"
             return f"[cadre] judge {event.outcome} {elapsed}s"
+
+        if isinstance(event, RoundStarted):
+            # Iterative-topology breadcrumb: emitted at the start of each round
+            # before its concurrent lane fan-out (U6). Fields are our own ints —
+            # not fleet-controlled — so no _sanitize needed.
+            return f"[cadre] round {event.round}/{event.total}"
 
         if isinstance(event, Completion):
             total = f"{event.elapsed_s:.1f}"

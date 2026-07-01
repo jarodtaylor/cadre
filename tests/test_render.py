@@ -27,6 +27,7 @@ from fleet_engine.progress import (
     LaneDone,
     LaneLaunched,
     LaneStarted,
+    RoundStarted,
     RunFolder,
     SynthDone,
     SynthStarted,
@@ -2387,6 +2388,36 @@ def _make_sequential_config(stages=3):
     return cfg
 
 
+def _make_iterative_config(rounds=3, lanes=2, convergence="synthesize", tool_lane_idx=None):
+    """Build an iterative FleetConfig for preview tests.
+
+    ``tool_lane_idx`` (int or None): if set, that specialist lane gains a ['web'] toolset,
+    leaving the rest toolset-free — used to test the cross-round tool-exposure disclosure.
+    """
+    specialists = [
+        SpecialistSpec(
+            role=f"debater{i}",
+            provider="openrouter",
+            model="google/gemini-2-flash",
+            toolset=["web"] if tool_lane_idx == i else [],
+        )
+        for i in range(lanes)
+    ]
+    synthesis = SynthesisSpec(
+        provider="openrouter", model="google/gemini-2-flash", prompt="Synthesise."
+    ) if convergence == "synthesize" else None
+    cfg = FleetConfig(
+        name="debate-fleet",
+        synthesis=synthesis,
+        specialists=specialists,
+        topology="iterative",
+        rounds=rounds,
+        convergence=convergence,
+    )
+    resolve(cfg, "/unused")
+    return cfg
+
+
 class TestRenderFleetPreviewSequential(unittest.TestCase):
     """render_fleet_preview adds a sequential block for topology=sequential."""
 
@@ -2475,6 +2506,140 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
         self.assertNotIn("cross-stage tool exposure", self.rendered)
 
 
+class TestRenderFleetPreviewIterative(unittest.TestCase):
+    """render_fleet_preview adds an iterative block for topology=iterative.
+
+    Parallel and sequential previews must stay byte-identical (additive guard).
+    """
+
+    def setUp(self):
+        # 2 debater lanes, 3 rounds, synthesize — the flagship debate shape.
+        # Paid calls: 2 lanes × 3 rounds + 1 convergence = 7 calls.
+        # Wall-clock: (3 rounds + 1 convergence) × 600s = 2400s = 40m00s.
+        self.cfg = _make_iterative_config(rounds=3, lanes=2)
+        self.rendered = render_fleet_preview(self.cfg)
+
+    def test_topology_line_present(self):
+        self.assertIn("Topology: iterative", self.rendered)
+
+    def test_round_count_shown(self):
+        self.assertIn("3 round(s)", self.rendered)
+
+    def test_lane_count_shown(self):
+        self.assertIn("2 lane(s)", self.rendered)
+
+    def test_paid_call_count_synthesize(self):
+        """synthesize: 2 lanes × 3 rounds + 1 convergence = 7 paid calls."""
+        self.assertIn("7 paid call(s)", self.rendered)
+
+    def test_wall_clock_synthesize(self):
+        """synthesize: (3 rounds + 1 convergence) × 600s = 2400s = 40m00s."""
+        self.assertIn("40m00s", self.rendered)
+
+    def test_inter_round_cap_shown(self):
+        self.assertIn("Inter-round output cap", self.rendered)
+        self.assertIn("4,000", self.rendered)
+
+    def test_iterative_block_after_specialists(self):
+        """Topology block must appear after the Specialists section."""
+        spec_pos = self.rendered.index("Specialists (")
+        topo_pos = self.rendered.index("Topology: iterative")
+        self.assertLess(spec_pos, topo_pos)
+
+    def test_iterative_block_before_end_preview(self):
+        topo_pos = self.rendered.index("Topology: iterative")
+        end_pos = self.rendered.index("=== end preview ===")
+        self.assertLess(topo_pos, end_pos)
+
+    def test_stopping_condition_disclosed(self):
+        """The stopping condition is disclosed on the approval surface."""
+        self.assertIn("Stopping:", self.rendered)
+        self.assertIn("early stop if all lanes fail", self.rendered)
+
+    def test_collect_excludes_convergence_call(self):
+        """collect: N lanes × rounds (no +1 convergence); wall-clock = rounds × timeout."""
+        cfg = _make_iterative_config(rounds=3, lanes=2, convergence="collect")
+        rendered = render_fleet_preview(cfg)
+        # collect: 2 × 3 = 6 paid calls; wall-clock 3 × 600 = 1800s = 30m00s
+        self.assertIn("6 paid call(s)", rendered)
+        self.assertIn("30m00s", rendered)
+        self.assertNotIn("7 paid call(s)", rendered)
+
+    def test_custom_timeout(self):
+        """Explicit call_timeout propagates into the wall-clock calculation."""
+        cfg = _make_iterative_config(rounds=2, lanes=3)
+        rendered = render_fleet_preview(cfg, call_timeout=60.0)
+        # synthesize: (2 rounds + 1 convergence) × 60s = 180s = 3m00s
+        self.assertIn("3m00s", rendered)
+
+    def test_no_timeout(self):
+        """call_timeout=None shows 'no per-round timeout'."""
+        cfg = _make_iterative_config(rounds=2, lanes=2)
+        rendered = render_fleet_preview(cfg, call_timeout=None)
+        self.assertIn("no per-round timeout", rendered)
+        self.assertNotIn("max wall-clock", rendered)
+
+    def test_cross_round_tool_exposure_warns_for_any_tool_lane(self):
+        """ANY lane (including lane 0) with tools gets the cross-round disclosure.
+        Unlike sequential (first lane exempt), every iterative lane consumes prior-round
+        outputs from round 2 onwards — so even the first specialist carries exposure risk."""
+        cfg = _make_iterative_config(rounds=3, lanes=2, tool_lane_idx=0)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("cross-round tool exposure", rendered)
+        self.assertIn("debater0", rendered)  # the first lane IS flagged
+        self.assertIn("GH #5", rendered)
+
+    def test_cross_round_tool_exposure_warns_for_non_first_lane(self):
+        """Lane 1 (non-first) with tools is also flagged."""
+        cfg = _make_iterative_config(rounds=3, lanes=2, tool_lane_idx=1)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("cross-round tool exposure", rendered)
+        self.assertIn("debater1", rendered)
+
+    def test_no_cross_round_warning_when_no_tool_lanes(self):
+        """Default tool-less fleet → no cross-round warning."""
+        self.assertNotIn("cross-round tool exposure", self.rendered)
+
+    def test_no_cross_round_warning_at_rounds_one(self):
+        """rounds=1 has no round 2 to consume prior-round output, so a tool lane must NOT
+        get the cross-round exposure warning (CodeRabbit review)."""
+        cfg = _make_iterative_config(rounds=1, lanes=2, tool_lane_idx=0)
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("cross-round tool exposure", rendered)
+
+    def test_rounds_one_collapse_note(self):
+        """rounds=1 with multiple lanes warns diversity_collapsed will be flagged."""
+        cfg = _make_iterative_config(rounds=1, lanes=2)
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("diversity_collapsed", rendered)
+        self.assertIn("rounds=1", rendered)
+
+    def test_no_collapse_note_when_rounds_gt_1(self):
+        """rounds > 1 → no collapse note."""
+        self.assertNotIn("diversity_collapsed", self.rendered)
+
+    def test_tool_label_sanitized(self):
+        """A fleet-controlled role that contains a control char is sanitized in the warning."""
+        cfg = _make_iterative_config(rounds=2, lanes=2, tool_lane_idx=0)
+        cfg.specialists[0].role = "evil\x1b[2Jrole"
+        rendered = render_fleet_preview(cfg, call_timeout=60.0)
+        self.assertNotIn("\x1b", rendered)
+        # _sanitize strips the ESC control byte but keeps the printable remainder
+        # ("[2J"), so the neutralized label is "evil[2Jrole" — the security property is
+        # "no raw ESC" (asserted above), not full escape-sequence removal.
+        self.assertIn("evil[2Jrole", rendered)
+
+    def test_iterative_sequential_preview_byte_identical(self):
+        """A sequential config renders identically before and after this change
+        — the iterative block must not touch the sequential path."""
+        seq = _make_sequential_config(stages=2)
+        r1 = render_fleet_preview(seq)
+        r2 = render_fleet_preview(seq, call_timeout=600.0)
+        # Idempotency: same config → same output; no iterative artefacts.
+        self.assertNotIn("Topology: iterative", r1)
+        self.assertEqual(r1, r2)
+
+
 class TestRenderFleetPreviewParallelUnchanged(unittest.TestCase):
     """Parallel preview stays byte-identical — no Topology line added."""
 
@@ -2555,6 +2720,233 @@ class TestRenderResultSequentialConjunctiveHeaders(unittest.TestCase):
         rendered = render_result(result)
         self.assertIn("judge result — chain failed at the first lane", rendered)
         self.assertNotIn("all specialists failed", rendered)
+
+
+class TestRenderResultIterativeHeaders(unittest.TestCase):
+    """render_result headers and diversity_collapsed notice for topology=iterative.
+
+    Iterative status matrix (from engine.py _run_iterate):
+    - collect: SUCCESS (some survivors) or FAILED (all failed round 1) — NEVER DEGRADED.
+    - synthesize/judge: SUCCESS, DEGRADED (convergence failed, body=None), or FAILED.
+    No "chain failed mid-run" / "chain failed at the first lane" text is reachable for
+    iterative — those paths are sequential-only or require DEGRADED+body=not-None.
+    """
+
+    def _iter(self, convergence, status, specialists, **kw):
+        """Build a FleetResult with topology='iterative' and explicit status (KTD6)."""
+        return FleetResult(
+            fleet="debate-fleet", task="t", specialists=specialists,
+            convergence=convergence, topology="iterative", status=status, **kw,
+        )
+
+    # --- synthesize ---
+
+    def test_synthesize_success_header(self):
+        lanes = [make_lane(role="a", text="pos A"), make_lane(role="b", text="pos B")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="MERGED", synth_ok=True)
+        rendered = render_result(result)
+        self.assertIn("synthesized result", rendered)
+        self.assertNotIn("chain", rendered)
+
+    def test_synthesize_degraded_no_synthesis(self):
+        """Synthesizer ran and failed → 'partial result (no synthesis)'; no 'chain' language."""
+        lanes = [make_lane(role="a", text="pos A"), make_lane(role="b", text="pos B")]
+        result = self._iter("synthesize", FleetStatus.DEGRADED, lanes,
+                            synthesis=None, synth_ok=False)
+        rendered = render_result(result)
+        self.assertIn("partial result (no synthesis)", rendered)
+        self.assertNotIn("chain", rendered)
+
+    def test_synthesize_failed_header_and_preamble(self):
+        """All specialists failed → FAILED header + preamble; uses parallel-style count."""
+        lanes = [make_lane(role="a", ok=False), make_lane(role="b", ok=False)]
+        result = self._iter("synthesize", FleetStatus.FAILED, lanes,
+                            synthesis=None, synth_ok=None)
+        rendered = render_result(result)
+        self.assertNotIn("chain", rendered)
+        # Preamble: parallel-style (N of M failed count, since iterative is not sequential)
+        self.assertIn("No synthesis", rendered)
+        self.assertIn("2 of 2", rendered)
+
+    # --- collect ---
+
+    def test_collect_success_header(self):
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("collect", FleetStatus.SUCCESS, lanes)
+        rendered = render_result(result)
+        self.assertIn("collect result", rendered)
+        self.assertNotIn("chain", rendered)
+
+    def test_collect_failed_header(self):
+        """Iterative collect FAILED (all lanes failed round 1); never DEGRADED."""
+        lanes = [make_lane(role="a", ok=False), make_lane(role="b", ok=False)]
+        result = self._iter("collect", FleetStatus.FAILED, lanes)
+        rendered = render_result(result)
+        self.assertIn("collect result — all specialists failed", rendered)
+        self.assertNotIn("chain", rendered)
+
+    # --- judge ---
+
+    def test_judge_success_header(self):
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("judge", FleetStatus.SUCCESS, lanes,
+                            judge="Grade: A\nRationale: good", judge_ok=True)
+        rendered = render_result(result)
+        self.assertIn("judge result", rendered)
+        self.assertNotIn("chain", rendered)
+
+    def test_judge_degraded_judge_failed(self):
+        """Iterative judge DEGRADED = judge ran and failed (judge=None); no chain language."""
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("judge", FleetStatus.DEGRADED, lanes,
+                            judge=None, judge_ok=False)
+        rendered = render_result(result)
+        self.assertIn("judge result — judge failed", rendered)
+        self.assertNotIn("chain", rendered)
+
+    # --- diversity_collapsed notice ---
+
+    def test_diversity_collapsed_notice_appears(self):
+        """diversity_collapsed=True on an iterative result → advisory notice in output."""
+        lanes = [make_lane(role="a", text="A")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="REPORT", synth_ok=True, diversity_collapsed=True)
+        rendered = render_result(result)
+        self.assertIn("⚠ Diversity collapsed", rendered)
+        self.assertIn("treat the result with caution", rendered)
+
+    def test_diversity_collapsed_notice_absent_when_false(self):
+        """diversity_collapsed=False (the default) → no notice in output."""
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="REPORT", synth_ok=True, diversity_collapsed=False)
+        rendered = render_result(result)
+        self.assertNotIn("Diversity collapsed", rendered)
+
+    def test_diversity_collapsed_notice_absent_for_parallel(self):
+        """diversity_collapsed is always False for parallel runs — notice must NOT appear."""
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = FleetResult(
+            fleet="test-fleet", task="t", specialists=lanes,
+            convergence="synthesize", topology="parallel",
+            status=FleetStatus.SUCCESS, synthesis="REPORT", synth_ok=True,
+        )
+        # diversity_collapsed defaults to False for non-iterative; guard that even if
+        # it were True the topology guard prevents the notice from appearing.
+        result.diversity_collapsed = False  # confirmed: default
+        rendered = render_result(result)
+        self.assertNotIn("Diversity collapsed", rendered)
+
+    def test_diversity_collapsed_notice_not_sanitized_but_contains_no_controls(self):
+        """The notice is static trusted text — it must not contain control characters."""
+        lanes = [make_lane(role="a", text="A")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="R", synth_ok=True, diversity_collapsed=True)
+        rendered = render_result(result)
+        notice_start = rendered.index("⚠ Diversity collapsed")
+        notice_end = rendered.index("caution.") + len("caution.")
+        notice = rendered[notice_start:notice_end]
+        # No C0 controls (0x00-0x1F) other than legitimate text in the notice
+        for ch in notice:
+            self.assertFalse(
+                0x00 <= ord(ch) <= 0x1F and ch not in ("\n",),
+                f"Unexpected control char {ord(ch):#x} in collapse notice",
+            )
+
+    def test_diversity_collapsed_notice_before_provenance(self):
+        """The collapse notice must appear before the provenance section."""
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="REPORT", synth_ok=True, diversity_collapsed=True)
+        rendered = render_result(result)
+        notice_pos = rendered.index("⚠ Diversity collapsed")
+        prov_pos = rendered.index("--- provenance ---")
+        self.assertLess(notice_pos, prov_pos)
+
+    def test_r9_iterative_result_no_cadre_breadcrumb_in_render(self):
+        """render_result output contains no [cadre] breadcrumbs — those belong on stderr."""
+        lanes = [make_lane(role="a", text="A"), make_lane(role="b", text="B")]
+        result = self._iter("synthesize", FleetStatus.SUCCESS, lanes,
+                            synthesis="SYNTHESIZED", synth_ok=True, diversity_collapsed=True)
+        rendered = render_result(result)
+        self.assertNotIn("[cadre]", rendered)
+
+
+class TestProgressRendererRoundStarted(unittest.TestCase):
+    """RoundStarted emits a [cadre] round k/N breadcrumb (U6 / iterative topology)."""
+
+    def setUp(self):
+        # Breadcrumb tests only emit + inspect the stream — no heartbeat thread is
+        # started, so there is nothing to start_heartbeat()/stop.
+        self._renderer, self._stream = _make_renderer()
+
+    def test_round_started_breadcrumb_format(self):
+        """RoundStarted(round=1, total=3) → '[cadre] round 1/3' on stderr."""
+        self._renderer.emit(RoundStarted(round=1, total=3))
+        lines = _lines(self._stream)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "[cadre] round 1/3")
+
+    def test_round_started_last_round(self):
+        """RoundStarted(round=3, total=3) → '[cadre] round 3/3'."""
+        self._renderer.emit(RoundStarted(round=3, total=3))
+        lines = _lines(self._stream)
+        self.assertEqual(lines[0], "[cadre] round 3/3")
+
+    def test_round_started_single_round(self):
+        """rounds=1 total=1 still emits the breadcrumb."""
+        self._renderer.emit(RoundStarted(round=1, total=1))
+        lines = _lines(self._stream)
+        self.assertEqual(lines[0], "[cadre] round 1/1")
+
+    def test_round_started_sequential_breadcrumbs(self):
+        """Multiple RoundStarted events produce one line each in order."""
+        self._renderer.emit(RoundStarted(round=1, total=2))
+        self._renderer.emit(RoundStarted(round=2, total=2))
+        lines = _lines(self._stream)
+        self.assertEqual(lines, ["[cadre] round 1/2", "[cadre] round 2/2"])
+
+    def test_round_started_is_in_progress_event_union(self):
+        """RoundStarted must be a member of the ProgressEvent Union."""
+        import typing
+        from fleet_engine.progress import ProgressEvent
+        union_args = typing.get_args(ProgressEvent)
+        self.assertIn(RoundStarted, union_args)
+
+
+class TestProgressRendererIterativeTally(unittest.TestCase):
+    """The heartbeat tally must reset each iterative round (LaneLaunched fires per
+    round), so `active` reflects the CURRENT round's in-flight lanes and never goes
+    negative from cross-round completion carryover (Codex cross-model finding)."""
+
+    @staticmethod
+    def _active(r):
+        return r._total - r._done - r._failed - r._skipped
+
+    def test_tally_resets_each_round_active_never_negative(self):
+        renderer, _stream = _make_renderer()
+        active = lambda: self._active(renderer)
+        # Round 1: 3 lanes launch, all complete ok.
+        renderer.emit(RoundStarted(round=1, total=2))
+        renderer.emit(LaneLaunched(roles=["a", "b", "c"]))
+        self.assertEqual(active(), 3)                 # 3 in flight
+        for role in ("a", "b", "c"):
+            renderer.emit(LaneDone(result=make_lane(role=role, ok=True)))
+            self.assertGreaterEqual(active(), 0, "active must never go negative")
+        self.assertEqual(active(), 0)                 # round 1 done
+        # Round 2: LaneLaunched must RESET the tally — active back to 3, not a stale 0.
+        renderer.emit(RoundStarted(round=2, total=2))
+        renderer.emit(LaneLaunched(roles=["a", "b", "c"]))
+        self.assertEqual(renderer._done, 0, "round-2 LaneLaunched must reset _done")
+        self.assertEqual(active(), 3, "round 2 must show 3 in-flight, not a stale 0")
+        # Dropped-lane case: one fails mid-round; active stays correct + non-negative.
+        renderer.emit(LaneDone(result=make_lane(role="a", ok=True)))
+        renderer.emit(LaneDone(result=make_lane(role="b", ok=False, error="x")))
+        self.assertGreaterEqual(active(), 0)
+        self.assertEqual(active(), 1)                 # c still in flight
+        renderer.emit(LaneDone(result=make_lane(role="c", ok=True)))
+        self.assertEqual(active(), 0)
 
 
 if __name__ == "__main__":

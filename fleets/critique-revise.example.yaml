@@ -1,0 +1,66 @@
+# Critique-revise — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/critique-revise.example.yaml ~/.cadre/fleets/critique-revise.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
+#
+# Replace provider/model values with the exact strings your Hermes resolves.
+# These are EXAMPLE assignments; swap each lane to a model from your verified
+# palette before running.
+#
+# Per-provider model-string format:
+#   - OpenRouter providers: model is the full "vendor/model" slug
+#   - OAuth providers (xai, openai-codex, nous): set provider explicitly + bare model id
+#
+# NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
+#
+# ITERATIVE TOPOLOGY: the producer and critic run in rounds. Each round is a
+# concurrent fan-out; from round 2, each lane sees the other lane's prior-round
+# output as data. The loop is: producer writes an artifact → critic critiques it
+# → producer revises incorporating the critique → critic re-evaluates → ... for
+# the configured number of rounds.
+#
+# Convergence: COLLECT — no synthesizer runs. The final-round output from both
+# lanes appears as attributed blocks on stdout: the improved artifact (producer)
+# and the final critique (critic). Review both to assess the revision quality.
+#
+# The producer uses toolset: [] so it writes strictly from the task and the
+# critic's prior-round feedback — no live retrieval. This bounds the cross-lane
+# injection surface: the critic's text enters the producer's context but cannot
+# trigger tool calls.
+
+name: critique-revise
+description: >-
+  Producer/critic revision loop: the producer writes and revises an artifact
+  across rounds, incorporating the critic's per-round feedback — demonstrating
+  topology: iterative with two-lane alternating roles.
+convergence: collect
+topology: iterative
+rounds: 3
+
+specialists:
+  - role: producer
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: anthropic/claude-opus-4.8
+    toolset: []
+    focus: >-
+      Write (or revise) the artifact requested in the task. In round 1, produce
+      your best initial draft. From round 2 onward, the critic's prior-round
+      feedback is provided to you as data: read it carefully and produce an
+      improved draft that directly addresses each critique point. Be explicit
+      about what you changed and why. You have no tools — write strictly from
+      the task and the critic's feedback; do not fetch or look anything up.
+
+  - role: critic
+    provider: xai              # OAuth provider -> bare model id; swap to your palette
+    model: grok-4.3
+    toolset: []
+    focus: >-
+      Critique the producer's artifact. In round 1, the task describes what the
+      producer will write — assess the stated goal and identify risks or
+      constraints the producer should address. From round 2 onward, the
+      producer's latest draft is provided to you as data: evaluate it rigorously
+      — identify specific weaknesses, errors, gaps, or structural problems. Give
+      actionable critique: name the exact issue, explain why it is a problem, and
+      suggest a concrete fix. Do not rewrite the artifact yourself — critique
+      only. Do NOT soften findings to reach agreement; if a problem remains,
+      call it out.

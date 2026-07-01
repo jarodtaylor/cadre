@@ -12,7 +12,7 @@ from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
-from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone
+from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone, LaneLaunched, RoundStarted
 
 
 def _config(**overrides):
@@ -1382,6 +1382,822 @@ class TestSequentialTopology(unittest.TestCase):
         result = run_fleet(_config(), "task", client)
         self.assertEqual(result.topology, "parallel")
         self.assertIsNone(result.terminal_produced)  # None = not a chain
+
+
+class TestU2IterativeCarriers(unittest.TestCase):
+    """U2 additive fields: rounds and diversity_collapsed on FleetResult.
+
+    Purely additive — no population logic (U3b populates these).
+    All existing parallel/sequential paths must be unaffected (the full suite guards this).
+    """
+
+    # ------------------------------------------------------------------
+    # Parallel run — both fields must carry their defaults
+    # ------------------------------------------------------------------
+
+    def test_parallel_run_rounds_is_none(self):
+        """A parallel fleet run carries rounds=None (not iterative)."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertIsNone(result.rounds)
+
+    def test_parallel_run_diversity_collapsed_is_false(self):
+        """A parallel fleet run carries diversity_collapsed=False (not iterative)."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Sequential run — both fields must carry their defaults
+    # ------------------------------------------------------------------
+
+    def test_sequential_run_rounds_is_none(self):
+        """A sequential fleet run carries rounds=None (not iterative)."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertIsNone(result.rounds)
+
+    def test_sequential_run_diversity_collapsed_is_false(self):
+        """A sequential fleet run carries diversity_collapsed=False (not iterative)."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Direct construction — defaults when kwargs are absent
+    # ------------------------------------------------------------------
+
+    def test_rounds_defaults_to_none_on_construction(self):
+        """FleetResult constructed without rounds= has rounds=None."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertIsNone(result.rounds)
+
+    def test_diversity_collapsed_defaults_to_false_on_construction(self):
+        """FleetResult constructed without diversity_collapsed= has diversity_collapsed=False."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Direct construction — both fields are settable (U3b will set them)
+    # ------------------------------------------------------------------
+
+    def test_rounds_settable_via_construction(self):
+        """rounds=[[...]] can be set via direct construction and reads back correctly."""
+        r = AgentResult(role="r1", provider="p", model="m", ok=True, text="out")
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.SUCCESS,
+            rounds=[[r]],
+        )
+        self.assertIsNotNone(result.rounds)
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(result.rounds[0][0].role, "r1")
+
+    def test_diversity_collapsed_settable_via_construction(self):
+        """diversity_collapsed=True can be set via direct construction and reads back correctly."""
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.DEGRADED,
+            diversity_collapsed=True,
+        )
+        self.assertTrue(result.diversity_collapsed)
+
+    def test_both_iterative_fields_settable_together(self):
+        """rounds and diversity_collapsed can both be set in one construction."""
+        r = AgentResult(role="a", provider="p", model="m", ok=True, text="out")
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.SUCCESS,
+            rounds=[[r], [r]],
+            diversity_collapsed=True,
+        )
+        self.assertEqual(len(result.rounds), 2)
+        self.assertTrue(result.diversity_collapsed)
+
+
+class TestRunRoundDirect(unittest.TestCase):
+    """Call _run_round directly with an arbitrary lane subset — proves the helper works
+    independently of _fan_out and returns results keyed on the passed lanes list, not
+    the full config order. This is the contract iterative rounds depend on.
+    """
+
+    def test_subset_returns_in_lanes_order(self):
+        """_run_round with 2-of-3 specialists returns results in the passed lanes order."""
+        from fleet_engine.engine import _run_round, _specialist_call
+
+        cfg = _config()
+        # Use only the first 2 (web, social) — a survivor-subset, just like iterative needs.
+        subset = cfg.specialists[:2]
+
+        client = FakeClient()
+        events: list = []
+
+        results = _run_round(
+            subset,
+            lambda spec: _specialist_call(client, spec, "round task"),
+            call_timeout=2.0,
+            progress=lambda e: events.append(e),
+        )
+
+        # Exactly 2 results, in LANES order (web first, then social).
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].role, "web")
+        self.assertEqual(results[1].role, "social")
+
+        # Both completed successfully (FakeClient defaults to ok for unknown roles).
+        self.assertTrue(results[0].ok)
+        self.assertTrue(results[1].ok)
+        self.assertFalse(results[0].timed_out)
+        self.assertFalse(results[1].timed_out)
+
+        # Toolset is stamped from the spec (not left as the client's echo).
+        self.assertEqual(results[0].toolset, ["web"])
+        self.assertEqual(results[1].toolset, ["x_search"])
+
+        # LaneLaunched emitted exactly once, listing only the subset's roles.
+        launched = [e for e in events if isinstance(e, LaneLaunched)]
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0].roles, ["web", "social"])
+
+        # One LaneDone per lane (2 total, not 3).
+        done = [e for e in events if isinstance(e, LaneDone)]
+        self.assertEqual(len(done), 2)
+
+
+def _iterative_config(**overrides):
+    """Build an iterative FleetConfig (default: 3 lanes, 3 rounds, convergence=synthesize)."""
+    data = {
+        "name": "t",
+        "topology": "iterative",
+        "rounds": 3,
+        "convergence": "synthesize",
+        "synthesis": {"provider": "openrouter", "model": "synth/m", "prompt": "SYNTH:"},
+        "specialists": [
+            {"role": "alpha", "provider": "openrouter", "model": "a/m",
+             "toolset": [], "focus": "analyze alpha"},
+            {"role": "beta", "provider": "xai", "model": "b/m",
+             "toolset": [], "focus": "analyze beta"},
+            {"role": "gamma", "provider": "openrouter", "model": "c/m",
+             "toolset": [], "focus": "analyze gamma"},
+        ],
+    }
+    data.update(overrides)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")
+    return cfg
+
+
+class RoundAwareFakeClient:
+    """FakeClient whose behavior is keyed by (role, round_number).
+
+    Tracks a per-role call counter (incremented atomically within a round — rounds
+    are serial, and within a round each role is called exactly once, so no two
+    threads race on the same role's counter). The call count for a role IS its round
+    number. Records prompts per (role, round) for threading assertions.
+
+    schedule: {(role, round_num): ('fail', 'error_msg')} — everything else defaults
+    to ('ok', '{role}-r{round}-output').
+    """
+
+    def __init__(self, schedule=None):
+        self.schedule = schedule or {}
+        self._lock = threading.Lock()
+        self._call_count: dict[str, int] = {}   # role -> how many times called so far
+        self.prompts: dict[tuple[str, int], str] = {}   # (role, round) -> prompt
+        self.toolset_for: dict[tuple[str, int], list] = {}   # (role, round) -> toolset
+
+    def run(self, *, role, provider, model, prompt, toolset=()):
+        with self._lock:
+            count = self._call_count.get(role, 0) + 1
+            self._call_count[role] = count
+            # Record under the lock too: run() is called concurrently by the per-round
+            # worker threads, so these dict writes must not race (Copilot review).
+            self.prompts[(role, count)] = prompt
+            self.toolset_for[(role, count)] = list(toolset)
+
+        kind, payload = self.schedule.get((role, count), ("ok", f"{role}-r{count}-output"))
+        ok = kind == "ok"
+        return AgentResult(
+            role=role, provider=provider, model=model, ok=ok,
+            text=payload if ok else None, error=None if ok else payload,
+        )
+
+    def prompt_for(self, role, round_num):
+        return self.prompts[(role, round_num)]
+
+
+class TestIterativeTopology(unittest.TestCase):
+    """_run_iterate: bounded-round concurrent fan-out with inter-round threading."""
+
+    # ------------------------------------------------------------------
+    # AE1: full debate — 3 lanes, 3 rounds, all ok, convergence synthesize
+    # ------------------------------------------------------------------
+
+    def test_ae1_full_debate_status_success(self):
+        """All lanes survive all 3 rounds → SUCCESS; synthesis runs over round-3 survivors."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "SYNTH OUT")})
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.topology, "iterative")
+
+    def test_run_fleet_rejects_iterative_rounds_below_one(self):
+        """Defense-in-depth: an iterative config with rounds < 1 — only reachable by a
+        direct construction that bypasses config validation — fails loud, not a silent
+        FAILED (CodeRabbit review)."""
+        cfg = _iterative_config()
+        cfg.rounds = 0  # bypass config validation via direct field mutation
+        with self.assertRaises(ValueError):
+            run_fleet(cfg, "task", RoundAwareFakeClient())
+
+    def test_ae1_full_debate_three_rounds_captured(self):
+        """3 rounds executed → rounds transcript has 3 entries, each with 3 lane results."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "SYNTH")})
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIsNotNone(result.rounds)
+        self.assertEqual(len(result.rounds), 3)
+        for i, round_list in enumerate(result.rounds):
+            self.assertEqual(len(round_list), 3, f"round {i + 1} should have 3 results")
+
+    def test_ae1_round2_prompt_contains_previous_round_outputs(self):
+        """Round-2 prompts contain the DATA marker + round-1 outputs for all lanes."""
+        from fleet_engine.engine import _CHAIN_DELIM
+
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        run_fleet(_iterative_config(), "task", client)
+
+        # Round-2 each lane should see all round-1 outputs via the framing block.
+        for role in ("alpha", "beta", "gamma"):
+            prompt = client.prompt_for(role, 2)
+            self.assertIn("Prior chain stages", prompt, f"{role} round-2 prompt missing DATA framing")
+            # Should contain all other round-1 outputs
+            for other_role in ("alpha", "beta", "gamma"):
+                self.assertIn(
+                    _CHAIN_DELIM.format(role=other_role), prompt,
+                    f"{role} round-2 prompt missing delimiter for {other_role}",
+                )
+                self.assertIn(
+                    f"{other_role}-r1-output", prompt,
+                    f"{role} round-2 prompt missing round-1 output from {other_role}",
+                )
+
+    def test_ae1_round3_prompt_contains_round2_outputs(self):
+        """Round-3 prompts contain round-2 outputs (previous-round visibility, not full history)."""
+        from fleet_engine.engine import _CHAIN_DELIM
+
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        run_fleet(_iterative_config(), "task", client)
+
+        # Round-3: each lane sees round-2 outputs only.
+        for role in ("alpha", "beta", "gamma"):
+            prompt = client.prompt_for(role, 3)
+            self.assertIn("Prior chain stages", prompt)
+            for other_role in ("alpha", "beta", "gamma"):
+                self.assertIn(f"{other_role}-r2-output", prompt,
+                              f"{role} round-3 prompt missing round-2 output from {other_role}")
+            # Round-1 outputs should NOT appear (previous-round only, not full history).
+            for other_role in ("alpha", "beta", "gamma"):
+                self.assertNotIn(f"{other_role}-r1-output", prompt,
+                                 f"{role} round-3 prompt should not contain round-1 output (prev-round only)")
+
+    def test_ae1_diversity_collapsed_false_on_full_debate(self):
+        """A full 3-lane, 3-round debate → diversity_collapsed is False."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertFalse(result.diversity_collapsed)
+
+    def test_ae1_round1_prompt_has_no_prior_stages(self):
+        """Round-1 lanes get only the base specialist prompt — no prior stages block."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        run_fleet(_iterative_config(), "task", client)
+
+        for role in ("alpha", "beta", "gamma"):
+            prompt = client.prompt_for(role, 1)
+            self.assertNotIn("Prior chain stages", prompt)
+            self.assertNotIn("UPSTREAM STAGE", prompt)
+
+    def test_ae1_round_started_events_emitted(self):
+        """RoundStarted events are emitted for each round (1 per round)."""
+        events = []
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        run_fleet(_iterative_config(), "task", client, progress=lambda e: events.append(e))
+
+        started = [e for e in events if isinstance(e, RoundStarted)]
+        self.assertEqual(len(started), 3)
+        for i, ev in enumerate(started):
+            self.assertEqual(ev.round, i + 1)
+            self.assertEqual(ev.total, 3)
+
+    # ------------------------------------------------------------------
+    # AE2: mid-run lane failure — X fails round 2; rounds 2 & 3 continue without X
+    # ------------------------------------------------------------------
+
+    def test_ae2_dropped_lane_absent_from_later_rounds(self):
+        """Lane that fails round 2 is absent from round 3 results; transcript has its R2 failure."""
+        # alpha fails in round 2; beta and gamma survive all 3 rounds.
+        schedule = {("alpha", 2): ("fail", "auth error"), ("synthesizer", 1): ("ok", "S")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIsNotNone(result.rounds)
+        # Round 1: all 3 roles.
+        self.assertEqual(len(result.rounds[0]), 3)
+        # Round 2: all 3 roles attempted (alpha fails in round 2, not dropped YET).
+        self.assertEqual(len(result.rounds[1]), 3)
+        # Round 3: only 2 roles (alpha was dropped after round 2).
+        self.assertEqual(len(result.rounds[2]), 2)
+        round3_roles = {r.role for r in result.rounds[2]}
+        self.assertNotIn("alpha", round3_roles)
+        self.assertIn("beta", round3_roles)
+        self.assertIn("gamma", round3_roles)
+
+    def test_ae2_dropped_lane_in_failures(self):
+        """Dropped lane appears in result.failures (its drop-round failure is its representative)."""
+        schedule = {("alpha", 2): ("fail", "auth error"), ("synthesizer", 1): ("ok", "S")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        failure_roles = [r.role for r in result.failures]
+        self.assertIn("alpha", failure_roles, "dropped lane must appear in failures")
+        self.assertNotIn("beta", failure_roles)
+        self.assertNotIn("gamma", failure_roles)
+
+    def test_ae2_convergence_runs_over_round3_survivors(self):
+        """Convergence runs over the 2 round-3 survivors only (not the dropped alpha)."""
+        schedule = {("alpha", 2): ("fail", "auth error"), ("synthesizer", 1): ("ok", "FINAL")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertEqual(result.synthesis, "FINAL")
+        # The synthesizer prompt should not include alpha's output.
+        synth_prompt = client.prompt_for("synthesizer", 1)
+        self.assertNotIn("alpha", synth_prompt,
+                         "dropped alpha must not appear in the synthesizer's survivors block")
+        self.assertIn("beta", synth_prompt)
+        self.assertIn("gamma", synth_prompt)
+        # KTD3: representatives are R*=round-3 outputs, NOT round-1 stale outputs.
+        by_role = {r.role: r for r in result.successes}
+        self.assertEqual(by_role["beta"].text, "beta-r3-output",
+                         "R*=3: beta representative must be round-3 output, not round-1")
+        self.assertNotIn("beta-r1-output", synth_prompt,
+                         "stale round-1 output must not appear in the synthesizer prompt")
+
+    def test_ae2_two_survivors_in_successes(self):
+        """Two surviving lanes in round 3 → result.successes has 2 entries."""
+        schedule = {("alpha", 2): ("fail", "e"), ("synthesizer", 1): ("ok", "S")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertEqual(len(result.successes), 2)
+
+    # ------------------------------------------------------------------
+    # AE3: all lanes fail round 1 → FAILED, convergence never runs
+    # ------------------------------------------------------------------
+
+    def test_ae3_all_fail_round1_status_failed(self):
+        """All lanes fail round 1 → FAILED; convergence never called."""
+        schedule = {
+            ("alpha", 1): ("fail", "down"),
+            ("beta", 1): ("fail", "down"),
+            ("gamma", 1): ("fail", "down"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIs(result.status, FleetStatus.FAILED)
+        self.assertFalse(result.ok)
+
+    def test_ae3_all_fail_round1_convergence_not_run(self):
+        """synthesis=None and synth_ok=None (convergence never invoked on all-fail round 1)."""
+        schedule = {
+            ("alpha", 1): ("fail", "down"),
+            ("beta", 1): ("fail", "down"),
+            ("gamma", 1): ("fail", "down"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+        # Synthesizer must not have been called.
+        self.assertNotIn(("synthesizer", 1), client.prompts)
+
+    def test_ae3_all_fail_round1_one_round_in_transcript(self):
+        """rounds transcript has exactly 1 round when all lanes fail round 1."""
+        schedule = {
+            ("alpha", 1): ("fail", "down"),
+            ("beta", 1): ("fail", "down"),
+            ("gamma", 1): ("fail", "down"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertEqual(len(result.rounds), 1)
+
+    def test_ae3_all_fail_round1_failure_note(self):
+        """'all specialists failed' note is present on all-fail round-1."""
+        schedule = {r: ("fail", "down") for r in [("alpha", 1), ("beta", 1), ("gamma", 1)]}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertTrue(any("all specialists failed" in n for n in result.notes))
+
+    # ------------------------------------------------------------------
+    # AE4: self-refine — 1 lane, 3 rounds, all ok
+    # ------------------------------------------------------------------
+
+    def test_ae4_self_refine_success(self):
+        """1 lane, 3 rounds, all ok → SUCCESS; diversity_collapsed=False (single lane)."""
+        data = {
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "convergence": "synthesize",
+            "synthesis": {"provider": "openrouter", "model": "synth/m"},
+            "specialists": [
+                {"role": "refiner", "provider": "openrouter", "model": "r/m",
+                 "toolset": [], "focus": "refine output"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        schedule = {("synthesizer", 1): ("ok", "REFINED")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertFalse(result.diversity_collapsed, "single lane never collapses diversity")
+        self.assertEqual(result.failures, [])
+
+    def test_ae4_self_refine_sees_own_prior_output(self):
+        """Self-refine: round-2 and round-3 prompts contain the lane's own prior output."""
+        from fleet_engine.engine import _CHAIN_DELIM
+
+        data = {
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "convergence": "collect",
+            "specialists": [
+                {"role": "refiner", "provider": "openrouter", "model": "r/m",
+                 "toolset": [], "focus": "refine output"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        client = RoundAwareFakeClient()
+        run_fleet(cfg, "task", client)
+
+        # Round-2: sees round-1 output.
+        prompt_r2 = client.prompt_for("refiner", 2)
+        self.assertIn("refiner-r1-output", prompt_r2)
+        self.assertIn(_CHAIN_DELIM.format(role="refiner"), prompt_r2)
+
+        # Round-3: sees round-2 output only (previous-round, not full history).
+        prompt_r3 = client.prompt_for("refiner", 3)
+        self.assertIn("refiner-r2-output", prompt_r3)
+        self.assertNotIn("refiner-r1-output", prompt_r3)
+
+    def test_ae4_self_refine_three_rounds_captured(self):
+        """3 rounds in the transcript; each has exactly 1 lane result."""
+        data = {
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "convergence": "collect",
+            "specialists": [
+                {"role": "refiner", "provider": "openrouter", "model": "r/m",
+                 "toolset": [], "focus": "refine"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        client = RoundAwareFakeClient()
+        result = run_fleet(cfg, "task", client)
+
+        self.assertEqual(len(result.rounds), 3)
+        for round_list in result.rounds:
+            self.assertEqual(len(round_list), 1)
+
+    # ------------------------------------------------------------------
+    # AE5: debate + judge — convergence runs over last-surviving round
+    # ------------------------------------------------------------------
+
+    def test_ae5_debate_judge_success(self):
+        """Debate with convergence=judge → judge runs over round-3 survivors; SUCCESS."""
+        data = {
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "convergence": "judge",
+            "judge": {"provider": "openrouter", "model": "j/m"},
+            "specialists": [
+                {"role": "alpha", "provider": "openrouter", "model": "a/m",
+                 "toolset": [], "focus": "analyze A"},
+                {"role": "beta", "provider": "xai", "model": "b/m",
+                 "toolset": [], "focus": "analyze B"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        schedule = {("judge", 1): ("ok", "GRADES")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertEqual(result.judge, "GRADES")
+        self.assertIs(result.judge_ok, True)
+
+    def test_ae5_judge_failure_degrades(self):
+        """Judge fails → DEGRADED; final-round outputs preserved in successes."""
+        data = {
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "convergence": "judge",
+            "judge": {"provider": "openrouter", "model": "j/m"},
+            "specialists": [
+                {"role": "alpha", "provider": "openrouter", "model": "a/m",
+                 "toolset": [], "focus": "analyze A"},
+                {"role": "beta", "provider": "xai", "model": "b/m",
+                 "toolset": [], "focus": "analyze B"},
+            ],
+        }
+        cfg = FleetConfig.from_dict(data)
+        resolve(cfg, "/unused")
+
+        schedule = {("judge", 1): ("fail", "rate limited")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.DEGRADED)
+        self.assertIsNone(result.judge)
+        self.assertIs(result.judge_ok, False)
+        # Final-round outputs must still be accessible as successes.
+        self.assertEqual(len(result.successes), 2, "final-round outputs must be preserved")
+
+    # ------------------------------------------------------------------
+    # AE6: mid-run collapse — all 3 ok round 1, all fail round 2, 3 rounds configured
+    # ------------------------------------------------------------------
+
+    def test_ae6_collapse_early_stop(self):
+        """All 3 ok round 1, all fail round 2 → early stop; 2 rounds in transcript."""
+        schedule = {
+            ("alpha", 2): ("fail", "down"),
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+
+        # Use collect so convergence is not the issue.
+        cfg = _iterative_config(convergence="collect")
+        result = run_fleet(cfg, "task", client)
+
+        # Early stop after round 2 (all dropped).
+        self.assertEqual(len(result.rounds), 2)
+
+    def test_ae6_convergence_over_round1(self):
+        """After collapse, convergence runs over round-1 survivors (the last surviving round)."""
+        schedule = {
+            ("alpha", 2): ("fail", "down"),
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+            ("synthesizer", 1): ("ok", "R1 SYNTH"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        # Synthesis ran over round-1 outputs.
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertEqual(result.synthesis, "R1 SYNTH")
+        # KTD3: R*=1 → synthesizer prompt must contain round-1 outputs, not round-2 failures.
+        synth_prompt = client.prompt_for("synthesizer", 1)
+        self.assertIn("alpha-r1-output", synth_prompt,
+                      "R*=1: synthesizer must see round-1 outputs")
+
+    def test_ae6_failures_empty(self):
+        """Round-1 lanes succeeded → representatives are round-1 successes → failures empty."""
+        schedule = {
+            ("alpha", 2): ("fail", "down"),
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+            ("synthesizer", 1): ("ok", "S"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        self.assertEqual(result.failures, [],
+                         "round-1 successes are the representatives → no failures")
+
+    def test_ae6_diversity_collapsed_true(self):
+        """Zero cross-round iterations (R_star==1) on a multi-lane fleet → diversity_collapsed=True."""
+        schedule = {
+            ("alpha", 2): ("fail", "down"),
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+            ("synthesizer", 1): ("ok", "S"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertTrue(result.diversity_collapsed)
+
+    def test_ae6_status_success(self):
+        """Collapse doesn't change status to DEGRADED — SUCCESS because convergence succeeded."""
+        schedule = {
+            ("alpha", 2): ("fail", "down"),
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+            ("synthesizer", 1): ("ok", "S"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+
+    # ------------------------------------------------------------------
+    # Collapse to a lone survivor (3 lanes, round-3 has only 1 ok)
+    # ------------------------------------------------------------------
+
+    def test_lone_survivor_diversity_collapsed_true(self):
+        """3 lanes, but only 1 survives to the last round → diversity_collapsed=True."""
+        schedule = {
+            ("beta", 2): ("fail", "down"),
+            ("gamma", 2): ("fail", "down"),
+            ("synthesizer", 1): ("ok", "S"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        # Only alpha survives to rounds 3; beta and gamma dropped after round 2.
+        # R_star = 3 (alpha survived); n_ok_star = 1 (only alpha in round 3).
+        self.assertTrue(result.diversity_collapsed)
+
+    def test_fail_inside_rstar_representatives_are_rstar_records(self):
+        """Beta+gamma fail IN the last surviving round (R*=3) — not dropped earlier.
+
+        _representative_results must pick each lane's R* record:
+        alpha → R*-round success, beta/gamma → R*-round failure (land in result.failures).
+        Convergence runs over alpha alone (the only R*-round success).
+        """
+        schedule = {
+            ("beta", 3): ("fail", "round3-fail"),
+            ("gamma", 3): ("fail", "round3-fail"),
+            ("synthesizer", 1): ("ok", "ALPHA ONLY"),
+        }
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(), "task", client)
+
+        # R*=3, n_ok_star=1 → collapsed
+        self.assertTrue(result.diversity_collapsed)
+        # Beta and gamma failed IN R* → they appear in result.failures
+        failure_roles = {r.role for r in result.failures}
+        self.assertIn("beta", failure_roles,
+                      "beta failed in R*=3 and must be a representative failure")
+        self.assertIn("gamma", failure_roles,
+                      "gamma failed in R*=3 and must be a representative failure")
+        # Convergence ran over alpha's R* success only
+        synth_prompt = client.prompt_for("synthesizer", 1)
+        self.assertIn("alpha-r3-output", synth_prompt,
+                      "synthesizer must see alpha's round-3 output")
+        self.assertNotIn("beta", synth_prompt,
+                         "failed beta must not appear in the synthesizer's survivors block")
+
+    # ------------------------------------------------------------------
+    # Iterative + collect (never DEGRADED)
+    # ------------------------------------------------------------------
+
+    def test_iterative_collect_all_ok_success(self):
+        """Iterative + collect, all lanes survive → SUCCESS; synthesis=None."""
+        cfg = _iterative_config(convergence="collect")
+        client = RoundAwareFakeClient()
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertIsNone(result.synthesis)
+        self.assertIsNone(result.synth_ok)
+        self.assertEqual(result.convergence, "collect")
+
+    def test_iterative_collect_never_degraded(self):
+        """Iterative + collect is never DEGRADED — partial failure → still SUCCESS."""
+        schedule = {("gamma", 1): ("fail", "down")}
+        cfg = _iterative_config(convergence="collect")
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(cfg, "task", client)
+
+        self.assertIsNot(result.status, FleetStatus.DEGRADED)
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+
+    def test_iterative_collect_all_fail_is_failed(self):
+        """Iterative + collect, all lanes fail round 1 → FAILED (never DEGRADED)."""
+        schedule = {
+            ("alpha", 1): ("fail", "down"),
+            ("beta", 1): ("fail", "down"),
+            ("gamma", 1): ("fail", "down"),
+        }
+        cfg = _iterative_config(convergence="collect")
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(cfg, "task", client)
+        self.assertIs(result.status, FleetStatus.FAILED)
+
+    # ------------------------------------------------------------------
+    # Toolset: [] iterative lane runs with zero tools (not None)
+    # ------------------------------------------------------------------
+
+    def test_toolset_empty_list_not_none(self):
+        """An iterative lane with toolset:[] receives toolset=[] (not None) in every round."""
+        cfg = _iterative_config(rounds=2)
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        result = run_fleet(cfg, "task", client)
+
+        # Every lane result in every round should have toolset == [].
+        for round_list in result.rounds:
+            for lane_result in round_list:
+                self.assertEqual(lane_result.toolset, [],
+                                 f"{lane_result.role} must have toolset=[], not None")
+                self.assertIsNotNone(lane_result.toolset)
+
+    # ------------------------------------------------------------------
+    # threading_truncated flag — set when inter-round content is capped
+    # ------------------------------------------------------------------
+
+    def test_threading_truncated_when_inter_round_output_oversize(self):
+        """threading_truncated=True when a round's output exceeds CHAIN_STAGE_CAP."""
+        from fleet_engine.engine import CHAIN_STAGE_CAP
+
+        long_text = "X" * (CHAIN_STAGE_CAP + 100)
+
+        class BigOutputClient:
+            def __init__(self):
+                self.calls: list[tuple[str, str]] = []
+                self.toolset_for: dict[str, list] = {}
+
+            def run(self, *, role, provider, model, prompt, toolset=()):
+                self.calls.append((role, prompt))
+                self.toolset_for[role] = list(toolset)
+                if role == "synthesizer":
+                    return AgentResult(role=role, provider=provider, model=model,
+                                       ok=True, text="S")
+                return AgentResult(role=role, provider=provider, model=model,
+                                   ok=True, text=long_text)
+
+        client = BigOutputClient()
+        cfg = _iterative_config(rounds=2)
+        result = run_fleet(cfg, "task", client)
+        self.assertTrue(result.threading_truncated)
+
+    def test_no_threading_truncated_when_outputs_small(self):
+        """threading_truncated=False when all inter-round outputs are within the cap."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        result = run_fleet(_iterative_config(rounds=2), "task", client)
+        self.assertFalse(result.threading_truncated)
+
+    # ------------------------------------------------------------------
+    # Terminal_produced: None for iterative (not a chain)
+    # ------------------------------------------------------------------
+
+    def test_terminal_produced_is_none_for_iterative(self):
+        """iterative runs carry terminal_produced=None (not a chain topology)."""
+        client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
+        result = run_fleet(_iterative_config(), "task", client)
+        self.assertIsNone(result.terminal_produced)
+
+    # ------------------------------------------------------------------
+    # rounds=1 edge case: single-round iterative (no cross-round iterations)
+    # → diversity_collapsed=True for multi-lane (R_star==1 condition)
+    # ------------------------------------------------------------------
+
+    def test_rounds1_multi_lane_diversity_collapsed(self):
+        """rounds:1 multi-lane fleet completes with 0 cross-round iterations → collapsed=True."""
+        schedule = {("synthesizer", 1): ("ok", "S")}
+        client = RoundAwareFakeClient(schedule=schedule)
+        result = run_fleet(_iterative_config(rounds=1), "task", client)
+
+        self.assertIs(result.status, FleetStatus.SUCCESS)
+        self.assertTrue(result.diversity_collapsed,
+                        "rounds:1 multi-lane fleet has zero cross-round iterations → collapsed")
+
+    # ------------------------------------------------------------------
+    # Parallel and sequential paths unaffected by the iterative branch
+    # ------------------------------------------------------------------
+
+    def test_parallel_path_untouched_by_iterative_branch(self):
+        """A default parallel fleet is unaffected by the iterative branch."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertEqual(result.topology, "parallel")
+        self.assertIsNone(result.rounds)
+        self.assertFalse(result.diversity_collapsed)
+
+    def test_sequential_path_untouched_by_iterative_branch(self):
+        """A sequential fleet is unaffected by the iterative branch."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertEqual(result.topology, "sequential")
+        self.assertIsNone(result.rounds)
+        self.assertFalse(result.diversity_collapsed)
 
 
 if __name__ == "__main__":
