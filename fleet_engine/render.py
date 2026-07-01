@@ -124,8 +124,8 @@ def render_fleet_preview(
     cannot use terminal escapes to spoof or hide any part of the preview.
 
     ``call_timeout`` is the per-stage wall-clock budget (seconds); for sequential
-    fleets the max total wall-clock ceiling is shown as ``call_timeout × N`` — where
-    N is the stage count plus one for the convergence call under synthesize/judge
+    fleets the max total wall-clock ceiling is ``call_timeout`` times ``N`` — where
+    ``N`` is the stage count plus one for the convergence call under synthesize/judge
     (collect has none). Pass ``None`` to indicate an unlimited per-stage budget.
     Parallel fleets ignore this parameter — the parallel preview stays byte-identical.
 
