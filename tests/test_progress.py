@@ -24,6 +24,7 @@ from fleet_engine.progress import (
     LaneLaunched,
     LaneStarted,
     ProgressEvent,
+    RoundStarted,
     SynthDone,
     SynthStarted,
     noop,
@@ -702,6 +703,74 @@ class TestSequentialProgressEvents(unittest.TestCase):
         launched = [e for e in events if isinstance(e, LaneLaunched)]
         self.assertEqual(len(launched), 1)
         self.assertFalse(launched[0].queued)
+
+
+class TestRoundStartedEvent(unittest.TestCase):
+    """RoundStarted is a valid ProgressEvent member with the correct fields.
+
+    Structural tests (dataclass shape, union membership) only — breadcrumb
+    rendering lives in test_render.py (TestProgressRendererRoundStarted).
+    """
+
+    def test_round_started_is_dataclass_with_round_and_total(self):
+        ev = RoundStarted(round=2, total=3)
+        self.assertEqual(ev.round, 2)
+        self.assertEqual(ev.total, 3)
+
+    def test_round_started_is_frozen(self):
+        ev = RoundStarted(round=1, total=3)
+        with self.assertRaises((AttributeError, TypeError)):
+            ev.round = 99  # type: ignore[misc]
+
+    def test_round_started_is_in_progress_event_union(self):
+        """RoundStarted must be a member of the ProgressEvent Union."""
+        import typing
+        union_args = typing.get_args(ProgressEvent)
+        self.assertIn(RoundStarted, union_args, "RoundStarted must be in ProgressEvent union")
+
+    def test_round_started_emitted_by_iterative_run(self):
+        """An iterative run emits one RoundStarted per round (3 rounds → 3 events)."""
+        cfg = FleetConfig.from_dict({
+            "name": "t",
+            "topology": "iterative",
+            "rounds": 3,
+            "synthesis": {"provider": "openrouter", "model": "s/m"},
+            "specialists": [
+                {"role": "debater", "provider": "openrouter", "model": "d/m",
+                 "toolset": [], "focus": "debate the topic"},
+            ],
+        })
+        resolve(cfg, "/unused")
+
+        events = []
+        run_fleet(cfg, "task", FakeClient(), progress=lambda e: events.append(e))
+
+        round_started = [e for e in events if isinstance(e, RoundStarted)]
+        self.assertEqual(len(round_started), 3)
+        self.assertEqual([e.round for e in round_started], [1, 2, 3])
+        self.assertEqual([e.total for e in round_started], [3, 3, 3])
+
+    def test_round_started_not_emitted_for_parallel(self):
+        """A parallel run emits no RoundStarted events."""
+        events = []
+        run_fleet(
+            _config(), "task",
+            FakeClient({"synthesizer": ("ok", "S")}),
+            progress=lambda e: events.append(e),
+        )
+        round_started = [e for e in events if isinstance(e, RoundStarted)]
+        self.assertEqual(round_started, [])
+
+    def test_round_started_not_emitted_for_sequential(self):
+        """A sequential run emits no RoundStarted events."""
+        events = []
+        run_fleet(
+            _chain_config(), "task",
+            FakeClient(),
+            progress=lambda e: events.append(e),
+        )
+        round_started = [e for e in events if isinstance(e, RoundStarted)]
+        self.assertEqual(round_started, [])
 
 
 if __name__ == "__main__":
