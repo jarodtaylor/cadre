@@ -2491,6 +2491,25 @@ class TestIterativeIncrementalCapture(unittest.TestCase):
         manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
         return result, manifest
 
+    def test_lanes_file_points_at_representative_round(self):
+        """Top-level lanes[].file points at each representative's ACTUAL round file —
+        the drop-round for a dropped lane, R* for a survivor — and every path exists on
+        disk. Guards the cross-unit bug where lanes[].file named a flat
+        specialist-<role>.md that the iterative edge never writes."""
+        cfg = _iterative_config(convergence="collect")  # alpha, beta, gamma; 3 rounds
+        # alpha fails in round 2 → drops; beta and gamma survive to round 3 (R*).
+        client = RoundAwareFakeClient(schedule={("alpha", 2): ("fail", "alpha dropped")})
+        _, manifest = self._run_and_save(cfg, client)
+        files = {lane["role"]: lane["file"] for lane in manifest["lanes"]}
+        self.assertEqual(files["alpha"], "round-2/specialist-alpha.md")   # drop round
+        self.assertEqual(files["beta"], "round-3/specialist-beta.md")     # R*
+        self.assertEqual(files["gamma"], "round-3/specialist-gamma.md")   # R*
+        for lane in manifest["lanes"]:
+            self.assertTrue(
+                (self.run_dir / lane["file"]).exists(),
+                f"lanes[].file {lane['file']!r} must exist on disk (not a phantom flat path)",
+            )
+
     def test_round_1_dir_created(self):
         """After run, round-1/ subdirectory exists under run_dir."""
         cfg = _iterative_run_cfg()

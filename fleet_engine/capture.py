@@ -399,7 +399,15 @@ def save_run(cfg: FleetConfig, result: FleetResult, run_dir: Path) -> Path:
     # happening to be config-ordered (matters only when two roles collide under
     # _safe_role and the -2 suffix would otherwise flip).
     fmap = lane_filename_map([spec.role for spec in cfg.specialists])
-    lane_filenames = [fmap[lane.role] for lane in result.specialists]
+    if result.rounds is not None:
+        # Iterative: each representative's output lives in its round file
+        # (round-<k>/…) — the edge only ever writes round-namespaced files, never a
+        # flat specialist-<role>.md. Point lanes[].file at the ACTUAL round file so
+        # the manifest stays an accurate index to what is on disk (a flat name would
+        # index a file that was never written).
+        lane_filenames = [_representative_file(result, lane, fmap) for lane in result.specialists]
+    else:
+        lane_filenames = [fmap[lane.role] for lane in result.specialists]
 
     # synthesis.md — the synthesized output, or a failure note.
     _write(run_dir / "synthesis.md", _synthesis_md(result))
@@ -562,6 +570,21 @@ def _synthesis_md(result: FleetResult) -> str:
         "synthesizer failed",
     )
     return f"No synthesis — {synth_note}."
+
+
+def _representative_file(result: FleetResult, lane, fmap: dict[str, str]) -> str:  # lane: AgentResult
+    """The round-namespaced file for an iterative representative result.
+
+    A representative (in ``result.specialists``) is the EXACT ``AgentResult`` object
+    from the round it represents — its last-surviving-round result, or its drop-round
+    failure — so object identity locates its round. Returns ``round-<k>/<filename>``,
+    matching what the edge wrote incrementally. Falls back to the flat filename if the
+    object is not found (defensive — a representative always originates in some round).
+    """
+    for k, round_list in enumerate(result.rounds, start=1):  # type: ignore[union-attr]
+        if any(r is lane for r in round_list):
+            return f"{round_subdir(k)}/{fmap[lane.role]}"
+    return fmap[lane.role]
 
 
 def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[dict]]:
