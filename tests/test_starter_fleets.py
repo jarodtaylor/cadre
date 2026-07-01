@@ -29,12 +29,18 @@ _CODE_REVIEW = _REPO / "fleets" / "code-review.example.yaml"
 _DOC_REVIEW = _REPO / "fleets" / "doc-review.example.yaml"
 _REVIEW_SCORING = _REPO / "fleets" / "review-scoring.example.yaml"
 _RESEARCH_BRIEF = _REPO / "fleets" / "research-brief.example.yaml"
+_DEBATE = _REPO / "fleets" / "debate.example.yaml"
+_CRITIQUE_REVISE = _REPO / "fleets" / "critique-revise.example.yaml"
 
 # The five review lenses doc-review ports from ce-doc-review, in fleet order.
 _DOC_REVIEW_ROLES = ["coherence", "feasibility", "scope-guardian", "product", "adversarial"]
 
 # The four code-review lenses review-scoring uses, in fleet order.
 _REVIEW_SCORING_ROLES = ["security", "architecture", "performance", "correctness"]
+
+# The three debate roles and two critique-revise roles, in fleet order.
+_DEBATE_ROLES = ["proponent", "skeptic", "contrarian"]
+_CRITIQUE_REVISE_ROLES = ["producer", "critic"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +89,22 @@ class TestStarterFleetsLoad(unittest.TestCase):
             cfg = FleetConfig.load(_RESEARCH_BRIEF)
         except Exception as exc:  # noqa: BLE001
             self.fail(f"FleetConfig.load raised on research-brief: {exc}")
+        self.assertIsInstance(cfg, FleetConfig)
+
+    def test_debate_loads(self):
+        """debate.example.yaml parses without raising ConfigError."""
+        try:
+            cfg = FleetConfig.load(_DEBATE)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"FleetConfig.load raised on debate: {exc}")
+        self.assertIsInstance(cfg, FleetConfig)
+
+    def test_critique_revise_loads(self):
+        """critique-revise.example.yaml parses without raising ConfigError."""
+        try:
+            cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"FleetConfig.load raised on critique-revise: {exc}")
         self.assertIsInstance(cfg, FleetConfig)
 
 
@@ -137,6 +159,30 @@ class TestStarterFleetsConvergence(unittest.TestCase):
                          "research-brief must parse as sequential topology")
         self.assertIsNone(cfg.synthesis,
                           "research-brief (collect) must have synthesis=None")
+
+    def test_debate_is_collect_iterative(self):
+        """debate uses convergence: collect + topology: iterative, rounds: 3, no synthesis."""
+        cfg = FleetConfig.load(_DEBATE)
+        self.assertEqual(cfg.convergence, "collect",
+                         "debate must parse as collect convergence")
+        self.assertEqual(cfg.topology, "iterative",
+                         "debate must parse as iterative topology")
+        self.assertEqual(cfg.rounds, 3,
+                         "debate must have rounds == 3")
+        self.assertIsNone(cfg.synthesis,
+                          "debate (collect) must have synthesis=None")
+
+    def test_critique_revise_is_collect_iterative(self):
+        """critique-revise uses convergence: collect + topology: iterative, rounds: 3."""
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        self.assertEqual(cfg.convergence, "collect",
+                         "critique-revise must parse as collect convergence")
+        self.assertEqual(cfg.topology, "iterative",
+                         "critique-revise must parse as iterative topology")
+        self.assertEqual(cfg.rounds, 3,
+                         "critique-revise must have rounds == 3")
+        self.assertIsNone(cfg.synthesis,
+                          "critique-revise (collect) must have synthesis=None")
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +300,38 @@ class TestStarterFleetsLintClean(unittest.TestCase):
             warnings,
             [],
             f"research-brief should have zero focus-lint warnings, got: {warnings}",
+        )
+
+    def test_debate_focus_lint_clean(self):
+        """debate has zero check_focus_grounding warnings.
+
+        All three lanes use toolset: [] (non-retrieval), so the grounding lint
+        skips every lane and returns [] trivially. This guards against accidentally
+        adding a retrieval toolset to a debate lane without a sourcing directive.
+        """
+        cfg = FleetConfig.load(_DEBATE)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(
+            warnings,
+            [],
+            f"debate should have zero focus-lint warnings, got: {warnings}",
+        )
+
+    def test_critique_revise_focus_lint_clean(self):
+        """critique-revise has zero check_focus_grounding warnings.
+
+        Both lanes use toolset: [] (non-retrieval), so the grounding lint skips
+        every lane and returns [] trivially. This guards against accidentally
+        adding a retrieval toolset to a lane without a sourcing directive.
+        """
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        resolve(cfg, "/unused")  # focus-only: sets effective_instruction = focus, zero I/O
+        warnings = check_focus_grounding(cfg)
+        self.assertEqual(
+            warnings,
+            [],
+            f"critique-revise should have zero focus-lint warnings, got: {warnings}",
         )
 
 
@@ -592,6 +670,215 @@ class TestResearchBriefFleetInvariants(unittest.TestCase):
             analyst_provider,
             f"Scout and Analyst must use different providers (cross-provider independence); "
             f"both are on '{scout_provider}'",
+        )
+
+
+# ---------------------------------------------------------------------------
+# debate specific invariants: three diverse lanes, iterative topology,
+# rounds, fail-closed toolset, and cross-model spread
+# ---------------------------------------------------------------------------
+
+
+class TestDebateFleetInvariants(unittest.TestCase):
+    """debate carries exactly three lanes with the expected roles, iterative topology,
+    correct rounds count, and fail-closed toolset."""
+
+    def test_three_lanes_with_expected_roles(self):
+        """debate has exactly three lanes: proponent, skeptic, contrarian — in order."""
+        cfg = FleetConfig.load(_DEBATE)
+        roles = [s.role for s in cfg.specialists]
+        self.assertEqual(
+            roles,
+            _DEBATE_ROLES,
+            f"debate must have three lanes in order {_DEBATE_ROLES}, got: {roles}",
+        )
+
+    def test_topology_is_iterative(self):
+        """debate uses topology: iterative."""
+        cfg = FleetConfig.load(_DEBATE)
+        self.assertEqual(cfg.topology, "iterative",
+                         "debate topology must be 'iterative'")
+
+    def test_rounds_is_3(self):
+        """debate uses rounds: 3."""
+        cfg = FleetConfig.load(_DEBATE)
+        self.assertEqual(cfg.rounds, 3, "debate rounds must be 3")
+
+    def test_every_toolset_is_empty_list_not_none(self):
+        """Each parsed toolset is [] (never None) — fail-closed security control.
+
+        [] vs None matters at the adapter layer (None enables every Hermes toolset;
+        [] is fail-closed zero tools). Assert the explicit empty list for each lane.
+        """
+        cfg = FleetConfig.load(_DEBATE)
+        for spec in cfg.specialists:
+            self.assertEqual(
+                spec.toolset,
+                [],
+                f"debate lane '{spec.role}' toolset must be [] (got {spec.toolset!r})",
+            )
+            self.assertIsInstance(
+                spec.toolset,
+                list,
+                f"debate lane '{spec.role}' toolset must be a list, not None",
+            )
+
+    def test_yaml_authors_explicit_empty_toolset_per_lane(self):
+        """Every active lane declares the literal ``toolset: []`` in YAML.
+
+        config.py normalizes ``toolset: null`` → [], so the parsed assertion
+        above passes even with ``toolset: null``. The explicit ``[]`` is the
+        deliberate fail-closed statement; this test reads the raw YAML and
+        requires exactly three ``toolset: []`` declarations (one per lane).
+        """
+        lines = _DEBATE.read_text(encoding="utf-8").splitlines()
+        toolset_lines = [
+            stripped
+            for line in lines
+            for stripped in [line.strip()]
+            if stripped.startswith("toolset:")
+        ]
+        self.assertEqual(
+            len(toolset_lines),
+            len(_DEBATE_ROLES),
+            f"expected one authored toolset per active lane ({len(_DEBATE_ROLES)}), "
+            f"got {len(toolset_lines)}: {toolset_lines}",
+        )
+        for decl in toolset_lines:
+            self.assertEqual(
+                decl,
+                "toolset: []",
+                f"every active debate lane must author the literal 'toolset: []' "
+                f"(fail-closed, not 'toolset: null'); got {decl!r}",
+            )
+
+    def test_cross_model_spread(self):
+        """debate lanes are not all on the same model (cross-model diversity required).
+
+        Model diversity is the mechanism that drives genuine debate — a same-model
+        fleet homogenizes to consensus and defeats the topology's purpose.
+        """
+        cfg = FleetConfig.load(_DEBATE)
+        models = [spec.model for spec in cfg.specialists]
+        unique_models = set(models)
+        self.assertGreater(
+            len(unique_models),
+            1,
+            f"debate must use more than one model (cross-model diversity); "
+            f"got all lanes on: {models}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# critique-revise specific invariants: two-lane loop, iterative topology,
+# rounds, fail-closed toolset (producer especially), and cross-model spread
+# ---------------------------------------------------------------------------
+
+
+class TestCritiqueReviseFleetInvariants(unittest.TestCase):
+    """critique-revise carries exactly two lanes (producer and critic) with the
+    correct topology, rounds, and fail-closed toolset."""
+
+    def test_two_lanes_with_expected_roles(self):
+        """critique-revise has exactly two lanes: producer, critic — in order."""
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        roles = [s.role for s in cfg.specialists]
+        self.assertEqual(
+            roles,
+            _CRITIQUE_REVISE_ROLES,
+            f"critique-revise must have two lanes in order {_CRITIQUE_REVISE_ROLES}, got: {roles}",
+        )
+
+    def test_topology_is_iterative(self):
+        """critique-revise uses topology: iterative."""
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        self.assertEqual(cfg.topology, "iterative",
+                         "critique-revise topology must be 'iterative'")
+
+    def test_rounds_is_3(self):
+        """critique-revise uses rounds: 3."""
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        self.assertEqual(cfg.rounds, 3, "critique-revise rounds must be 3")
+
+    def test_producer_toolset_is_empty_list_not_none(self):
+        """Producer lane uses toolset: [] — fail-closed zero tools.
+
+        The producer revises from the task and the critic's prior-round feedback
+        only; [] bounds the cross-lane injection surface (the critic's text enters
+        the producer's context but cannot trigger tool calls). [] vs None matters
+        at the adapter layer (None enables every Hermes toolset).
+        """
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        producer = cfg.specialists[0]
+        self.assertEqual(producer.role, "producer")
+        self.assertEqual(
+            producer.toolset,
+            [],
+            f"producer toolset must be [] (fail-closed zero tools), got {producer.toolset!r}",
+        )
+        self.assertIsInstance(
+            producer.toolset,
+            list,
+            "producer toolset must be a list, not None",
+        )
+
+    def test_every_toolset_is_empty_list_not_none(self):
+        """Both parsed toolsets are [] (never None) — fail-closed security control."""
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        for spec in cfg.specialists:
+            self.assertEqual(
+                spec.toolset,
+                [],
+                f"critique-revise lane '{spec.role}' toolset must be [] (got {spec.toolset!r})",
+            )
+            self.assertIsInstance(
+                spec.toolset,
+                list,
+                f"critique-revise lane '{spec.role}' toolset must be a list, not None",
+            )
+
+    def test_yaml_authors_explicit_empty_toolset_per_lane(self):
+        """Every active lane declares the literal ``toolset: []`` in YAML.
+
+        config.py normalizes ``toolset: null`` → [], so the parsed assertion
+        above passes even with ``toolset: null``. The explicit ``[]`` is the
+        deliberate fail-closed statement; this test reads the raw YAML and
+        requires exactly two ``toolset: []`` declarations (one per lane).
+        """
+        lines = _CRITIQUE_REVISE.read_text(encoding="utf-8").splitlines()
+        toolset_lines = [
+            stripped
+            for line in lines
+            for stripped in [line.strip()]
+            if stripped.startswith("toolset:")
+        ]
+        self.assertEqual(
+            len(toolset_lines),
+            len(_CRITIQUE_REVISE_ROLES),
+            f"expected one authored toolset per active lane ({len(_CRITIQUE_REVISE_ROLES)}), "
+            f"got {len(toolset_lines)}: {toolset_lines}",
+        )
+        for decl in toolset_lines:
+            self.assertEqual(
+                decl,
+                "toolset: []",
+                f"every active critique-revise lane must author the literal 'toolset: []' "
+                f"(fail-closed, not 'toolset: null'); got {decl!r}",
+            )
+
+    def test_cross_model_spread(self):
+        """Producer and critic use different models (cross-model spread).
+
+        Using different models between producer and critic provides a more robust
+        revision loop than a same-model pair, which tends toward self-confirmation.
+        """
+        cfg = FleetConfig.load(_CRITIQUE_REVISE)
+        producer_model = cfg.specialists[0].model
+        critic_model = cfg.specialists[1].model
+        self.assertNotEqual(
+            producer_model,
+            critic_model,
+            f"producer and critic must use different models; both are '{producer_model}'",
         )
 
 

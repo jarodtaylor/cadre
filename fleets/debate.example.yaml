@@ -1,0 +1,83 @@
+# Debate — EXAMPLE fleet (not runnable as-is). Copy it into your host
+# fleet library and set the strings your Hermes verified:
+#   cp fleets/debate.example.yaml ~/.cadre/fleets/debate.yaml
+# Use the (provider, model) pairs the install verified into ~/.cadre/palette.yaml.
+#
+# Replace provider/model values with the exact strings your Hermes resolves.
+# These are EXAMPLE assignments — cross-provider model diversity is what drives
+# genuine debate; a same-model fleet homogenizes to consensus and defeats its
+# purpose. Swap each lane to a distinct model family from your verified palette.
+#
+# Per-provider model-string format:
+#   - OpenRouter providers: model is the full "vendor/model" slug
+#   - OAuth providers (xai, openai-codex, nous): set provider explicitly + bare model id
+#
+# NEVER put API keys or tokens in this file — credentials live in Hermes auth/env.
+#
+# ITERATIVE TOPOLOGY: each round is a parallel fan-out of all lanes. From round 2
+# onward, the engine threads each lane's prior-round output as data into the next
+# round, so every lane sees the other lanes' positions and can engage them directly.
+# Wall-clock ceiling = rounds × per-call timeout (collect has no synthesizer call).
+# rounds: 3 means round 1 (opening positions) → round 2 (rebuttals) → round 3
+# (final sharpened positions).
+#
+# Convergence: COLLECT — no synthesizer runs. Each lane's final-round output
+# appears as an attributed block on stdout. The cross-lane disagreement IS the
+# product: you read the final-round positions, see where lanes conceded vs held,
+# and decide what to act on. A synthesizer would merge the debate into a single
+# answer and discard the disagreement that makes iterative topology valuable.
+#
+# Toolsets: all lanes use toolset: [] (no retrieval tools). If you add web or
+# search tools, note that each lane's output in round N is threaded as context
+# into round N+1 for ALL lanes — tool-use output crosses lane boundaries.
+# Use --preview to review this cross-lane tool-exposure before running.
+
+name: debate
+description: >-
+  Multi-model debate: diverse models argue across rounds, each seeing the others'
+  prior-round positions, surfacing and preserving cross-lane disagreement —
+  demonstrating topology: iterative.
+convergence: collect
+topology: iterative
+rounds: 3
+
+specialists:
+  - role: proponent
+    provider: xai              # OAuth provider -> bare model id; swap to your palette
+    model: grok-4.3
+    toolset: []
+    focus: >-
+      Take a clear position on the question and defend it with your strongest
+      evidence-based reasoning. When prior-round positions from the other lanes
+      are provided as data, engage them directly: concede what is genuinely
+      stronger, rebut what is weak, and sharpen or revise your own position
+      accordingly. Do NOT converge for the sake of agreement — if the evidence
+      supports a genuine disagreement or a contrarian read, preserve it and make
+      its case. Be specific and concrete; avoid hedging.
+
+  - role: skeptic
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: deepseek/deepseek-v4-pro
+    toolset: []
+    focus: >-
+      Take a skeptical position on the question: interrogate the assumptions,
+      surface the weak evidence, and present the strongest case for doubt or a
+      contrary view. When prior-round positions from the other lanes are provided
+      as data, engage them directly: concede what is genuinely stronger, rebut
+      what is weak, and sharpen or revise your skeptical position accordingly.
+      Do NOT converge for the sake of agreement — if the evidence supports a
+      genuine disagreement or a contrarian read, preserve it and make its case.
+      Be specific and concrete; avoid hedging.
+
+  - role: contrarian
+    provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
+    model: google/gemini-3-flash
+    toolset: []
+    focus: >-
+      Take the least-represented position on the question — the contrarian or
+      minority view — and defend it rigorously. When prior-round positions from
+      the other lanes are provided as data, engage them directly: concede what
+      is genuinely stronger, rebut what is weak, and sharpen or revise your
+      contrarian position accordingly. Do NOT converge for the sake of agreement
+      — if the evidence supports a genuine disagreement or a contrarian read,
+      preserve it and make its case. Be specific and concrete; avoid hedging.
