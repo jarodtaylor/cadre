@@ -9,10 +9,12 @@ cp fleets/research-brief.example.yaml ~/.cadre/fleets/research-brief.yaml
 cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
 cp fleets/doc-review.example.yaml ~/.cadre/fleets/doc-review.yaml
 cp fleets/review-scoring.example.yaml ~/.cadre/fleets/review-scoring.yaml
+cp fleets/debate.example.yaml ~/.cadre/fleets/debate.yaml
+cp fleets/critique-revise.example.yaml ~/.cadre/fleets/critique-revise.yaml
 # then set provider/model strings to your host-verified values (see ~/.cadre/palette.yaml)
 ```
 
-All five starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
+All seven starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
 `.example` from the filename) so they are ready to configure without copying
 manually.
 
@@ -67,6 +69,74 @@ with a starting document (its content is threaded into the first lane's prompt).
 Shape: **chain → collect**. Both `topology: sequential` and `convergence: collect`
 are explicit in the spec; the run folder holds each stage's output as a separate
 file.
+
+---
+
+## Iterative fleets
+
+Two starter fleets demonstrate `topology: iterative` — lanes run for a fixed number of
+rounds, and from round 2 onward each lane sees the prior round's attributed outputs from
+all other lanes as untrusted data. Within a round, lanes run concurrently (same
+concurrency model as parallel fan-out). Both fleets use `convergence: collect` (no
+synthesizer call), so wall-clock ceiling is rounds×timeout.
+
+### `debate.example.yaml` — iterative (debate shape)
+
+A three-lane multi-model debate across three rounds: proponent, skeptic, and contrarian
+each take a distinct argumentative stance. From round 2, every lane's prior-round position
+is visible to all other lanes as data — each lane can engage the others directly: concede
+what is genuinely stronger, rebut what is weak, or sharpen its own position. Rounds are:
+opening positions → rebuttals → final sharpened positions.
+
+**Diverse-model lineup.** The example assigns three distinct providers (xai, openrouter ×2)
+across three model families. Cross-provider model diversity is what drives genuine debate;
+assigning multiple lanes to the same model family risks homogenization to a shared prior and
+defeats the purpose.
+
+**Convergence: collect.** No synthesizer runs. Each lane's final-round position appears as
+an attributed block on stdout. The cross-lane disagreement is the product — you read where
+lanes converged, where they held, and what was conceded, then decide what to act on. A
+synthesizer would smooth the disagreement into a single answer, discarding the signal that
+makes iterative topology useful.
+
+**Honest value framing.** A pre-build probe (n=2 questions, directional) found: debate did
+not reliably produce a sharper merged answer than parallel-synthesize — a blind evaluator
+called ties. Debate's demonstrated value is *process*: it surfaces and preserves auditable
+cross-lane disagreement, and enables lanes to revise against or correct each other's
+specific claims in a way that is structurally impossible in a parallel fan-out (where no
+lane ever sees another's output). That process signal lives in the round transcript and gets
+smoothed away by a synthesizer, which is why this flagship uses collect.
+
+Two cautions the probe validated: **(a) directional evidence only** — the probe covered
+n=2 questions; re-run on your own artifact to calibrate. **(b) Seductive-but-wrong
+consensus risk** — rounds of mutual engagement do not guarantee correctness; debate can
+manufacture a confident, internally-coherent consensus that is actually mistaken, and the
+elegance of the argument is not evidence of its truth.
+
+Shape: **rounds → collect**. `topology: iterative`, `rounds: 3`, `convergence: collect`
+are explicit in the spec. All lanes use `toolset: []`; if you add retrieval tools, use
+`--preview` to review the cross-lane tool-exposure before running.
+
+---
+
+### `critique-revise.example.yaml` — iterative (critique-revise shape)
+
+A two-lane producer/critic revision loop across three rounds: the producer writes an
+artifact in round 1; from round 2 the critic's prior-round critique is visible to the
+producer (and vice versa), so the producer revises incorporating specific feedback and the
+critic re-evaluates the updated draft.
+
+**Convergence: collect.** The final-round output from both lanes appears as attributed
+blocks on stdout: the revised artifact (producer) and the final critique (critic). Review
+both to assess the revision quality.
+
+**Toolset note.** Both lanes use `toolset: []`. This bounds the cross-lane injection
+surface: the critic's text enters the producer's context in the next round, but cannot
+trigger tool calls. If you add retrieval tools to either lane, use `--preview` to review
+the cross-lane tool exposure before running.
+
+Shape: **rounds → collect**. `topology: iterative`, `rounds: 3`, `convergence: collect`
+are explicit in the spec.
 
 ---
 

@@ -78,16 +78,18 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
     and the synthesis is consumed by a terminal-capable agent, so an SSRF/injection in a
     lane reaches beyond a tainted report. Owner-only `~/.cadre` perms guard other OS users,
     not the agent itself.
-- **Schema:** minimal. Two execution topologies via an explicit `topology:
-  parallel|sequential` field — **parallel** (default; independent concurrent fan‑out)
-  or **sequential** (a dependent chain where each lane consumes all preceding successful
-  lanes' output, accumulated through the chain) — and an explicit `convergence:
-  synthesize|collect|judge` field — **synthesize** (default; a strong model blends the
-  survivors), **collect** (no synthesizer; return the raw attributed outputs), or **judge**
-  (an independent critic grades each survivor in place; requires a `judge:` block with
-  provider/model/prompt). Both `topology` and `convergence` default to their original
-  values, so every pre‑existing fleet parses unchanged. Don't add abstraction for the
-  *deferred* topology axis (iterative — see `CONCEPTS.md`) until it lands.
+- **Schema:** minimal. Three execution topologies via an explicit `topology:
+  parallel|sequential|iterative` field — **parallel** (default; independent concurrent
+  fan‑out), **sequential** (a dependent chain where each lane consumes all preceding
+  successful lanes' output, accumulated through the chain), or **iterative** (lanes run
+  in rounds; within a round all lanes run concurrently; from round 2 each lane sees the
+  previous round's attributed outputs from all lanes as untrusted data; a failed lane is
+  dropped; survivors carry into the next round; `rounds` sets the count, 1–10) — and an
+  explicit `convergence: synthesize|collect|judge` field — **synthesize** (default; a
+  strong model blends the survivors), **collect** (no synthesizer; return the raw
+  attributed outputs), or **judge** (an independent critic grades each survivor in place;
+  requires a `judge:` block with provider/model/prompt). All `topology` and `convergence`
+  values default to their original values, so every pre‑existing fleet parses unchanged.
 - **Convergence‑aware consumers (explicit `status` — keep it):** `FleetResult` carries an
   explicit `FleetStatus` tri-state (`SUCCESS` / `DEGRADED` / `FAILED`) set at every
   `run_fleet` return point. Consumers read `result.status` for run outcome — **do not
@@ -102,12 +104,15 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   `judge` raw text + per-lane `judge_ok`). Do not add a consumer that infers mode or
   outcome from `synthesis is None` / `synth_ok is None` alone — always read `convergence`
   for shape, `status` for outcome. Consumers also read `result.topology` for execution
-  shape (parallel vs sequential chain) the same way they read `result.convergence` for
-  output shape. The sequential chain executor owns a **completion-based** status
-  independent of collect’s unconditional SUCCESS: a broken `sequential + collect` chain
-  (at least one lane completed, a later lane failed) is DEGRADED, not SUCCESS;
-  `sequential + synthesize`/`judge` is conjunctive — SUCCESS only if the chain completed
-  AND the convergence step succeeded.
+  shape (parallel vs sequential chain vs iterative rounds) the same way they read
+  `result.convergence` for output shape. The sequential chain executor owns a
+  **completion-based** status independent of collect’s unconditional SUCCESS: a broken
+  `sequential + collect` chain (at least one lane completed, a later lane failed) is
+  DEGRADED, not SUCCESS; `sequential + synthesize`/`judge` is conjunctive — SUCCESS only
+  if the chain completed AND the convergence step succeeded. Under iterative topology,
+  consumers additionally read `result.diversity_collapsed` (bool) — set when the last
+  surviving round has ≤1 ok lane or zero cross-round iterations occurred; advisory, never
+  changes `status`.
 - **Sequential/chain seams:** `_run_chain` is engine-internal and stays pure (events
   only — it emits `LaneStarted`/`LaneDone`, never I/O); it threads each prior successful
   lane’s attributed output into the next lane’s prompt, capped **per stage**
@@ -123,6 +128,19 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   N+1’s tool use directly. The per-lane `SAFE_TOOLSETS` allowlist is the first control;
   forgery-hardening the threading delimiter is GH #5’s scope, and #5 must account for
   this sequential propagation path, not just the parallel posture.
+- **Iterative seams:** `_run_iterate` is engine-internal and stays pure (events only —
+  no I/O). Within each round, all lanes run concurrently (same concurrency model as
+  parallel fan-out). After each round, every surviving lane’s attributed output is
+  threaded into the next round’s prompt for **all** lanes as untrusted data. This creates
+  a **cross-round injection surface**: a prompt-injection in one lane’s round-N output
+  enters every other lane’s round-N+1 context, compounding over rounds — a broader
+  exposure than sequential (one-directional downstream) and than parallel (no cross-lane
+  sharing at all). The per-lane `SAFE_TOOLSETS` allowlist is the first control; GH #5
+  must account for this iterative cross-round propagation path, not just the parallel and
+  sequential postures. `--preview` discloses cross-lane tool exposure when a lane with
+  retrieval tools has its output threaded into other lanes’ contexts. `diversity_collapsed`
+  is set by the engine at the `run_fleet` return point and surfaced in render + manifest;
+  it never affects `status`.
 - **Judge‑specific seams:** the engine returns the judge's raw text in `result.judge`
   and stays pure (no parsing). `fleet_engine/judge_grade.py` (caller‑layer) parses it
   into per-lane structure (`{role, model, grade, rationale}`, plus `ungraded` lanes and
