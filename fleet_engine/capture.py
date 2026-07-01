@@ -249,6 +249,17 @@ def lane_filename_map(roles: list[str]) -> dict[str, str]:
     return mapping
 
 
+def round_subdir(round_num: int) -> str:
+    """Return the subdirectory name for a 1-based iterative round number.
+
+    Used by BOTH the incremental capturer (``save_lane`` via the progress hook)
+    and the manifest builder (``_build_rounds_manifest``) so the on-disk file
+    paths and the ``manifest.json`` ``rounds[k][i].file`` values always agree —
+    the coupling contract is enforced by construction, not by assertion alone.
+    """
+    return f"round-{round_num}"
+
+
 def save_prompt(run_dir: Path, task: str) -> None:
     """Write ``prompt.txt`` (the run's task) into ``run_dir``, owner-only (0o600).
 
@@ -261,7 +272,7 @@ def save_prompt(run_dir: Path, task: str) -> None:
     _write(run_dir / "prompt.txt", task)
 
 
-def save_lane(lane, filename: str, run_dir: Path) -> None:  # lane: AgentResult
+def save_lane(lane, filename: str, run_dir: Path, *, subdir: str | None = None) -> None:  # lane: AgentResult
     """Write one specialist's ``.md`` the moment its lane finishes (R11).
 
     The edge calls this on each ``LaneDone`` event (capture on).  ``filename``
@@ -269,16 +280,31 @@ def save_lane(lane, filename: str, run_dir: Path) -> None:  # lane: AgentResult
     before any lanes launched, so each lane owns a distinct, pre-mapped file and
     no lock is needed (KTD3).
 
-    Creates ``run_dir`` if it does not yet exist (mirrors ``save_run``'s mkdir so
-    a lane-done arriving before ``save_run`` still lands safely).
+    Creates ``run_dir`` (and ``subdir`` when set) if they do not yet exist —
+    mirrors ``save_run``'s mkdir so a lane-done arriving before ``save_run``
+    still lands safely.
+
+    For iterative topology the progress hook supplies ``subdir=round_subdir(k)``
+    so each round's files land in a dedicated subdirectory (``round-1/``,
+    ``round-2/``, …) — without namespacing, ``LaneDone`` firing once per lane per
+    round would overwrite round-N-1's file with round-N's for the same role.
+    The subdirectory is created with ``mode=0o700`` (owner-only).
 
     Args:
         lane:     An ``AgentResult`` from the engine (the ``LaneDone.result``).
         filename: The pre-computed filename from ``lane_filename_map``.
         run_dir:  The run directory (injected — same as ``save_run``'s run_dir).
+        subdir:   Optional round subdirectory (e.g. ``"round-1"``).  When set,
+                  the file is written to ``run_dir / subdir / filename`` with the
+                  subdirectory created 0o700.  Omit for non-iterative fleets.
     """
-    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _write(run_dir / filename, _specialist_md(lane))
+    if subdir is not None:
+        target_dir = run_dir / subdir
+        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _write(target_dir / filename, _specialist_md(lane))
+    else:
+        run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _write(run_dir / filename, _specialist_md(lane))
 
 
 def _synthesis_title(result: FleetResult) -> str | None:
@@ -538,6 +564,40 @@ def _synthesis_md(result: FleetResult) -> str:
     return f"No synthesis — {synth_note}."
 
 
+def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[dict]]:
+    """Build the rounds array for the manifest (iterative topology only).
+
+    Returns a list of R entries (one per round) where each entry is a list of
+    per-lane records.  Each record mirrors the top-level ``lanes[]`` schema PLUS
+    a ``"file"`` that uses the round-namespaced path
+    (``round-k/specialist-<role>.md``) so the manifest is an accurate index to
+    what the incremental capturer wrote.
+
+    The ``"file"`` paths are derived from the SAME ``lane_filename_map`` as
+    ``save_run`` and the SAME ``round_subdir`` the progress hook passes to
+    ``save_lane`` — the coupling is by construction, not reliance on ordering.
+    """
+    fmap = lane_filename_map([spec.role for spec in cfg.specialists])
+    rounds_out: list[list[dict]] = []
+    for k, round_list in enumerate(result.rounds, start=1):  # type: ignore[union-attr]
+        subdir = round_subdir(k)
+        round_out: list[dict] = []
+        for lane in round_list:
+            round_out.append({
+                "role": lane.role,
+                "provider": lane.provider,
+                "model": lane.model,
+                "ok": lane.ok,
+                "error": lane.error,
+                "elapsed_s": lane.elapsed_s,
+                "toolset": list(lane.toolset),  # never coerce [] to None
+                "timed_out": lane.timed_out,
+                "file": f"{subdir}/{fmap[lane.role]}",
+            })
+        rounds_out.append(round_out)
+    return rounds_out
+
+
 def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[str]) -> dict:
     """Build the plain-dict manifest; serialized by the caller with json.dumps.
 
@@ -619,5 +679,12 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         else:
             manifest["grades"] = []
             manifest["ungraded"] = []
+
+    # Iterative topology: rounds transcript + diversity_collapsed flag.
+    # For non-iterative (parallel, sequential) rounds is None and collapsed is False.
+    manifest["rounds"] = (
+        _build_rounds_manifest(cfg, result) if result.rounds is not None else None
+    )
+    manifest["diversity_collapsed"] = result.diversity_collapsed
 
     return manifest

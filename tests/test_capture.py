@@ -20,16 +20,18 @@ from fleet_engine.capture import (
     lane_filename_map,
     prepare_run_dir,
     resolve_run_dir,
+    round_subdir,
     save_lane,
     save_prompt,
     save_run,
 )
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
-from tests.test_engine import _derive_status
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
+from fleet_engine.progress_runner import run_with_progress
 from fleet_engine.render import render_result
+from tests.test_engine import RoundAwareFakeClient, _derive_status, _iterative_config
 
 
 # ---------------------------------------------------------------------------
@@ -2135,6 +2137,527 @@ class TestSequentialConjunctiveCapture(unittest.TestCase):
         self.assertIn("chain halted at the first lane", md)
         self.assertIn("synthesis was not attempted", md)
         self.assertNotIn("of 3 specialists failed", md)
+
+
+# ---------------------------------------------------------------------------
+# Iterative topology: round_subdir helper
+# ---------------------------------------------------------------------------
+
+
+class TestRoundSubdir(unittest.TestCase):
+    """round_subdir returns the expected string for 1-based round numbers."""
+
+    def test_round_1(self):
+        self.assertEqual(round_subdir(1), "round-1")
+
+    def test_round_2(self):
+        self.assertEqual(round_subdir(2), "round-2")
+
+    def test_round_10(self):
+        self.assertEqual(round_subdir(10), "round-10")
+
+
+# ---------------------------------------------------------------------------
+# Iterative topology: save_lane with subdir (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestSaveLaneSubdir(unittest.TestCase):
+    """save_lane(lane, filename, run_dir, subdir=...) writes into run_dir/subdir/filename."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_no_subdir_writes_flat(self):
+        """Without subdir, file lands directly in run_dir (regression guard)."""
+        lane = _lane("web")
+        save_lane(lane, "specialist-web.md", self.run_dir)
+        self.assertTrue((self.run_dir / "specialist-web.md").exists())
+
+    def test_subdir_creates_round_dir(self):
+        """With subdir='round-1', file lands in run_dir/round-1/."""
+        lane = _lane("alpha")
+        save_lane(lane, "specialist-alpha.md", self.run_dir, subdir="round-1")
+        self.assertTrue((self.run_dir / "round-1" / "specialist-alpha.md").exists())
+
+    def test_subdir_not_at_flat_level(self):
+        """With subdir set, the file must NOT exist at the flat run_dir level."""
+        lane = _lane("alpha")
+        save_lane(lane, "specialist-alpha.md", self.run_dir, subdir="round-1")
+        self.assertFalse((self.run_dir / "specialist-alpha.md").exists())
+
+    def test_subdir_round_dir_mode_0o700(self):
+        """Round subdirectory is created owner-only (0o700)."""
+        lane = _lane("alpha")
+        save_lane(lane, "specialist-alpha.md", self.run_dir, subdir="round-1")
+        mode = stat.S_IMODE((self.run_dir / "round-1").stat().st_mode)
+        self.assertEqual(mode, 0o700)
+
+    def test_two_rounds_same_role_no_overwrite(self):
+        """Round-1 and round-2 files for the same role coexist — no overwrite."""
+        lane1 = _lane("alpha", text="round-one-output")
+        lane2 = _lane("alpha", text="round-two-output")
+        save_lane(lane1, "specialist-alpha.md", self.run_dir, subdir="round-1")
+        save_lane(lane2, "specialist-alpha.md", self.run_dir, subdir="round-2")
+        r1 = (self.run_dir / "round-1" / "specialist-alpha.md").read_text()
+        r2 = (self.run_dir / "round-2" / "specialist-alpha.md").read_text()
+        self.assertIn("round-one-output", r1)
+        self.assertIn("round-two-output", r2)
+        self.assertNotEqual(r1, r2)
+
+    def test_existing_callers_unaffected_keyword_only(self):
+        """subdir is keyword-only: positional calls save_lane(l, f, d) still work."""
+        lane = _lane("web")
+        # Must not raise — existing positional signature unchanged
+        save_lane(lane, "specialist-web.md", self.run_dir)
+        self.assertTrue((self.run_dir / "specialist-web.md").exists())
+
+
+# ---------------------------------------------------------------------------
+# Iterative topology: _build_manifest rounds + diversity_collapsed fields (U5)
+# ---------------------------------------------------------------------------
+
+
+def _iterative_lane(role, *, round_num=1, ok=True, provider="openrouter", model="a/m",
+                    toolset=None) -> AgentResult:
+    """AgentResult for an iterative round lane — toolset defaults to [] (not None)."""
+    if toolset is None:
+        toolset = []
+    text = f"{role}-r{round_num}-output" if ok else None
+    error = None if ok else f"{role}-r{round_num}-error"
+    return AgentResult(
+        role=role, provider=provider, model=model, ok=ok,
+        text=text, error=error, elapsed_s=0.5, toolset=toolset,
+    )
+
+
+def _iterative_cfg_for_manifest(**overrides):
+    """2-lane, 2-round iterative+collect config for manifest-only tests."""
+    data = {
+        "name": "test-iterate",
+        "topology": "iterative",
+        "rounds": 2,
+        "convergence": "collect",
+        "specialists": [
+            {"role": "alpha", "provider": "openrouter", "model": "a/m",
+             "toolset": [], "focus": "analyze"},
+            {"role": "beta", "provider": "xai", "model": "b/m",
+             "toolset": [], "focus": "verify"},
+        ],
+    }
+    data.update(overrides)
+    return FleetConfig.from_dict(data)
+
+
+def _iterative_result_for_manifest(*, rounds=None, diversity_collapsed=False,
+                                   status=FleetStatus.SUCCESS) -> FleetResult:
+    """FleetResult for a 2-lane, 2-round iterative+collect run.
+
+    ``rounds`` defaults to a 2×2 transcript (all ok).  ``specialists`` is the
+    last-surviving-round representatives (round-2 results).
+    """
+    if rounds is None:
+        round1 = [
+            _iterative_lane("alpha", round_num=1),
+            _iterative_lane("beta", round_num=1),
+        ]
+        round2 = [
+            _iterative_lane("alpha", round_num=2),
+            _iterative_lane("beta", round_num=2),
+        ]
+        rounds = [round1, round2]
+
+    # specialists = representatives from the last surviving round (ok lanes)
+    specialists = [lane for lane in rounds[-1] if lane.ok]
+
+    return FleetResult(
+        fleet="test-iterate",
+        task="test task",
+        specialists=specialists,
+        synthesis=None,
+        synth_ok=None,
+        convergence="collect",
+        topology="iterative",
+        status=status,
+        rounds=rounds,
+        diversity_collapsed=diversity_collapsed,
+    )
+
+
+class TestIterativeManifest(unittest.TestCase):
+    """_build_manifest (via save_run) emits correct rounds[] and diversity_collapsed
+    for iterative topology.  Non-iterative regression guards in the class below."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _load_manifest(self, cfg=None, result=None):
+        if cfg is None:
+            cfg = _iterative_cfg_for_manifest()
+        if result is None:
+            result = _iterative_result_for_manifest()
+        save_run(cfg, result, self.run_dir)
+        return json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    def test_rounds_field_is_list(self):
+        """Iterative manifest has a non-null 'rounds' array."""
+        manifest = self._load_manifest()
+        self.assertIsInstance(manifest["rounds"], list)
+
+    def test_rounds_length_matches_result(self):
+        """rounds[] length equals len(result.rounds)."""
+        manifest = self._load_manifest()
+        self.assertEqual(len(manifest["rounds"]), 2)
+
+    def test_rounds_per_round_lane_count(self):
+        """Each round entry has one record per specialist in that round."""
+        manifest = self._load_manifest()
+        for k, round_entry in enumerate(manifest["rounds"]):
+            self.assertEqual(
+                len(round_entry), 2, f"round {k + 1} should have 2 lane records"
+            )
+
+    def test_rounds_file_uses_round_subdir_scheme(self):
+        """rounds[k][i].file follows round-<k+1>/<filename> scheme."""
+        manifest = self._load_manifest()
+        fmap = lane_filename_map(["alpha", "beta"])
+        for k, round_entry in enumerate(manifest["rounds"]):
+            expected_subdir = round_subdir(k + 1)
+            for record in round_entry:
+                expected_file = f"{expected_subdir}/{fmap[record['role']]}"
+                self.assertEqual(
+                    record["file"], expected_file,
+                    f"round {k + 1} role={record['role']!r}: wrong file path",
+                )
+
+    def test_rounds_toolset_is_list_never_none(self):
+        """All rounds[k][i].toolset values are lists — []-vs-None invariant."""
+        manifest = self._load_manifest()
+        for k, round_entry in enumerate(manifest["rounds"]):
+            for record in round_entry:
+                self.assertIsInstance(
+                    record["toolset"], list,
+                    f"round {k + 1} role={record['role']!r}: toolset must be list not None",
+                )
+
+    def test_rounds_required_fields_present(self):
+        """Each round lane record carries all required fields."""
+        required = {
+            "role", "provider", "model", "ok", "error",
+            "elapsed_s", "toolset", "timed_out", "file",
+        }
+        manifest = self._load_manifest()
+        for k, round_entry in enumerate(manifest["rounds"]):
+            for record in round_entry:
+                missing = required - record.keys()
+                self.assertFalse(
+                    missing, f"round {k + 1} role={record['role']!r} missing {missing}"
+                )
+
+    def test_diversity_collapsed_false_by_default(self):
+        """diversity_collapsed=False in manifest when debate ran normally."""
+        manifest = self._load_manifest(result=_iterative_result_for_manifest(diversity_collapsed=False))
+        self.assertIs(manifest["diversity_collapsed"], False)
+
+    def test_diversity_collapsed_true_when_set(self):
+        """diversity_collapsed=True propagated to manifest when debate collapsed."""
+        manifest = self._load_manifest(result=_iterative_result_for_manifest(diversity_collapsed=True))
+        self.assertIs(manifest["diversity_collapsed"], True)
+
+    def test_top_level_lanes_are_representatives(self):
+        """Top-level lanes[] lists result.specialists (last-round reps), not all rounds."""
+        manifest = self._load_manifest()
+        # 2-lane iterative with 2-round all-ok → representatives are 2 round-2 lanes
+        self.assertEqual(len(manifest["lanes"]), 2)
+        roles_in_lanes = {lane["role"] for lane in manifest["lanes"]}
+        self.assertEqual(roles_in_lanes, {"alpha", "beta"})
+
+    def test_topology_is_iterative(self):
+        """Manifest carries topology='iterative'."""
+        manifest = self._load_manifest()
+        self.assertEqual(manifest["topology"], "iterative")
+
+
+class TestNonIterativeManifestAfterIterativeAdds(unittest.TestCase):
+    """Non-iterative (parallel, sequential) manifests emit rounds=None and
+    diversity_collapsed=False — additive; no regression on existing fields."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _load_parallel(self):
+        save_run(_cfg(), _result(), self.run_dir)
+        return json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    def _chain_result(self):
+        return FleetResult(
+            fleet="test-chain", task="t",
+            specialists=[
+                _lane("scout", provider="openrouter", model="s/m", toolset=["web"]),
+                _lane("analyst", provider="xai", model="grok", toolset=["web"]),
+                _lane("writer", provider="openrouter", model="w/m", toolset=[]),
+            ],
+            synthesis=None, synth_ok=None, convergence="collect",
+            topology="sequential", terminal_produced=True,
+            threading_truncated=False, status=FleetStatus.SUCCESS,
+        )
+
+    def test_parallel_rounds_null(self):
+        """Parallel manifest: rounds=null."""
+        self.assertIsNone(self._load_parallel()["rounds"])
+
+    def test_parallel_diversity_collapsed_false(self):
+        """Parallel manifest: diversity_collapsed=False."""
+        self.assertIs(self._load_parallel()["diversity_collapsed"], False)
+
+    def test_parallel_existing_topology_field_unchanged(self):
+        """Parallel manifest: topology='parallel' unchanged."""
+        self.assertEqual(self._load_parallel()["topology"], "parallel")
+
+    def test_parallel_existing_status_unchanged(self):
+        """Parallel manifest: status field unchanged."""
+        self.assertEqual(self._load_parallel()["status"], "success")
+
+    def test_sequential_rounds_null(self):
+        """Sequential manifest: rounds=null."""
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            save_run(_chain_cfg(), self._chain_result(), run_dir)
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIsNone(manifest["rounds"])
+
+    def test_sequential_diversity_collapsed_false(self):
+        """Sequential manifest: diversity_collapsed=False."""
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            save_run(_chain_cfg(), self._chain_result(), run_dir)
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIs(manifest["diversity_collapsed"], False)
+
+
+# ---------------------------------------------------------------------------
+# Iterative topology: incremental capture via run_with_progress (U5 + U6 edge)
+# ---------------------------------------------------------------------------
+
+
+def _iterative_run_cfg(**overrides):
+    """2-lane, 2-round iterative+collect config for progress_runner tests.
+
+    Uses resolve() so effective_instruction is set (required by run_fleet).
+    """
+    data = {
+        "name": "test-iterate",
+        "topology": "iterative",
+        "rounds": 2,
+        "convergence": "collect",
+        "specialists": [
+            {"role": "alpha", "provider": "openrouter", "model": "a/m",
+             "toolset": [], "focus": "analyze"},
+            {"role": "beta", "provider": "xai", "model": "b/m",
+             "toolset": [], "focus": "verify"},
+        ],
+    }
+    data.update(overrides)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")
+    return cfg
+
+
+class TestIterativeIncrementalCapture(unittest.TestCase):
+    """run_with_progress writes round-N/specialist-<role>.md for iterative fleets.
+
+    Core fix: without round namespacing, LaneDone fires once per lane per round
+    and the same filename is overwritten each round.  This class proves both the
+    absence of overwriting AND the coupling contract (manifest paths == on-disk
+    paths).
+    """
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _run_and_save(self, cfg, client):
+        """Run run_with_progress + save_run, returning (result, manifest_dict)."""
+        import io
+        result = run_with_progress(
+            cfg, "test task", client,
+            run_dir=self.run_dir,
+            progress_stream=io.StringIO(),
+        )
+        save_run(cfg, result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        return result, manifest
+
+    def test_round_1_dir_created(self):
+        """After run, round-1/ subdirectory exists under run_dir."""
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        self.assertTrue((self.run_dir / "round-1").is_dir())
+
+    def test_round_2_dir_created(self):
+        """After run, round-2/ subdirectory exists under run_dir."""
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        self.assertTrue((self.run_dir / "round-2").is_dir())
+
+    def test_both_rounds_have_alpha_file(self):
+        """specialist-alpha.md exists in both round-1/ and round-2/ (no overwrite)."""
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        self.assertTrue((self.run_dir / "round-1" / "specialist-alpha.md").exists())
+        self.assertTrue((self.run_dir / "round-2" / "specialist-alpha.md").exists())
+
+    def test_both_rounds_have_beta_file(self):
+        """specialist-beta.md exists in both round-1/ and round-2/ (no overwrite)."""
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        self.assertTrue((self.run_dir / "round-1" / "specialist-beta.md").exists())
+        self.assertTrue((self.run_dir / "round-2" / "specialist-beta.md").exists())
+
+    def test_round_files_have_distinct_content(self):
+        """Round-1 and round-2 files for the same role differ in content.
+
+        RoundAwareFakeClient returns 'alpha-r1-output' and 'alpha-r2-output' for
+        consecutive calls, so the files must contain different text if (and only if)
+        round namespacing prevented overwrite.
+        """
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        r1 = (self.run_dir / "round-1" / "specialist-alpha.md").read_text()
+        r2 = (self.run_dir / "round-2" / "specialist-alpha.md").read_text()
+        self.assertIn("alpha-r1-output", r1, "round-1 file must contain r1 output")
+        self.assertIn("alpha-r2-output", r2, "round-2 file must contain r2 output")
+        self.assertNotEqual(r1, r2)
+
+    def test_no_flat_specialist_files_written(self):
+        """For iterative, no specialist-*.md files land at the flat run_dir level.
+
+        All per-lane files must be under round-N/ subdirs — a flat file would mean
+        the topology gate in the hook was skipped.
+        """
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        self._run_and_save(cfg, client)
+        flat_files = list(self.run_dir.glob("specialist-*.md"))
+        self.assertEqual(
+            flat_files, [],
+            f"Iterative run wrote flat specialist files (should be under round-N/): {flat_files}",
+        )
+
+    def test_coupling_manifest_round_files_exist_on_disk(self):
+        """Every manifest rounds[k][i].file that is ok=True exists on disk.
+
+        This is the load-bearing coupling test: round_subdir is shared by the
+        progress hook (save_lane) and _build_rounds_manifest, so the manifest's
+        named paths must exactly match what is actually on disk.
+        """
+        cfg = _iterative_run_cfg()
+        client = RoundAwareFakeClient()
+        _, manifest = self._run_and_save(cfg, client)
+        for k, round_entry in enumerate(manifest["rounds"]):
+            for record in round_entry:
+                if record["ok"]:
+                    file_path = self.run_dir / record["file"]
+                    self.assertTrue(
+                        file_path.exists(),
+                        f"round {k + 1} role={record['role']!r}: "
+                        f"manifest names {record['file']!r} but it is not on disk",
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Iterative topology: _synthesis_md falls through to parallel wording (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestIterativeSynthesisMd(unittest.TestCase):
+    """_synthesis_md for iterative topology uses parallel-style wording.
+
+    The topology-specific branches in _synthesis_md only check for 'sequential'.
+    'iterative' is a different string, so it must fall through to the same wording
+    as parallel.  These tests guard the contract so a future 'iterative' branch
+    cannot accidentally introduce sequential-style wording.
+    """
+
+    def _result_with(self, **kwargs):
+        """Build a minimal FleetResult with topology='iterative'."""
+        defaults = dict(
+            fleet="f", task="t", topology="iterative",
+            specialists=[_lane("alpha"), _lane("beta")],
+            status=FleetStatus.SUCCESS,
+        )
+        defaults.update(kwargs)
+        return FleetResult(**defaults)
+
+    def test_collect_success_uses_attributed_blocks(self):
+        """Iterative+collect SUCCESS: synthesis.md contains attributed specialist blocks."""
+        result = self._result_with(
+            convergence="collect",
+            specialists=[_lane("alpha", text="alpha out"), _lane("beta", text="beta out")],
+            synthesis=None, synth_ok=None,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("alpha out", md)
+        self.assertIn("beta out", md)
+        self.assertIn("# Collected specialist outputs", md)
+
+    def test_collect_failed_uses_parallel_wording(self):
+        """Iterative+collect FAILED: 'all N specialists failed' — NOT 'chain halted'."""
+        result = self._result_with(
+            convergence="collect",
+            specialists=[_lane("alpha", ok=False), _lane("beta", ok=False)],
+            synthesis=None, synth_ok=None,
+            status=FleetStatus.FAILED,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("specialists failed", md)
+        self.assertNotIn("chain halted", md)
+
+    def test_synthesize_failed_uses_parallel_wording(self):
+        """Iterative+synthesize FAILED: 'N of N failed; not attempted' — NOT 'chain halted'."""
+        result = self._result_with(
+            convergence="synthesize",
+            specialists=[_lane("alpha", ok=False), _lane("beta", ok=False)],
+            synthesis=None, synth_ok=None,
+            status=FleetStatus.FAILED,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("synthesis was not attempted", md)
+        self.assertNotIn("chain halted", md)
+
+    def test_synthesize_success_returns_synthesis_text(self):
+        """Iterative+synthesize SUCCESS: the synthesis text is returned verbatim."""
+        result = self._result_with(
+            convergence="synthesize",
+            specialists=[_lane("alpha"), _lane("beta")],
+            synthesis="# Synthesis\n\nResult here.",
+            synth_ok=True,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("# Synthesis", md)
+        self.assertIn("Result here.", md)
+
+    def test_judge_failed_uses_parallel_wording(self):
+        """Iterative+judge FAILED (no survivors): 'all N failed' — NOT 'chain halted'."""
+        result = self._result_with(
+            convergence="judge",
+            specialists=[_lane("alpha", ok=False), _lane("beta", ok=False)],
+            synthesis=None, synth_ok=None,
+            judge=None, judge_ok=None,
+            status=FleetStatus.FAILED,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("specialists failed", md)
+        self.assertIn("judge mode", md)
+        self.assertNotIn("chain halted", md)
 
 
 if __name__ == "__main__":
