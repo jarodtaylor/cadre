@@ -1,8 +1,8 @@
 # Cadre
 
-Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and toolset, then **synthesize** them into one grounded, attributed result — or **collect** their independent findings side by side. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
+Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and toolset, then **synthesize** them into one grounded, attributed result, **collect** their independent findings side by side, or have an independent model **judge** each one. Run the lanes in parallel, or as a **sequential chain** where each stage audits the last. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 
-> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, and cross-model **review fleets** (code-review + doc-review) — with both `synthesize` and `collect` convergence. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
+> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, cross-model **review fleets** (code-review + doc-review), and a **sequential research-brief chain** — across `synthesize`, `collect`, and `judge` convergence and both **parallel** and **sequential** topology. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
 
 ## Why
 
@@ -14,7 +14,12 @@ A single-vendor runtime can only fan a task out across one provider's own tiers.
 
 ## How it works
 
-The core primitive is **parallel fan-out**, then one of two convergence modes — **synthesize** (a strong model combines the survivors into one grounded report) or **collect** (no synthesizer — return each specialist's attributed output side by side, as the review fleets do) — over a *fleet* defined entirely in YAML (specialists, each a role + provider + model + toolset, plus an optional synthesizer). Specialists run concurrently. Synthesize degrades rather than crashing: if some lanes fail it synthesizes the rest and reports the failures, failing outright only when none survive.
+A *fleet* is defined entirely in YAML — specialists (each a role + provider + model + toolset) plus an optional synthesizer — and has two independent **shape axes**:
+
+- **Topology** — how lanes relate in time: **parallel** (independent and concurrent, the default fan-out) or **sequential** (a dependent chain where each stage consumes all preceding stages' output — e.g. a scout gathers sources, then an analyst *audits the scout's specific claims* against live verification, then a writer synthesizes the audited brief).
+- **Convergence** — what happens to the outputs: **synthesize** (a strong model combines the survivors into one grounded report), **collect** (no synthesizer — return each specialist's attributed output side by side, as the review fleets do), or **judge** (an independent critic grades each surviving specialist in place, attributed per lane).
+
+Synthesize degrades rather than crashing: if some lanes fail it synthesizes the rest and reports the failures, failing outright only when none survive. A sequential chain breaks on the first failed stage and marks the rest skipped.
 
 ```mermaid
 flowchart TB
@@ -27,6 +32,16 @@ flowchart TB
     S3 --> G
     G --> SY["synthesizer<br/>(strong model)"]
     SY --> R["grounded, attributed report<br/>+ per-lane provenance"]
+```
+
+*…or the same fleet model runs as a **sequential chain** — each stage consumes all previous stages' output (the `research-brief` flagship: scout gathers → analyst audits the scout's specific claims → writer synthesizes):*
+
+```mermaid
+flowchart LR
+    T2["task"] --> SC["scout<br/>web + search"]
+    SC -->|"output threaded as context"| AN["analyst<br/>audits scout's claims"]
+    AN -->|"+ all prior context"| WR["writer<br/>no tools"]
+    WR --> R2["grounded brief<br/>attributed, chain-audited"]
 ```
 
 All model calls are isolated behind one thin adapter over Hermes's `AIAgent` (`fleet_engine/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each model call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`.
@@ -90,7 +105,7 @@ See [STRATEGY.md](STRATEGY.md) for the full direction.
 
 ## Learn more
 
-- **[CONCEPTS.md](CONCEPTS.md)** — shared vocabulary (fleet, specialist, synthesizer, verified palette, fleet library, fleet preview, the fan-out→synthesize primitive).
+- **[CONCEPTS.md](CONCEPTS.md)** — shared vocabulary (fleet, specialist, synthesizer, verified palette, fleet library, fleet preview, and the topology × convergence shape model).
 - **[STRATEGY.md](STRATEGY.md)** — the product's target problem, approach, and tracks of work.
 - **[AGENTS.md](AGENTS.md)** — orientation for AI agents working in this repo.
 - **`docs/RUNBOOK.md`** — deploy, install, and the agent-run usage loop.
