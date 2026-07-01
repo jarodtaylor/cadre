@@ -643,7 +643,18 @@ class ProgressRenderer:
         are no-ops.
         """
         if isinstance(event, LaneLaunched):
+            # A LaneLaunched marks a fresh fan-out — parallel/sequential emit it once,
+            # iterative emits it once PER ROUND. Reset the per-fan-out tally so the
+            # heartbeat's active count is relative to THIS round's lanes. Without the
+            # reset, iterative rounds 2+ subtract cumulative completions from the new
+            # round's total and report active=0 (or negative) while lanes are in flight
+            # (Codex cross-model finding). No-op for parallel/sequential: their single
+            # LaneLaunched fires while the counters are already 0.
             self._total = len(event.roles)
+            self._done = 0
+            self._failed = 0
+            self._skipped = 0
+            self._stage = 0
         elif isinstance(event, LaneStarted):
             # Increment AFTER _format so the "stage k/N" display uses the prior count.
             self._stage += 1

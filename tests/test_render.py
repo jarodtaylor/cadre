@@ -2908,5 +2908,39 @@ class TestProgressRendererRoundStarted(unittest.TestCase):
         self.assertIn(RoundStarted, union_args)
 
 
+class TestProgressRendererIterativeTally(unittest.TestCase):
+    """The heartbeat tally must reset each iterative round (LaneLaunched fires per
+    round), so `active` reflects the CURRENT round's in-flight lanes and never goes
+    negative from cross-round completion carryover (Codex cross-model finding)."""
+
+    @staticmethod
+    def _active(r):
+        return r._total - r._done - r._failed - r._skipped
+
+    def test_tally_resets_each_round_active_never_negative(self):
+        renderer, _stream = _make_renderer()
+        active = lambda: self._active(renderer)
+        # Round 1: 3 lanes launch, all complete ok.
+        renderer.emit(RoundStarted(round=1, total=2))
+        renderer.emit(LaneLaunched(roles=["a", "b", "c"]))
+        self.assertEqual(active(), 3)                 # 3 in flight
+        for role in ("a", "b", "c"):
+            renderer.emit(LaneDone(result=make_lane(role=role, ok=True)))
+            self.assertGreaterEqual(active(), 0, "active must never go negative")
+        self.assertEqual(active(), 0)                 # round 1 done
+        # Round 2: LaneLaunched must RESET the tally — active back to 3, not a stale 0.
+        renderer.emit(RoundStarted(round=2, total=2))
+        renderer.emit(LaneLaunched(roles=["a", "b", "c"]))
+        self.assertEqual(renderer._done, 0, "round-2 LaneLaunched must reset _done")
+        self.assertEqual(active(), 3, "round 2 must show 3 in-flight, not a stale 0")
+        # Dropped-lane case: one fails mid-round; active stays correct + non-negative.
+        renderer.emit(LaneDone(result=make_lane(role="a", ok=True)))
+        renderer.emit(LaneDone(result=make_lane(role="b", ok=False, error="x")))
+        self.assertGreaterEqual(active(), 0)
+        self.assertEqual(active(), 1)                 # c still in flight
+        renderer.emit(LaneDone(result=make_lane(role="c", ok=True)))
+        self.assertEqual(active(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
