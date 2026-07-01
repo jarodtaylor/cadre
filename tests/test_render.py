@@ -2391,8 +2391,8 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
     """render_fleet_preview adds a sequential block for topology=sequential."""
 
     def setUp(self):
-        self.cfg = _make_sequential_config(stages=3)
-        # 3 stages × 600s default = 1800s = 30m00s
+        self.cfg = _make_sequential_config(stages=3)  # synthesize → 3 lanes + 1 convergence call
+        # (3 stages + 1 convergence) × 600s default = 2400s = 40m00s
         self.rendered = render_fleet_preview(self.cfg)
 
     def test_topology_line_present(self):
@@ -2402,8 +2402,10 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
         self.assertIn("3 stage(s)", self.rendered)
 
     def test_wall_clock_ceiling_shown(self):
-        """3 stages × 600s = 1800s = 30m00s."""
-        self.assertIn("30m00s", self.rendered)
+        """synthesize: (3 stages + 1 convergence) × 600s = 2400s = 40m00s — the extra
+        convergence call must be counted (Codex finding), and the label shown."""
+        self.assertIn("40m00s", self.rendered)
+        self.assertIn("+ convergence", self.rendered)
 
     def test_inter_stage_cap_shown(self):
         self.assertIn("Inter-stage output cap", self.rendered)
@@ -2422,17 +2424,28 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
         self.assertLess(topo_pos, end_pos)
 
     def test_wall_clock_single_stage(self):
-        """1 stage × 600s = 600s = 10m00s."""
+        """synthesize: (1 stage + 1 convergence) × 600s = 1200s = 20m00s."""
         cfg = _make_sequential_config(stages=1)
         rendered = render_fleet_preview(cfg)
-        self.assertIn("10m00s", rendered)
+        self.assertIn("20m00s", rendered)
 
     def test_custom_call_timeout(self):
         """Explicit call_timeout overrides the default in the ceiling calculation."""
         cfg = _make_sequential_config(stages=2)
         rendered = render_fleet_preview(cfg, call_timeout=30.0)
-        # 2 × 30 = 60s = 1m00s
-        self.assertIn("1m00s", rendered)
+        # synthesize: (2 stages + 1 convergence) × 30 = 90s = 1m30s
+        self.assertIn("1m30s", rendered)
+
+    def test_collect_ceiling_excludes_convergence_call(self):
+        """A sequential+collect fleet has NO convergence call, so the ceiling is N ×
+        timeout (not N+1) and no '+ convergence' label — Codex undercount fix must not
+        over-count collect."""
+        cfg = _make_sequential_config(stages=3)
+        cfg.convergence = "collect"
+        cfg.synthesis = None
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("30m00s", rendered)  # 3 × 600s, no +1
+        self.assertNotIn("+ convergence", rendered)
 
     def test_no_timeout(self):
         """call_timeout=None shows 'no per-stage timeout'."""

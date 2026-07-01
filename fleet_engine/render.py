@@ -204,14 +204,20 @@ def render_fleet_preview(
     # Sequential-specific summary (parallel preview stays byte-identical — no new line).
     if config.topology == "sequential":
         stages = len(config.specialists)
+        # synthesize/judge run one MORE bounded model call (the convergence step) AFTER
+        # the lane chain; collect does not. Count it so the disclosed wall-clock ceiling
+        # isn't undercounted on the approval surface (the exact risk this line discloses).
+        has_convergence_call = config.convergence in ("synthesize", "judge")
+        calls = stages + 1 if has_convergence_call else stages
+        tail = " + convergence" if has_convergence_call else ""
         if call_timeout is not None:
-            total_s = call_timeout * stages
+            total_s = call_timeout * calls
             mm = int(total_s) // 60
             ss = int(total_s) % 60
             ceiling_str = f"{mm}m{ss:02d}s" if mm > 0 else f"{ss}s"
-            out.append(f"\nTopology: sequential — {stages} stage(s), max wall-clock {ceiling_str}")
+            out.append(f"\nTopology: sequential — {stages} stage(s){tail}, max wall-clock {ceiling_str}")
         else:
-            out.append(f"\nTopology: sequential — {stages} stage(s), no per-stage timeout")
+            out.append(f"\nTopology: sequential — {stages} stage(s){tail}, no per-stage timeout")
         out.append(f"  Inter-stage output cap: {CHAIN_STAGE_CAP:,} chars")
 
     out.append("\n=== end preview ===")
