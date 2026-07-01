@@ -1823,5 +1823,319 @@ class TestRunTitleRename(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Sequential+collect chain: manifest fields + per-lane skipped markdown (U5)
+# ---------------------------------------------------------------------------
+
+
+def _chain_cfg(**overrides):
+    """Minimal sequential+collect FleetConfig (scout → analyst → writer)."""
+    data = {
+        "name": "test-chain",
+        "convergence": "collect",
+        "topology": "sequential",
+        "specialists": [
+            {"role": "scout", "provider": "openrouter", "model": "s/m",
+             "toolset": ["web"], "focus": "gather sources"},
+            {"role": "analyst", "provider": "xai", "model": "grok",
+             "toolset": ["web"], "focus": "audit and verify"},
+            {"role": "writer", "provider": "openrouter", "model": "w/m",
+             "toolset": [], "focus": "write prose"},
+        ],
+    }
+    data.update(overrides)
+    return FleetConfig.from_dict(data)
+
+
+def _skipped_lane(role, provider, model) -> AgentResult:
+    """Build a skipped-lane AgentResult (chain never ran this lane).
+
+    Constructed directly — not via _lane() — because _lane's error-defaulting
+    sets error=f"{role}-error" for any ok=False lane even when error= is not
+    supplied, and a skipped lane must have error=None (no call was made).
+    toolset=[] is explicit to satisfy the []-vs-None invariant in _build_manifest.
+    """
+    return AgentResult(
+        role=role, provider=provider, model=model,
+        ok=False, skipped=True, error=None, elapsed_s=None, toolset=[],
+    )
+
+
+class TestSequentialChainManifest(unittest.TestCase):
+    """Sequential+collect chain manifest carries topology/terminal_produced/
+    threading_truncated and per-lane skipped — additive; parallel path unaffected."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _load_manifest(self, cfg, result):
+        save_run(cfg, result, self.run_dir)
+        with open(self.run_dir / "manifest.json", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _success_result(self):
+        """All 3 lanes succeed — topology=sequential, terminal_produced=True."""
+        return FleetResult(
+            fleet="test-chain",
+            task="research task",
+            specialists=[
+                _lane("scout", provider="openrouter", model="s/m", toolset=["web"]),
+                _lane("analyst", provider="xai", model="grok", toolset=["web"]),
+                _lane("writer", provider="openrouter", model="w/m", toolset=[]),
+            ],
+            synthesis=None,
+            synth_ok=None,
+            convergence="collect",
+            topology="sequential",
+            terminal_produced=True,
+            threading_truncated=False,
+            status=FleetStatus.SUCCESS,
+        )
+
+    def test_chain_success_manifest_topology(self):
+        """A sequential chain SUCCESS manifest carries topology='sequential'."""
+        manifest = self._load_manifest(_chain_cfg(), self._success_result())
+        self.assertEqual(manifest["topology"], "sequential")
+
+    def test_chain_success_manifest_terminal_produced_true(self):
+        """Chain SUCCESS: terminal_produced=True in manifest."""
+        manifest = self._load_manifest(_chain_cfg(), self._success_result())
+        self.assertIs(manifest["terminal_produced"], True)
+
+    def test_chain_success_manifest_threading_truncated_false(self):
+        """Chain SUCCESS with no truncation: threading_truncated=False in manifest."""
+        manifest = self._load_manifest(_chain_cfg(), self._success_result())
+        self.assertFalse(manifest["threading_truncated"])
+
+    def test_chain_success_all_lanes_not_skipped(self):
+        """All lanes in a SUCCESS chain have skipped=False in the manifest."""
+        manifest = self._load_manifest(_chain_cfg(), self._success_result())
+        self.assertEqual(len(manifest["lanes"]), 3)
+        for lane in manifest["lanes"]:
+            self.assertFalse(lane["skipped"])
+
+    def test_chain_mid_break_lane_states(self):
+        """Mid-break DEGRADED: scout ok, analyst real-failure, writer skipped.
+
+        Proves manifest distinguishes a skipped lane (ok=False, skipped=True)
+        from a real failure (ok=False, skipped=False) — the entire reason the
+        field exists.
+        """
+        # Analyst fails (ran and failed); writer was never dispatched (skipped).
+        result = FleetResult(
+            fleet="test-chain",
+            task="research task",
+            specialists=[
+                _lane("scout", provider="openrouter", model="s/m", toolset=["web"]),
+                _lane("analyst", provider="xai", model="grok", ok=False,
+                      error="rate-limited", toolset=["web"]),
+                _skipped_lane("writer", "openrouter", "w/m"),
+            ],
+            synthesis=None,
+            synth_ok=None,
+            convergence="collect",
+            topology="sequential",
+            terminal_produced=False,
+            threading_truncated=False,
+            # Status set explicitly — _derive_status shim is parallel-only and
+            # returns FAILED for (ok=False, synth_ok=None, judge_ok=None, "collect").
+            status=FleetStatus.DEGRADED,
+        )
+        manifest = self._load_manifest(_chain_cfg(), result)
+
+        scout = next(lane for lane in manifest["lanes"] if lane["role"] == "scout")
+        analyst = next(lane for lane in manifest["lanes"] if lane["role"] == "analyst")
+        writer = next(lane for lane in manifest["lanes"] if lane["role"] == "writer")
+
+        # Scout succeeded
+        self.assertTrue(scout["ok"])
+        self.assertFalse(scout["skipped"])
+
+        # Analyst ran and failed (real failure — skipped must be False)
+        self.assertFalse(analyst["ok"])
+        self.assertFalse(analyst["skipped"])
+
+        # Writer never ran (skipped=True — distinguishable from analyst's real failure)
+        self.assertFalse(writer["ok"])
+        self.assertTrue(writer["skipped"])
+
+    def test_chain_manifest_terminal_produced_false_when_broken(self):
+        """A broken chain has terminal_produced=False in the manifest."""
+        result = FleetResult(
+            fleet="test-chain",
+            task="research task",
+            specialists=[
+                _lane("scout", provider="openrouter", model="s/m", toolset=["web"]),
+                _lane("analyst", provider="xai", model="grok", ok=False,
+                      error="e", toolset=["web"]),
+                _skipped_lane("writer", "openrouter", "w/m"),
+            ],
+            synthesis=None, synth_ok=None, convergence="collect",
+            topology="sequential", terminal_produced=False,
+            threading_truncated=False, status=FleetStatus.DEGRADED,
+        )
+        manifest = self._load_manifest(_chain_cfg(), result)
+        self.assertIs(manifest["terminal_produced"], False)
+
+    # --- Regression guards: parallel path must be unaffected ---
+
+    def test_parallel_manifest_topology_parallel(self):
+        """Parallel result still has topology='parallel' (additive — no regression)."""
+        manifest = self._load_manifest(_cfg(), _result())
+        self.assertEqual(manifest["topology"], "parallel")
+
+    def test_parallel_manifest_terminal_produced_null(self):
+        """Parallel result: terminal_produced=null (None means not-a-chain)."""
+        manifest = self._load_manifest(_cfg(), _result())
+        self.assertIsNone(manifest["terminal_produced"])
+
+    def test_parallel_manifest_threading_truncated_false(self):
+        """Parallel result: threading_truncated=False."""
+        manifest = self._load_manifest(_cfg(), _result())
+        self.assertFalse(manifest["threading_truncated"])
+
+    def test_parallel_manifest_lanes_not_skipped(self):
+        """Parallel result: every lane has skipped=False in the manifest."""
+        manifest = self._load_manifest(_cfg(), _result())
+        for lane in manifest["lanes"]:
+            self.assertFalse(
+                lane["skipped"],
+                f"parallel lane {lane['role']!r} must have skipped=False",
+            )
+
+
+class TestSkippedLaneMarkdown(unittest.TestCase):
+    """_specialist_md for a skipped lane renders ## Skipped, not ## Error."""
+
+    @staticmethod
+    def _skipped(role="writer", provider="openrouter", model="w/m") -> AgentResult:
+        return AgentResult(
+            role=role, provider=provider, model=model,
+            ok=False, skipped=True, error=None, elapsed_s=None, toolset=[],
+        )
+
+    def test_skipped_lane_renders_skipped_section(self):
+        md = _specialist_md(self._skipped())
+        self.assertIn("## Skipped", md)
+        self.assertNotIn("## Error", md)
+
+    def test_skipped_lane_no_error_detail_phrase(self):
+        """The '(no error detail)' placeholder must not appear for a skipped lane."""
+        md = _specialist_md(self._skipped())
+        self.assertNotIn("(no error detail)", md)
+
+    def test_skipped_lane_explains_chain_halt(self):
+        """The Skipped section body mentions the chain halting at an upstream lane."""
+        md = _specialist_md(self._skipped())
+        self.assertIn("chain", md.lower())
+
+    def test_skipped_lane_header_rows_present(self):
+        """Standard header rows are retained (Provider/Model/OK/Elapsed/Toolset)."""
+        lane = AgentResult(
+            role="analyst", provider="xai", model="grok",
+            ok=False, skipped=True, error=None, elapsed_s=None, toolset=[],
+        )
+        md = _specialist_md(lane)
+        self.assertIn("# Specialist: analyst", md)
+        self.assertIn("**Provider:**", md)
+        self.assertIn("**Model:**", md)
+        self.assertIn("**OK:** False", md)
+        self.assertIn("**Elapsed:** n/a", md)
+
+    def test_real_failure_still_renders_error_section(self):
+        """Regression: a real failure (ok=False, skipped=False) still renders ## Error."""
+        lane = AgentResult(
+            role="analyst", provider="xai", model="grok",
+            ok=False, skipped=False, error="rate limited", elapsed_s=1.0, toolset=[],
+        )
+        md = _specialist_md(lane)
+        self.assertNotIn("## Skipped", md)
+        self.assertIn("## Error", md)
+        self.assertIn("rate limited", md)
+
+
+class TestSequentialConjunctiveCapture(unittest.TestCase):
+    """synthesis.md reads the mode-detail, not the aggregate status. A sequential chain
+    that broke mid-run but whose convergence step SUCCEEDED must still write the output
+    (no data loss); a sequential FAILED run is a first-lane failure, not "all failed"."""
+
+    def test_judge_degraded_with_grade_is_written_not_discarded(self):
+        # Data-loss fix: sequential+judge broke mid-run but the judge SUCCEEDED over the
+        # survivors → DEGRADED with result.judge set. The grade MUST land in synthesis.md.
+        lanes = [
+            _lane(role="scout", ok=True, text="found"),
+            _lane(role="analyst", ok=False),
+            _skipped_lane("writer", "openrouter", "w/m"),
+        ]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.DEGRADED,
+            judge="GRADE TEXT HERE", judge_ok=True, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("# Judge grade", md)
+        self.assertIn("GRADE TEXT HERE", md)
+        self.assertNotIn("No judge grade", md)
+
+    def test_judge_degraded_without_grade_still_notes_failure(self):
+        # Judge genuinely ran and failed (judge None) → the "No judge grade" note holds.
+        lanes = [_lane(role="scout", ok=True, text="found"),
+                 _lane(role="analyst", ok=True, text="a"),
+                 _lane(role="writer", ok=True, text="w")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.DEGRADED,
+            judge=None, judge_ok=False, terminal_produced=True,
+            notes=["judge failed: timeout"],
+        )
+        md = _synthesis_md(result)
+        self.assertIn("No judge grade", md)
+        self.assertIn("timeout", md)
+
+    def test_collect_failed_sequential_says_chain_halted(self):
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m"),
+                 _skipped_lane("writer", "openrouter", "w/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="collect", topology="sequential", status=FleetStatus.FAILED,
+            terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("collect mode", md)
+        self.assertNotIn("specialists failed", md)
+
+    def test_judge_failed_sequential_says_chain_halted(self):
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="judge", topology="sequential", status=FleetStatus.FAILED,
+            judge=None, judge_ok=None, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("judge mode", md)
+        self.assertNotIn("specialists failed", md)
+
+    def test_synthesize_failed_sequential_says_chain_halted(self):
+        # Sequential+synthesize FAILED = first lane failed, rest skipped — the markdown
+        # must mirror the collect/judge wording, NOT a misleading "1 of 3 failed" count.
+        lanes = [_lane(role="scout", ok=False),
+                 _skipped_lane("analyst", "openrouter", "a/m"),
+                 _skipped_lane("writer", "openrouter", "w/m")]
+        result = FleetResult(
+            fleet="f", task="t", specialists=lanes,
+            convergence="synthesize", topology="sequential", status=FleetStatus.FAILED,
+            synthesis=None, synth_ok=None, terminal_produced=False,
+        )
+        md = _synthesis_md(result)
+        self.assertIn("chain halted at the first lane", md)
+        self.assertIn("synthesis was not attempted", md)
+        self.assertNotIn("of 3 specialists failed", md)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -91,6 +91,7 @@ class FleetConfig:
     synthesis: SynthesisSpec | None = None
     judge: JudgeSpec | None = None
     convergence: str = "synthesize"
+    topology: str = "parallel"
     description: str = ""
     allow_privileged_tools: bool = False
 
@@ -133,6 +134,16 @@ class FleetConfig:
             convergence = "synthesize"
         else:
             convergence = conv_raw
+
+        topo_raw = data.get("topology", "parallel")
+        # isinstance guard FIRST: a non-str value (e.g. `topology: [sequential]`) is
+        # unhashable and would raise TypeError on the set membership test — accumulate a
+        # ConfigError instead, honoring the loader's malformed-input-never-tracebacks contract.
+        if not isinstance(topo_raw, str) or topo_raw not in {"parallel", "sequential"}:
+            errors.append("`topology` must be one of: parallel, sequential")
+            topology = "parallel"
+        else:
+            topology = topo_raw
 
         # An explicit but empty `description:` parses as YAML null (None); str(None)
         # would render the literal "None" in the preview, so map null -> "".
@@ -323,6 +334,7 @@ class FleetConfig:
             synthesis=synthesis,
             judge=judge,
             convergence=convergence,
+            topology=topology,
             description=description,
             allow_privileged_tools=allow_priv,
         )

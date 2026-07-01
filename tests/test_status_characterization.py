@@ -30,6 +30,7 @@ from fleet_engine.engine import FleetStatus, run_fleet
 from fleet_engine.render import render_result
 from tests.test_engine import (
     FakeClient,
+    _chain_config,
     _collect_config,
     _config,
     _derive_status,
@@ -471,6 +472,218 @@ class TestStatusAndShimFidelity(unittest.TestCase):
                     ),
                     result.status,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 9 — sequential+collect SUCCESS (all lanes ok)
+# ---------------------------------------------------------------------------
+
+class TestSequentialChainSuccess(unittest.TestCase):
+    """sequential+collect — all lanes succeed → SUCCESS, terminal_produced=True."""
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(),
+            {},  # FakeClient default: every role → ok
+        )
+
+    def test_status_is_success(self):
+        self.assertIs(self.result.status, FleetStatus.SUCCESS)
+
+    def test_ok_is_true(self):
+        self.assertTrue(self.result.ok)
+
+    def test_render_header_collect_result(self):
+        self.assertIn("=== t — collect result ===", self.rendered)
+
+    def test_render_no_chain_failed(self):
+        self.assertNotIn("chain failed", self.rendered)
+
+    def test_manifest_topology_sequential(self):
+        self.assertEqual(self.manifest["topology"], "sequential")
+
+    def test_manifest_status_success(self):
+        self.assertEqual(self.manifest["status"], "success")
+
+    def test_manifest_terminal_produced_true(self):
+        self.assertIs(self.manifest["terminal_produced"], True)
+
+    def test_manifest_all_lanes_not_skipped(self):
+        self.assertEqual(len(self.manifest["lanes"]), 3)
+        for lane in self.manifest["lanes"]:
+            self.assertFalse(lane["skipped"])
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 10 — sequential+collect DEGRADED (mid-chain break, analyst fails)
+# ---------------------------------------------------------------------------
+
+class TestSequentialChainMidBreakDegraded(unittest.TestCase):
+    """sequential+collect — analyst fails → writer skipped → DEGRADED."""
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(),
+            {"analyst": ("fail", "e")},
+        )
+
+    def test_status_is_degraded(self):
+        self.assertIs(self.result.status, FleetStatus.DEGRADED)
+
+    def test_ok_is_false(self):
+        self.assertFalse(self.result.ok)
+
+    def test_render_header_chain_failed(self):
+        self.assertIn("=== t — collect result — chain failed mid-run ===", self.rendered)
+
+    def test_manifest_terminal_produced_false(self):
+        self.assertIs(self.manifest["terminal_produced"], False)
+
+    def test_manifest_scout_ok_not_skipped(self):
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
+        self.assertTrue(scout["ok"])
+        self.assertFalse(scout["skipped"])
+
+    def test_manifest_analyst_failed_not_skipped(self):
+        """Analyst ran and failed (real failure) — skipped must be False."""
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
+        self.assertFalse(analyst["ok"])
+        self.assertFalse(analyst["skipped"])  # real failure — NOT skipped
+
+    def test_manifest_writer_skipped(self):
+        """Writer never ran — the chain halted at analyst before writer was reached."""
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
+        self.assertFalse(writer["ok"])
+        self.assertTrue(writer["skipped"])    # never ran — NOT a real failure
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 11 — sequential+collect DEGRADED (terminal lane fails)
+# ---------------------------------------------------------------------------
+
+class TestSequentialChainTerminalFailDegraded(unittest.TestCase):
+    """sequential+collect — writer fails (real failure, not skipped) → DEGRADED."""
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(),
+            {"writer": ("fail", "e")},
+        )
+
+    def test_status_is_degraded(self):
+        self.assertIs(self.result.status, FleetStatus.DEGRADED)
+
+    def test_manifest_terminal_produced_false(self):
+        self.assertIs(self.manifest["terminal_produced"], False)
+
+    def test_manifest_writer_real_failure_not_skipped(self):
+        """Writer ran and failed — it's a real failure, not skipped."""
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
+        self.assertFalse(writer["ok"])
+        self.assertFalse(writer["skipped"])  # ran and failed — NOT skipped
+
+    def test_manifest_scout_ok(self):
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
+        self.assertTrue(scout["ok"])
+        self.assertFalse(scout["skipped"])
+
+    def test_manifest_analyst_ok(self):
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
+        self.assertTrue(analyst["ok"])
+        self.assertFalse(analyst["skipped"])
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 12 — sequential+collect FAILED (first lane fails)
+# ---------------------------------------------------------------------------
+
+class TestSequentialChainFirstFailFailed(unittest.TestCase):
+    """sequential+collect — scout fails → all downstream skipped → FAILED."""
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(),
+            {"scout": ("fail", "e")},
+        )
+
+    def test_status_is_failed(self):
+        self.assertIs(self.result.status, FleetStatus.FAILED)
+
+    def test_ok_is_false(self):
+        self.assertFalse(self.result.ok)
+
+    def test_render_header_chain_failed_at_first_lane(self):
+        # Sequential FAILED = first lane failed, the rest skipped — NOT "all failed".
+        self.assertIn("=== t — collect result — chain failed at the first lane ===", self.rendered)
+        self.assertNotIn("all specialists failed", self.rendered)
+
+    def test_manifest_scout_real_failure(self):
+        """Scout ran and failed — not a skipped lane."""
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
+        self.assertFalse(scout["ok"])
+        self.assertFalse(scout["skipped"])  # ran and failed — NOT skipped
+
+    def test_manifest_analyst_skipped(self):
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
+        self.assertFalse(analyst["ok"])
+        self.assertTrue(analyst["skipped"])
+
+    def test_manifest_writer_skipped(self):
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
+        self.assertFalse(writer["ok"])
+        self.assertTrue(writer["skipped"])
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
+
+
+class TestSequentialSynthesizeFirstFailFailed(unittest.TestCase):
+    """sequential+synthesize — scout fails → all downstream skipped → FAILED.
+
+    The FAILED preamble must read like the collect/judge siblings ("chain halted at
+    the first lane"), NOT a misleading count ("1 of 3 specialists failed") that would
+    suggest the other two succeeded when they were skipped.
+    """
+
+    def setUp(self):
+        self.result, self.rendered, self.manifest = _run(
+            _chain_config(
+                convergence="synthesize",
+                synthesis={"provider": "openrouter", "model": "syn/m"},
+            ),
+            {"scout": ("fail", "e")},
+        )
+
+    def test_status_is_failed(self):
+        self.assertIs(self.result.status, FleetStatus.FAILED)
+
+    def test_render_preamble_topology_aware(self):
+        self.assertIn("chain halted at the first lane", self.rendered)
+        self.assertIn("synthesis was not attempted", self.rendered)
+        # The misleading count form must NOT appear (the rest were skipped, not ok).
+        self.assertNotIn("of 3 specialists failed", self.rendered)
+
+    def test_manifest_topology_and_status(self):
+        self.assertEqual(self.manifest["topology"], "sequential")
+        self.assertEqual(self.manifest["status"], "failed")
+
+    def test_manifest_downstream_skipped(self):
+        by_role = {lane["role"]: lane for lane in self.manifest["lanes"]}
+        self.assertFalse(by_role["scout"]["skipped"])  # ran and failed
+        self.assertTrue(by_role["analyst"]["skipped"])
+        self.assertTrue(by_role["writer"]["skipped"])
+
+    def test_manifest_timing(self):
+        _assert_timing(self, self.manifest)
 
 
 if __name__ == "__main__":

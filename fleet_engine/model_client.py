@@ -32,9 +32,14 @@ class AgentResult:
     # elapsed_s: wall-clock seconds from daemon launch to result collection.
     # toolset: the specialist's validated config toolset ([] means no tools).
     # timed_out: True only on the fabricated timeout result; False everywhere else.
+    # skipped: True ONLY for a lane the sequential chain never ran because an upstream
+    #   lane failed. Set by the chain executor (_run_chain, U3); default False. Distinct
+    #   from timed_out (ran, hit the deadline) and from a real failure (ran, returned bad
+    #   output) — a skipped lane never received a model call.
     elapsed_s: float | None = None
     toolset: list[str] = field(default_factory=list)
     timed_out: bool = False
+    skipped: bool = False
 
 
 def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any:

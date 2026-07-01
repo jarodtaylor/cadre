@@ -34,9 +34,30 @@ from fleet_engine.model_client import AgentResult
 
 @dataclass(frozen=True)
 class LaneLaunched:
-    """Every specialist lane has been launched; carries their roles in config order."""
+    """The fleet's specialist roster, in config order — with a launch semantics that
+    depends on ``queued``.
+
+    For a parallel run (the default, ``queued=False``) every lane has been launched
+    concurrently. For a sequential chain (``queued=True``) the roster is announced up
+    front but the lanes have NOT been launched yet — they start serially as prior lanes
+    complete (see ``LaneStarted``).
+    """
 
     roles: list[str]
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LaneStarted:
+    """One sequential-chain lane is about to run (serial topology only).
+
+    Emitted immediately before the daemon thread launches for this lane. Not emitted
+    for skipped lanes (a chain lane that never ran because an upstream lane failed).
+    One ``LaneDone`` is always emitted per lane including skipped ones, so
+    ``LaneStarted`` count + skipped count == total roster count.
+    """
+
+    role: str
 
 
 @dataclass(frozen=True)
@@ -112,7 +133,7 @@ class Completion:
 
 
 ProgressEvent = Union[
-    LaneLaunched, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
+    LaneLaunched, LaneStarted, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
     Validated, RunFolder, Completion
 ]
 ProgressHook = Callable[[ProgressEvent], None]
@@ -130,9 +151,13 @@ def noop(event: ProgressEvent) -> None:
 def outcome_label(result: AgentResult) -> str:
     """Map a collected result to a stable outcome label for breadcrumbs.
 
-    ``timed-out`` takes precedence (a timed-out lane is also ``ok=False``), then
-    ``ok``, else ``failed``. An internal label only — never the raw error string.
+    ``skipped`` takes precedence (a chain lane that never ran; skipped implies
+    ``ok=False`` and ``timed_out=False``).  Then ``timed-out`` (a timed-out lane
+    is also ``ok=False``), then ``ok``, else ``failed``.  An internal label only
+    — never the raw error string.
     """
+    if result.skipped:
+        return "skipped"
     if result.timed_out:
         return "timed-out"
     return "ok" if result.ok else "failed"

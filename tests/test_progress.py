@@ -22,6 +22,7 @@ from fleet_engine.progress import (
     JudgeStarted,
     LaneDone,
     LaneLaunched,
+    LaneStarted,
     ProgressEvent,
     SynthDone,
     SynthStarted,
@@ -551,6 +552,156 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
         self.assertTrue(validated_events, "no Validated event was emitted")
         self.assertEqual(validated_events[0].convergence, "judge")
         self.assertEqual(validated_events[0].synthesizers, 0)
+
+
+def _chain_config(**overrides):
+    """3-lane sequential+collect config for progress-event tests."""
+    data = {
+        "name": "t",
+        "convergence": "collect",
+        "topology": "sequential",
+        "specialists": [
+            {"role": "scout", "provider": "openrouter", "model": "s/m", "toolset": ["web"],
+             "focus": "gather"},
+            {"role": "analyst", "provider": "xai", "model": "grok", "toolset": ["web"],
+             "focus": "audit"},
+            {"role": "writer", "provider": "openrouter", "model": "w/m", "toolset": [],
+             "focus": "write"},
+        ],
+    }
+    data.update(overrides)
+    cfg = FleetConfig.from_dict(data)
+    resolve(cfg, "/unused")
+    return cfg
+
+
+class TestSequentialProgressEvents(unittest.TestCase):
+    """LaneStarted and LaneLaunched(queued=True/False) emission for sequential vs parallel runs."""
+
+    # ------------------------------------------------------------------
+    # LaneStarted is a valid ProgressEvent member with the role field
+    # ------------------------------------------------------------------
+
+    def test_lane_started_is_in_progress_event_union(self):
+        """LaneStarted must be a member of the ProgressEvent union."""
+        import typing
+        union_args = typing.get_args(ProgressEvent)
+        self.assertIn(LaneStarted, union_args)
+
+    def test_lane_started_has_role_field(self):
+        """LaneStarted(role=...) constructs correctly and role is readable."""
+        ev = LaneStarted(role="scout")
+        self.assertEqual(ev.role, "scout")
+
+    # ------------------------------------------------------------------
+    # LaneLaunched.queued defaults to False (parallel backward-compat)
+    # ------------------------------------------------------------------
+
+    def test_lane_launched_queued_defaults_false(self):
+        """LaneLaunched.queued defaults to False — parallel runs are additive; unaffected."""
+        ev = LaneLaunched(roles=["web", "social"])
+        self.assertFalse(ev.queued)
+
+    def test_lane_launched_queued_true_can_be_constructed(self):
+        """LaneLaunched(queued=True) is valid — used by _run_chain roster announcement."""
+        ev = LaneLaunched(roles=["scout", "analyst"], queued=True)
+        self.assertTrue(ev.queued)
+
+    # ------------------------------------------------------------------
+    # Sequential run emits LaneLaunched(queued=True) as the first event
+    # ------------------------------------------------------------------
+
+    def test_sequential_emits_queued_lane_launched(self):
+        """A sequential run emits LaneLaunched(queued=True) as its first (roster) event."""
+        events = []
+        run_fleet(_chain_config(), "task", FakeClient(), progress=lambda e: events.append(e))
+
+        launched = [e for e in events if isinstance(e, LaneLaunched)]
+        self.assertEqual(len(launched), 1)
+        self.assertTrue(launched[0].queued)
+        self.assertEqual(launched[0].roles, ["scout", "analyst", "writer"])
+
+    # ------------------------------------------------------------------
+    # Sequential run emits LaneStarted per RUNNING lane, none for skipped
+    # ------------------------------------------------------------------
+
+    def test_sequential_emits_lane_started_per_running_lane(self):
+        """All 3 lanes run → 3 LaneStarted events in config order."""
+        events = []
+        run_fleet(_chain_config(), "task", FakeClient(), progress=lambda e: events.append(e))
+
+        started = [e for e in events if isinstance(e, LaneStarted)]
+        self.assertEqual(len(started), 3)
+        self.assertEqual([e.role for e in started], ["scout", "analyst", "writer"])
+
+    def test_sequential_mid_break_lane_started_only_for_running_lanes(self):
+        """Analyst fails → writer skipped → 2 LaneStarted (scout, analyst); 3 LaneDone."""
+        events = []
+        run_fleet(
+            _chain_config(), "task",
+            FakeClient({"analyst": ("fail", "error")}),
+            progress=lambda e: events.append(e),
+        )
+
+        started = [e for e in events if isinstance(e, LaneStarted)]
+        done = [e for e in events if isinstance(e, LaneDone)]
+
+        # Only 2 LaneStarted: scout (ran) and analyst (ran and failed); writer was skipped.
+        self.assertEqual(len(started), 2)
+        started_roles = [e.role for e in started]
+        self.assertIn("scout", started_roles)
+        self.assertIn("analyst", started_roles)
+        self.assertNotIn("writer", started_roles)
+
+        # All 3 LaneDone (skipped lane still emits LaneDone so tally reconciles).
+        self.assertEqual(len(done), 3)
+        done_roles = [e.result.role for e in done]
+        self.assertIn("writer", done_roles)
+
+    def test_sequential_first_lane_fail_no_lane_started_for_downstream(self):
+        """Scout fails → analyst and writer both skipped → only 1 LaneStarted (scout)."""
+        events = []
+        run_fleet(
+            _chain_config(), "task",
+            FakeClient({"scout": ("fail", "boom")}),
+            progress=lambda e: events.append(e),
+        )
+
+        started = [e for e in events if isinstance(e, LaneStarted)]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0].role, "scout")
+
+        done = [e for e in events if isinstance(e, LaneDone)]
+        self.assertEqual(len(done), 3)  # all 3 LaneDone (scout failed, analyst+writer skipped)
+
+    # ------------------------------------------------------------------
+    # Parallel run: no LaneStarted, LaneLaunched(queued=False)
+    # ------------------------------------------------------------------
+
+    def test_parallel_emits_no_lane_started(self):
+        """A parallel run emits no LaneStarted events — that event is chain-only."""
+        events = []
+        run_fleet(
+            _config(), "task",
+            FakeClient({"synthesizer": ("ok", "S")}),
+            progress=lambda e: events.append(e),
+        )
+
+        started = [e for e in events if isinstance(e, LaneStarted)]
+        self.assertEqual(started, [])
+
+    def test_parallel_lane_launched_queued_is_false(self):
+        """A parallel run still emits LaneLaunched(queued=False) — backward-compatible."""
+        events = []
+        run_fleet(
+            _config(), "task",
+            FakeClient({"synthesizer": ("ok", "S")}),
+            progress=lambda e: events.append(e),
+        )
+
+        launched = [e for e in events if isinstance(e, LaneLaunched)]
+        self.assertEqual(len(launched), 1)
+        self.assertFalse(launched[0].queued)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 ---
 title: "When a new value aliases a load-bearing field's existing state, enumerate every consumer"
 date: "2026-06-23"
+last_updated: "2026-07-01"
 category: "docs/solutions/design-patterns/"
-module: "fleet_engine (FleetResult.ok / convergence)"
+module: "fleet_engine (FleetResult.ok / convergence / status)"
 problem_type: "design_pattern"
 component: "engine"
 severity: "high"
@@ -10,6 +11,7 @@ applies_when:
   - "Adding a new enum value / mode that makes an existing field carry a new meaning"
   - "A boolean or tri-state field (ok, synth_ok, status) is read in many places"
   - "A new success state shares a representation with an existing failure/empty state"
+  - "A LATER change re-aliases a field an earlier enumeration already covered"
   - "Reviewing a change that adds a mode flag to a widely-consumed result object"
 tags:
   - "aliasing"
@@ -18,6 +20,8 @@ tags:
   - "consumer-enumeration"
   - "cross-cutting-change"
   - "straggler-grep"
+  - "conjunctive-status"
+  - "cross-model-review"
 ---
 
 # When a new value aliases a load-bearing field's existing state, enumerate every consumer
@@ -39,6 +43,20 @@ validate`. Every one of them, written before collect existed, would read a
 *successful collect run as a failure*: wrong exit code, a "partial result" header,
 a manifest a downstream agent can't distinguish from all-failed, a "synthesis was
 not attempted" line on a clean run.
+
+**It recurred, with a sharper twist (2026-07-01, sequential topology).** Adding a
+`sequential` chain executor gave the *already-enumerated* `FleetStatus` field a new
+meaning the original enumeration never covered: for a `sequential + synthesize/judge`
+run the chain uses a **conjunctive** status, so `DEGRADED` now means either "the
+convergence step failed" (its historical meaning, `synthesis`/`judge` is `None`) **or**
+"the chain broke mid-run but the convergence step still succeeded over the survivors"
+(new — `synthesis`/`judge` is *populated*). Three consumers still branched on the
+aggregate `status` alone: two render headers claimed "no synthesis" / "judge failed"
+above a rendered body, and `capture._synthesis_md` **silently discarded a successful
+judge grade** from `synthesis.md`. The producer (`_run_chain`) was correct; the alias
+was in the consumers — again. The failure that matters: the enumeration had been done
+*at plan time for the enum*, but a **later unit re-aliased the field**, and the original
+consumer list didn't cover the new meaning.
 
 ## Guidance
 
@@ -68,6 +86,19 @@ something new, the unit of work is **the set of consumers, not the producer.**
    run — and *distinguishability* — the collect-success manifest is `assertNotEqual`
    to the all-failed-synthesize manifest. A test that only asserts the new header is
    present would pass while the old preamble still leaks above it.
+5. **Re-run the enumeration when a *later* change adds a new meaning — and prefer a
+   mechanical or cross-model walk over same-model eyes.** An enumeration done once is
+   not permanent: a later unit that gives the field a new value (here, the chain's
+   conjunctive `DEGRADED`) silently invalidates the earlier "every consumer reads the
+   disambiguator" audit, because those consumers were only checked against the *old*
+   set of meanings. This re-aliasing is exactly what same-model review misses — the
+   author, the advisor, and a per-unit self-review all share one mental model of "what
+   DEGRADED means," so none of them re-questions the consumers. What caught it was
+   **independent, mechanical re-walking**: a purpose-built invariant reviewer that
+   enumerates the consumers from scratch, and a cross-model (Codex) pass. The gate,
+   restated for the recurrence case: when a change adds a meaning to an
+   already-consumed field, re-list the consumers *for the new meaning* and have
+   something that doesn't share the author's blind spot walk them.
 
 ## Why This Matters
 
@@ -105,9 +136,28 @@ Rows 2 and 3 are indistinguishable on `ok`+`synthesis`+`synth_ok` alone; only
 `convergence` separates a clean collect run from a failed synthesize run. Every
 consumer reads that column.
 
+The recurrence (conjunctive status) has the same shape — a single `status` value
+carrying two meanings, resolved only by the mode-detail field:
+
+| State (sequential + synthesize) | `status` | `synthesis` | meaning |
+|---|---|---|---|
+| chain completed, synth ok | SUCCESS | text | full success |
+| convergence failed | DEGRADED | **None** | synthesizer ran and failed |
+| **chain broke mid-run, synth over survivors** (new) | **DEGRADED** | **text** | partial result, real body |
+
+Rows 2 and 3 share `status = DEGRADED`; only `synthesis is not None` separates
+"there is a report" from "there is no report." The fix made every consumer gate on
+that mode-detail (`result.synthesis is not None` / `result.judge is not None`), not
+on `status` alone — the same "add/read an explicit disambiguator" move as the
+`convergence` column above, one level down.
+
 ## Related
 
 - `docs/solutions/architecture-patterns/side-effects-at-the-edge-pure-engine-core.md`
   — the engine only *branched* on convergence and returned raw data; all the
   consumer wiring (render, manifest, exit code, breadcrumb) lives at the caller
   layer, so the enumeration was a caller-layer grep, not an engine concern.
+- `docs/solutions/design-patterns/normalize-str-enum-at-the-boundary.md` — the other
+  `FleetStatus` footgun, also caught by the cross-model (Codex) pass that same-model
+  review missed: identity (`is`) comparison on a `str`-Enum. Same field, same lesson —
+  status-field changes want an independent, mechanical consumer/boundary check.

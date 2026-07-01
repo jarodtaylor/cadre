@@ -416,7 +416,7 @@ def _write(path: Path, content: str) -> None:
 
 
 def _specialist_md(lane) -> str:  # lane: AgentResult
-    """Markdown file for one specialist lane (success or failure)."""
+    """Markdown file for one specialist lane (success, failure, or skipped)."""
     lines = [
         f"# Specialist: {_sanitize(lane.role)}",
         "",
@@ -427,7 +427,18 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
         f"- **Toolset:** {lane.toolset if lane.toolset else '(none)'}",
         "",
     ]
-    if lane.ok:
+    if lane.skipped:
+        # A skipped lane was never dispatched — the chain halted at an upstream
+        # lane before this one was reached.  Write a Skipped section rather than
+        # "## Error\n\n(no error detail)", which would be misleading (no call was
+        # made, so there is no error) and technically incorrect (error is None).
+        lines += [
+            "## Skipped",
+            "",
+            "This lane did not run — the chain halted at an upstream lane. "
+            "No model call was made.",
+        ]
+    elif lane.ok:
         lines += ["## Output", "", lane.text or ""]
     else:
         lines += ["## Error", "", lane.error or "(no error detail)"]
@@ -454,28 +465,37 @@ def _synthesis_md(result: FleetResult) -> str:
                 for lane in successes
             ]
             return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
-        # All specialists failed in collect mode.
+        # No surviving specialist outputs. Under sequential topology this is a
+        # first-lane failure (the rest were skipped), not "all failed".
+        if result.topology == "sequential":
+            return "No specialist outputs — the chain halted at the first lane (collect mode)."
         n = len(result.specialists)
         return f"No specialist outputs — all {n} specialists failed (collect mode)."
 
     # Judge mode: write raw grade text (KTD8 — UNMUTATED, no _sanitize) + attributed blocks.
     if result.convergence == "judge":
         if result.status is FleetStatus.FAILED:
-            # All specialists failed; judge was never invoked.
+            # Judge never invoked (no survivors). Under sequential topology this is a
+            # first-lane failure (the rest were skipped), not "all failed".
+            if result.topology == "sequential":
+                return "No judge grade — the chain halted at the first lane (judge mode)."
             n = len(result.specialists)
             return f"No specialist outputs — all {n} specialists failed (judge mode)."
-        if result.status is FleetStatus.DEGRADED:
-            # Judge ran but failed (degrade path). Match the note by its exact
-            # prefix — the engine emits "judge failed: <error>". A loose substring
-            # ("judge failed" in note) could match a specialist failure note whose
-            # provider error text happens to contain that phrase (specialist notes
-            # are appended first), misattributing the degrade reason on disk.
+        if result.status is FleetStatus.DEGRADED and result.judge is None:
+            # The judge ran and FAILED (judge is None). A sequential chain that broke
+            # mid-run while the judge SUCCEEDED over the survivors carries result.judge —
+            # it falls through to the grade-writing block below so the grade is NOT
+            # discarded. Match the note by its exact prefix — the engine emits "judge
+            # failed: <error>". A loose substring ("judge failed" in note) could match a
+            # specialist failure note whose provider error text happens to contain that
+            # phrase (specialist notes are appended first), misattributing the reason.
             judge_note = next(
                 (note for note in result.notes if note.startswith("judge failed:")),
                 "judge failed",
             )
             return f"No judge grade — {judge_note}."
-        # status is SUCCESS — judge ran and succeeded.
+        # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
+        # over the survivors (DEGRADED with result.judge set — fell through above).
         # KTD8: the judge text is written UNMUTATED so the record is accurate;
         # _sanitize is the render boundary's job, not capture's.
         # Identity fields on the delimiter (role/provider/model) are still
@@ -500,6 +520,11 @@ def _synthesis_md(result: FleetResult) -> str:
     #   status is FAILED  → all specialists failed, synthesis never attempted
     #   status is DEGRADED → synthesizer ran and failed
     if result.status is FleetStatus.FAILED:
+        # Sequential FAILED = first lane failed, rest skipped — a count would mislead
+        # (reads as if the others succeeded), so mirror the collect/judge wording above.
+        # Parallel keeps the count (n_failed == n_total, nothing skipped — meaningful).
+        if result.topology == "sequential":
+            return "No synthesis — the chain halted at the first lane; synthesis was not attempted."
         n_failed = len(result.failures)
         n_total = len(result.specialists)
         return f"No synthesis — {n_failed} of {n_total} specialists failed; synthesis was not attempted."
@@ -537,6 +562,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             "elapsed_s": lane.elapsed_s,
             "toolset": list(lane.toolset),  # explicit list — never coerce [] to None
             "timed_out": lane.timed_out,
+            "skipped": lane.skipped,   # True = chain never ran this lane; distinct from a real failure
             "file": filename,
         })
 
@@ -554,7 +580,10 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
         "judge": {"provider": cfg.judge.provider, "model": cfg.judge.model}
                  if result.convergence == "judge" else None,
         "convergence": result.convergence,
+        "topology": result.topology,                     # "parallel" or "sequential"
         "status": result.status.value,
+        "terminal_produced": result.terminal_produced,   # None (not-a-chain), True, or False
+        "threading_truncated": result.threading_truncated,
         "synth_ok": result.synth_ok,
         "judge_ok": result.judge_ok,
         "hermes_home": resolved_hermes_home(),
