@@ -1384,5 +1384,96 @@ class TestSequentialTopology(unittest.TestCase):
         self.assertIsNone(result.terminal_produced)  # None = not a chain
 
 
+class TestU2IterativeCarriers(unittest.TestCase):
+    """U2 additive fields: rounds and diversity_collapsed on FleetResult.
+
+    Purely additive — no population logic (U3b populates these).
+    All existing parallel/sequential paths must be unaffected (the full suite guards this).
+    """
+
+    # ------------------------------------------------------------------
+    # Parallel run — both fields must carry their defaults
+    # ------------------------------------------------------------------
+
+    def test_parallel_run_rounds_is_none(self):
+        """A parallel fleet run carries rounds=None (not iterative)."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertIsNone(result.rounds)
+
+    def test_parallel_run_diversity_collapsed_is_false(self):
+        """A parallel fleet run carries diversity_collapsed=False (not iterative)."""
+        client = FakeClient({"synthesizer": ("ok", "FINAL")})
+        result = run_fleet(_config(), "task", client)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Sequential run — both fields must carry their defaults
+    # ------------------------------------------------------------------
+
+    def test_sequential_run_rounds_is_none(self):
+        """A sequential fleet run carries rounds=None (not iterative)."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertIsNone(result.rounds)
+
+    def test_sequential_run_diversity_collapsed_is_false(self):
+        """A sequential fleet run carries diversity_collapsed=False (not iterative)."""
+        client = FakeClient()
+        result = run_fleet(_chain_config(), "task", client)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Direct construction — defaults when kwargs are absent
+    # ------------------------------------------------------------------
+
+    def test_rounds_defaults_to_none_on_construction(self):
+        """FleetResult constructed without rounds= has rounds=None."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertIsNone(result.rounds)
+
+    def test_diversity_collapsed_defaults_to_false_on_construction(self):
+        """FleetResult constructed without diversity_collapsed= has diversity_collapsed=False."""
+        result = FleetResult(fleet="f", task="t", specialists=[], status=FleetStatus.FAILED)
+        self.assertFalse(result.diversity_collapsed)
+
+    # ------------------------------------------------------------------
+    # Direct construction — both fields are settable (U3b will set them)
+    # ------------------------------------------------------------------
+
+    def test_rounds_settable_via_construction(self):
+        """rounds=[[...]] can be set via direct construction and reads back correctly."""
+        r = AgentResult(role="r1", provider="p", model="m", ok=True, text="out")
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.SUCCESS,
+            rounds=[[r]],
+        )
+        self.assertIsNotNone(result.rounds)
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(result.rounds[0][0].role, "r1")
+
+    def test_diversity_collapsed_settable_via_construction(self):
+        """diversity_collapsed=True can be set via direct construction and reads back correctly."""
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.DEGRADED,
+            diversity_collapsed=True,
+        )
+        self.assertTrue(result.diversity_collapsed)
+
+    def test_both_iterative_fields_settable_together(self):
+        """rounds and diversity_collapsed can both be set in one construction."""
+        r = AgentResult(role="a", provider="p", model="m", ok=True, text="out")
+        result = FleetResult(
+            fleet="f", task="t", specialists=[],
+            status=FleetStatus.SUCCESS,
+            rounds=[[r], [r]],
+            diversity_collapsed=True,
+        )
+        self.assertEqual(len(result.rounds), 2)
+        self.assertTrue(result.diversity_collapsed)
+
+
 if __name__ == "__main__":
     unittest.main()

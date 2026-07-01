@@ -107,6 +107,8 @@ class FleetResult:
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
     threading_truncated: bool = False                # True iff any inter-stage output was capped at CHAIN_STAGE_CAP (sequential only; always False for parallel)
     terminal_produced: bool | None = None            # None=not a chain run (parallel); True=terminal lane produced output; False=terminal lane ran but produced nothing, or chain broke before reaching it (terminal lane skipped)
+    rounds: list[list[AgentResult]] | None = None   # per-round list of per-lane results (iterative audit transcript); None for non-iterative runs (parallel/sequential)
+    diversity_collapsed: bool = False                # True iff the iterative executor detected a debate collapse (≤1 surviving lane in the last-surviving round, or zero cross-round iterations); always False for non-iterative runs
 
     def __post_init__(self) -> None:
         # Normalize status to the FleetStatus enum so the identity checks (`is`)
