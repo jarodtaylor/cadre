@@ -12,7 +12,7 @@ from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
 from fleet_engine.model_client import AgentResult
 from fleet_engine.personas import resolve
-from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone
+from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone, LaneLaunched
 
 
 def _config(**overrides):
@@ -1473,6 +1473,55 @@ class TestU2IterativeCarriers(unittest.TestCase):
         )
         self.assertEqual(len(result.rounds), 2)
         self.assertTrue(result.diversity_collapsed)
+
+
+class TestRunRoundDirect(unittest.TestCase):
+    """Call _run_round directly with an arbitrary lane subset — proves the helper works
+    independently of _fan_out and returns results keyed on the passed lanes list, not
+    the full config order. This is the contract iterative rounds depend on.
+    """
+
+    def test_subset_returns_in_lanes_order(self):
+        """_run_round with 2-of-3 specialists returns results in the passed lanes order."""
+        from fleet_engine.engine import _run_round, _specialist_call
+
+        cfg = _config()
+        # Use only the first 2 (web, social) — a survivor-subset, just like iterative needs.
+        subset = cfg.specialists[:2]
+
+        client = FakeClient()
+        events: list = []
+
+        results = _run_round(
+            subset,
+            lambda spec: _specialist_call(client, spec, "round task"),
+            call_timeout=2.0,
+            progress=lambda e: events.append(e),
+        )
+
+        # Exactly 2 results, in LANES order (web first, then social).
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].role, "web")
+        self.assertEqual(results[1].role, "social")
+
+        # Both completed successfully (FakeClient defaults to ok for unknown roles).
+        self.assertTrue(results[0].ok)
+        self.assertTrue(results[1].ok)
+        self.assertFalse(results[0].timed_out)
+        self.assertFalse(results[1].timed_out)
+
+        # Toolset is stamped from the spec (not left as the client's echo).
+        self.assertEqual(results[0].toolset, ["web"])
+        self.assertEqual(results[1].toolset, ["x_search"])
+
+        # LaneLaunched emitted exactly once, listing only the subset's roles.
+        launched = [e for e in events if isinstance(e, LaneLaunched)]
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0].roles, ["web", "social"])
+
+        # One LaneDone per lane (2 total, not 3).
+        done = [e for e in events if isinstance(e, LaneDone)]
+        self.assertEqual(len(done), 2)
 
 
 if __name__ == "__main__":

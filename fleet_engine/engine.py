@@ -332,19 +332,25 @@ def _chain_lane_call(
     )
 
 
-def _fan_out(
-    config: FleetConfig,
-    task: str,
-    client: ModelClient,
+def _run_round(
+    lanes: list[SpecialistSpec],
+    call_for: Callable[[SpecialistSpec], Callable[[], AgentResult]],
     call_timeout: float | None,
     progress: ProgressHook,
 ) -> list[AgentResult]:
-    """Run every specialist concurrently; return results in CONFIG order.
+    """Reusable concurrency core: run a set of lanes concurrently; return results in LANES order.
+
+    Parameterized by (a) an explicit lane list — the full specialist list for a
+    parallel fan-out, or a surviving-round subset for iterative topology — and (b) a
+    per-lane call-thunk builder: ``call_for(spec)`` is called once per lane at start
+    (in the launch comprehension, not inside the daemon) and returns the zero-argument
+    thunk the daemon thread calls. This keeps ``call_for`` closed over its own frame
+    at call time, so no loop-variable capture bug is possible.
 
     Each lane's daemon pushes ``(idx, result, completed_at)`` onto ``done_q`` on
     arrival; this thread drains them, stamps the capture signals, and emits one
     ``LaneDone`` per lane in ARRIVAL order — so a slow lane never hides a fast one and
-    the live counts stay honest (R4). The returned list is CONFIG-ordered: capture
+    the live counts stay honest (R4). The returned list is LANES-ordered: capture
     dedup and the manifest depend on that stable order, independent of arrival.
 
     Timeout accounting is decoupled from progress-hook latency. The production hook
@@ -362,15 +368,15 @@ def _fan_out(
     All emission happens from THIS thread — never a worker — so the hook sees events
     serially and the edge guards only the heartbeat.
     """
-    n = len(config.specialists)
+    n = len(lanes)
     done_q: "queue.Queue[tuple[int, AgentResult, float]]" = queue.Queue()
     # Start every lane before draining any, so they run concurrently under one shared
     # deadline (total ~= call_timeout, not N x call_timeout).
     launched_at = [
-        _start_lane(idx, _specialist_call(client, spec, task), done_q, name=f"fleet-{spec.role}")
-        for idx, spec in enumerate(config.specialists)
+        _start_lane(idx, call_for(spec), done_q, name=f"fleet-{spec.role}")
+        for idx, spec in enumerate(lanes)
     ]
-    progress(LaneLaunched(roles=[spec.role for spec in config.specialists]))
+    progress(LaneLaunched(roles=[spec.role for spec in lanes]))
 
     collected: dict[int, AgentResult] = {}
 
@@ -381,7 +387,7 @@ def _fan_out(
         # regardless of what the client left on the field.
         lane.timed_out = False
         lane.elapsed_s = completed_at - launched_at[idx]
-        lane.toolset = list(config.specialists[idx].toolset)
+        lane.toolset = list(lanes[idx].toolset)
         collected[idx] = lane
         progress(LaneDone(result=lane))
 
@@ -417,7 +423,7 @@ def _fan_out(
     # fabricates — a None timeout blocks in Phase 1 until all arrive, so n are
     # collected and this loop is a no-op; the format is safe.)
     fabricated_at = time.monotonic()
-    for idx, spec in enumerate(config.specialists):
+    for idx, spec in enumerate(lanes):
         if idx in collected:
             continue
         timed = _timed_out_result(spec.role, spec.provider, spec.model, call_timeout)
@@ -427,6 +433,27 @@ def _fan_out(
         progress(LaneDone(result=timed))
 
     return [collected[i] for i in range(n)]
+
+
+def _fan_out(
+    config: FleetConfig,
+    task: str,
+    client: ModelClient,
+    call_timeout: float | None,
+    progress: ProgressHook,
+) -> list[AgentResult]:
+    """Run every specialist concurrently; return results in CONFIG order.
+
+    Thin delegator: builds the per-spec call thunk and delegates to ``_run_round``,
+    which owns the daemon-thread / three-phase drain / single-emit LaneDone machinery.
+    See ``_run_round`` for the full concurrency contract and timeout accounting rationale.
+    """
+    return _run_round(
+        config.specialists,
+        lambda spec: _specialist_call(client, spec, task),
+        call_timeout,
+        progress,
+    )
 
 
 def _run_convergence(
