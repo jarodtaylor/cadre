@@ -269,7 +269,10 @@ def render_fleet_preview(
         # sequential, even lane 0 receives upstream model output in later rounds.
         # role labels are fleet-controlled → sanitized.
         tool_lanes = [s.role for s in config.specialists if s.toolset]
-        if tool_lanes:
+        # Only rounds >= 2 actually thread prior-round output into a later round; at
+        # rounds == 1 no lane consumes another's output, so the cross-round exposure
+        # warning would be misleading (CodeRabbit review).
+        if tool_lanes and rounds >= 2:
             out.append(
                 "  ⚠ cross-round tool exposure: "
                 + ", ".join(_sanitize(r) for r in tool_lanes)
@@ -426,10 +429,11 @@ def render_result(result: FleetResult) -> str:
         for r in result.successes:
             out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
     if result.threading_truncated:
-        # Our own trusted text — not sanitized. A sequential chain produced inter-stage
-        # output that exceeded CHAIN_STAGE_CAP chars; downstream stages received a
-        # partial upstream context, which may affect quality.
-        out.append("\nnote: inter-stage output was capped — some context may have been truncated")
+        # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
+        # iterative round (inter-round) produced threaded output that exceeded
+        # CHAIN_STAGE_CAP chars; the downstream lane received partial upstream context.
+        unit = "inter-round" if result.topology == "iterative" else "inter-stage"
+        out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
     # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
     # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,

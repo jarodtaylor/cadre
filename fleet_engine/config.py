@@ -151,17 +151,12 @@ class FleetConfig:
         else:
             topology = topo_raw
 
+        # rounds is ONLY meaningful for iterative topology. Coerce a non-int (incl. a
+        # YAML bool — bool is an int subclass) to the 0 sentinel, then validate the range
+        # ONLY for iterative. A parallel/sequential fleet may carry ANY stray rounds value
+        # (even a malformed one) with no error — the field is unused for those topologies.
         rounds_raw = data.get("rounds", 0)
-        # bool is a subclass of int in Python, so `rounds: true` would pass isinstance(x, int).
-        # Reject booleans explicitly so a YAML boolean can't silently become a round count.
-        if not isinstance(rounds_raw, int) or isinstance(rounds_raw, bool):
-            errors.append("`rounds` must be an integer")
-            rounds = 0
-        else:
-            rounds = rounds_raw
-
-        # rounds is validated only for iterative topology; parallel/sequential fleets
-        # may carry a stray rounds value with no error (it is simply not used).
+        rounds = rounds_raw if (isinstance(rounds_raw, int) and not isinstance(rounds_raw, bool)) else 0
         if topology == "iterative" and not (1 <= rounds <= MAX_ROUNDS):
             errors.append(
                 f"`rounds` is required for topology: iterative and must be an integer "

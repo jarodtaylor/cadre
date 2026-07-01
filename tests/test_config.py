@@ -728,6 +728,14 @@ class TestIterativeTopology(unittest.TestCase):
         self.assertEqual(cfg.topology, "parallel")
         self.assertEqual(cfg.rounds, 5)
 
+    def test_parallel_with_malformed_rounds_ignored(self):
+        # A non-iterative fleet IGNORES a malformed rounds value entirely — the field is
+        # unused for parallel/sequential, so a non-int must not raise (it is coerced to
+        # the 0 sentinel and never validated). (CodeRabbit + Copilot review.)
+        cfg = FleetConfig.from_dict(make_data(rounds="not-an-int"))
+        self.assertEqual(cfg.topology, "parallel")
+        self.assertEqual(cfg.rounds, 0)
+
     def test_unknown_topology_error_mentions_iterative(self):
         # The error message for an unknown topology must name all three accepted values,
         # including the newly added "iterative".

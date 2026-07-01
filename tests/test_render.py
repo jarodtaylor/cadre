@@ -2600,6 +2600,13 @@ class TestRenderFleetPreviewIterative(unittest.TestCase):
         """Default tool-less fleet → no cross-round warning."""
         self.assertNotIn("cross-round tool exposure", self.rendered)
 
+    def test_no_cross_round_warning_at_rounds_one(self):
+        """rounds=1 has no round 2 to consume prior-round output, so a tool lane must NOT
+        get the cross-round exposure warning (CodeRabbit review)."""
+        cfg = _make_iterative_config(rounds=1, lanes=2, tool_lane_idx=0)
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("cross-round tool exposure", rendered)
+
     def test_rounds_one_collapse_note(self):
         """rounds=1 with multiple lanes warns diversity_collapsed will be flagged."""
         cfg = _make_iterative_config(rounds=1, lanes=2)

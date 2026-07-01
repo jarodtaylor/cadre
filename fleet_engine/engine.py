@@ -680,6 +680,14 @@ def _representative_results(
                 if m is not None:
                     drop = m
                     break
+            if drop is None:
+                # Unreachable in a correct engine: every lane runs round 1, so a lane
+                # absent from R* still has a drop-round result. Fail loud rather than
+                # append None, which would violate list[AgentResult] downstream (Copilot review).
+                raise ValueError(
+                    f"lane {spec.role!r} appears in no round — iterative engine invariant "
+                    "violation (every lane runs round 1)"
+                )
             reps.append(drop)
     return reps
 
@@ -812,6 +820,14 @@ def run_fleet(
         )
 
     if config.topology == "iterative":
+        # Defense-in-depth (like the missing-instruction precondition above): config
+        # validation enforces rounds in 1..MAX_ROUNDS for iterative, but a caller that
+        # built FleetConfig directly could bypass it — fail loud rather than run zero
+        # rounds and silently degrade to FAILED (CodeRabbit review).
+        if config.rounds < 1:
+            raise ValueError(
+                f"topology 'iterative' requires rounds >= 1, got {config.rounds}"
+            )
         return _run_iterate(config, task, client, call_timeout, progress)
 
     if config.topology == "sequential":

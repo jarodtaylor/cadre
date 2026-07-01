@@ -1570,8 +1570,10 @@ class RoundAwareFakeClient:
         with self._lock:
             count = self._call_count.get(role, 0) + 1
             self._call_count[role] = count
-        self.prompts[(role, count)] = prompt
-        self.toolset_for[(role, count)] = list(toolset)
+            # Record under the lock too: run() is called concurrently by the per-round
+            # worker threads, so these dict writes must not race (Copilot review).
+            self.prompts[(role, count)] = prompt
+            self.toolset_for[(role, count)] = list(toolset)
 
         kind, payload = self.schedule.get((role, count), ("ok", f"{role}-r{count}-output"))
         ok = kind == "ok"
@@ -1599,6 +1601,15 @@ class TestIterativeTopology(unittest.TestCase):
         self.assertIs(result.status, FleetStatus.SUCCESS)
         self.assertTrue(result.ok)
         self.assertEqual(result.topology, "iterative")
+
+    def test_run_fleet_rejects_iterative_rounds_below_one(self):
+        """Defense-in-depth: an iterative config with rounds < 1 — only reachable by a
+        direct construction that bypasses config validation — fails loud, not a silent
+        FAILED (CodeRabbit review)."""
+        cfg = _iterative_config()
+        cfg.rounds = 0  # bypass config validation via direct field mutation
+        with self.assertRaises(ValueError):
+            run_fleet(cfg, "task", RoundAwareFakeClient())
 
     def test_ae1_full_debate_three_rounds_captured(self):
         """3 rounds executed → rounds transcript has 3 entries, each with 3 lane results."""
