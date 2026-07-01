@@ -219,6 +219,21 @@ def render_fleet_preview(
         else:
             out.append(f"\nTopology: sequential — {stages} stage(s){tail}, no per-stage timeout")
         out.append(f"  Inter-stage output cap: {CHAIN_STAGE_CAP:,} chars")
+        # Cross-stage trust disclosure: a non-first chain lane that carries tools receives
+        # the prior stages' UNTRUSTED model output threaded into its prompt, THEN runs its
+        # tools — so a prompt injection in an upstream stage can steer this lane's tool use
+        # (a stronger vector than a single tool-gated lane). Read-only SAFE_TOOLSETS bounds
+        # the blast radius; forgery/injection hardening of the seam is GH #5. Surface it on
+        # the approval surface (our own trusted text; role labels are fleet-controlled, so
+        # sanitized). The first lane is exempt — it consumes no upstream output.
+        tool_lanes = [s.role for s in config.specialists[1:] if s.toolset]
+        if tool_lanes:
+            out.append(
+                "  ⚠ cross-stage tool exposure: "
+                + ", ".join(_sanitize(r) for r in tool_lanes)
+                + " run tools after consuming prior stages' untrusted output"
+                " — a prompt injection upstream can steer their tool use (GH #5 hardens this seam)"
+            )
 
     out.append("\n=== end preview ===")
     return "\n".join(out)

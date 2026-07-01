@@ -2453,6 +2453,27 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
         rendered = render_fleet_preview(cfg, call_timeout=None)
         self.assertIn("no per-stage timeout", rendered)
 
+    def test_cross_stage_tool_exposure_warns_for_non_first_tool_lane(self):
+        """A non-first sequential lane with tools consumes untrusted upstream output into
+        a tool-bearing prompt — the preview must disclose it, naming the lane (Codex)."""
+        cfg = _make_sequential_config(stages=3)
+        cfg.specialists[1].toolset = ["web"]  # the MIDDLE (non-first) lane gains a tool
+        rendered = render_fleet_preview(cfg)
+        self.assertIn("cross-stage tool exposure", rendered)
+        self.assertIn("stage2", rendered)  # the offending lane is named
+        self.assertIn("GH #5", rendered)
+
+    def test_no_cross_stage_warning_when_only_first_lane_has_tools(self):
+        """The first lane consumes no upstream output → exempt; no warning."""
+        cfg = _make_sequential_config(stages=3)
+        cfg.specialists[0].toolset = ["web"]  # only the FIRST lane has a tool
+        rendered = render_fleet_preview(cfg)
+        self.assertNotIn("cross-stage tool exposure", rendered)
+
+    def test_no_cross_stage_warning_when_all_tool_less(self):
+        """Default fleet: every lane toolset=[] → no warning (the setUp fleet)."""
+        self.assertNotIn("cross-stage tool exposure", self.rendered)
+
 
 class TestRenderFleetPreviewParallelUnchanged(unittest.TestCase):
     """Parallel preview stays byte-identical — no Topology line added."""
