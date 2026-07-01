@@ -102,6 +102,20 @@ class JudgeDone:
     elapsed_s: float
 
 
+@dataclass(frozen=True)
+class RoundStarted:
+    """One iterative round is about to begin (iterative topology only).
+
+    Emitted at the start of each round before its concurrent lane fan-out.
+    ``round`` is 1-based; ``total`` is the configured round count.
+    Rendered by the edge (U6) as a ``[cadre] round k/N`` breadcrumb on stderr.
+    The engine defines and emits the event; the edge renders it — engine stays pure.
+    """
+
+    round: int
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Edge-emitted events — cli.py / run.py construct these (the engine never does).
 # ---------------------------------------------------------------------------
@@ -133,7 +147,8 @@ class Completion:
 
 
 ProgressEvent = Union[
-    LaneLaunched, LaneStarted, LaneDone, SynthStarted, SynthDone, JudgeStarted, JudgeDone,
+    LaneLaunched, LaneStarted, LaneDone, SynthStarted, SynthDone,
+    JudgeStarted, JudgeDone, RoundStarted,
     Validated, RunFolder, Completion
 ]
 ProgressHook = Callable[[ProgressEvent], None]
