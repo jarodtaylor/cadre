@@ -1347,6 +1347,9 @@ class TestSequentialTopology(unittest.TestCase):
         analyst_prompt = next(p for (r, p) in client.calls if r == "analyst")
         self.assertIn("[… stage output truncated …]", analyst_prompt)
         self.assertNotIn("X" * (CHAIN_STAGE_CAP + 1), analyst_prompt)
+        # The injected block (content + truncation marker) stays within the cap — the
+        # marker's room is reserved, not appended past it (Copilot finding).
+        self.assertLessEqual(analyst_prompt.count("X"), CHAIN_STAGE_CAP)
 
     def test_no_truncation_when_output_within_cap(self):
         """Short stage output does not set threading_truncated."""

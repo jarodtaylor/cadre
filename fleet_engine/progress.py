@@ -34,12 +34,13 @@ from fleet_engine.model_client import AgentResult
 
 @dataclass(frozen=True)
 class LaneLaunched:
-    """Every specialist lane has been launched; carries their roles in config order.
+    """The fleet's specialist roster, in config order — with a launch semantics that
+    depends on ``queued``.
 
-    For a sequential chain, lanes run one at a time rather than all at once, so
-    ``queued=True`` signals the roster was announced at the start but individual lanes
-    have not yet been launched — they start serially as prior lanes complete.
-    For a parallel run (default), all lanes launch concurrently and ``queued=False``.
+    For a parallel run (the default, ``queued=False``) every lane has been launched
+    concurrently. For a sequential chain (``queued=True``) the roster is announced up
+    front but the lanes have NOT been launched yet — they start serially as prior lanes
+    complete (see ``LaneStarted``).
     """
 
     roles: list[str]

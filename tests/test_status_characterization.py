@@ -543,19 +543,19 @@ class TestSequentialChainMidBreakDegraded(unittest.TestCase):
         self.assertIs(self.manifest["terminal_produced"], False)
 
     def test_manifest_scout_ok_not_skipped(self):
-        scout = next(l for l in self.manifest["lanes"] if l["role"] == "scout")
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
         self.assertTrue(scout["ok"])
         self.assertFalse(scout["skipped"])
 
     def test_manifest_analyst_failed_not_skipped(self):
         """Analyst ran and failed (real failure) — skipped must be False."""
-        analyst = next(l for l in self.manifest["lanes"] if l["role"] == "analyst")
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
         self.assertFalse(analyst["ok"])
         self.assertFalse(analyst["skipped"])  # real failure — NOT skipped
 
     def test_manifest_writer_skipped(self):
         """Writer never ran — the chain halted at analyst before writer was reached."""
-        writer = next(l for l in self.manifest["lanes"] if l["role"] == "writer")
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
         self.assertFalse(writer["ok"])
         self.assertTrue(writer["skipped"])    # never ran — NOT a real failure
 
@@ -584,17 +584,17 @@ class TestSequentialChainTerminalFailDegraded(unittest.TestCase):
 
     def test_manifest_writer_real_failure_not_skipped(self):
         """Writer ran and failed — it's a real failure, not skipped."""
-        writer = next(l for l in self.manifest["lanes"] if l["role"] == "writer")
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
         self.assertFalse(writer["ok"])
         self.assertFalse(writer["skipped"])  # ran and failed — NOT skipped
 
     def test_manifest_scout_ok(self):
-        scout = next(l for l in self.manifest["lanes"] if l["role"] == "scout")
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
         self.assertTrue(scout["ok"])
         self.assertFalse(scout["skipped"])
 
     def test_manifest_analyst_ok(self):
-        analyst = next(l for l in self.manifest["lanes"] if l["role"] == "analyst")
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
         self.assertTrue(analyst["ok"])
         self.assertFalse(analyst["skipped"])
 
@@ -628,17 +628,17 @@ class TestSequentialChainFirstFailFailed(unittest.TestCase):
 
     def test_manifest_scout_real_failure(self):
         """Scout ran and failed — not a skipped lane."""
-        scout = next(l for l in self.manifest["lanes"] if l["role"] == "scout")
+        scout = next(lane for lane in self.manifest["lanes"] if lane["role"] == "scout")
         self.assertFalse(scout["ok"])
         self.assertFalse(scout["skipped"])  # ran and failed — NOT skipped
 
     def test_manifest_analyst_skipped(self):
-        analyst = next(l for l in self.manifest["lanes"] if l["role"] == "analyst")
+        analyst = next(lane for lane in self.manifest["lanes"] if lane["role"] == "analyst")
         self.assertFalse(analyst["ok"])
         self.assertTrue(analyst["skipped"])
 
     def test_manifest_writer_skipped(self):
-        writer = next(l for l in self.manifest["lanes"] if l["role"] == "writer")
+        writer = next(lane for lane in self.manifest["lanes"] if lane["role"] == "writer")
         self.assertFalse(writer["ok"])
         self.assertTrue(writer["skipped"])
 
@@ -677,7 +677,7 @@ class TestSequentialSynthesizeFirstFailFailed(unittest.TestCase):
         self.assertEqual(self.manifest["status"], "failed")
 
     def test_manifest_downstream_skipped(self):
-        by_role = {l["role"]: l for l in self.manifest["lanes"]}
+        by_role = {lane["role"]: lane for lane in self.manifest["lanes"]}
         self.assertFalse(by_role["scout"]["skipped"])  # ran and failed
         self.assertTrue(by_role["analyst"]["skipped"])
         self.assertTrue(by_role["writer"]["skipped"])

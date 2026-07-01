@@ -1944,9 +1944,9 @@ class TestSequentialChainManifest(unittest.TestCase):
         )
         manifest = self._load_manifest(_chain_cfg(), result)
 
-        scout = next(l for l in manifest["lanes"] if l["role"] == "scout")
-        analyst = next(l for l in manifest["lanes"] if l["role"] == "analyst")
-        writer = next(l for l in manifest["lanes"] if l["role"] == "writer")
+        scout = next(lane for lane in manifest["lanes"] if lane["role"] == "scout")
+        analyst = next(lane for lane in manifest["lanes"] if lane["role"] == "analyst")
+        writer = next(lane for lane in manifest["lanes"] if lane["role"] == "writer")
 
         # Scout succeeded
         self.assertTrue(scout["ok"])
