@@ -401,11 +401,13 @@ def render_result(result: FleetResult) -> str:
         unit = "inter-round" if result.topology == "iterative" else "inter-stage"
         out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
-    # Every fleet/model-derived field on this surface is sanitized: the identity
-    # fields (fleet/role/provider/model) so a tampered fleet can't forge a
-    # provenance row, and r.error (model/adapter output) so an error string can't
-    # smuggle escape bytes into the row it renders (#5 U2). r.text/synthesis are
-    # sanitized above where they render.
+    # Every fleet/model-derived field on this surface is sanitized against escape
+    # bytes: the identity fields (fleet/role/provider/model) and r.error
+    # (model/adapter output) so neither can smuggle a control sequence into the row
+    # it renders (#5 U2). r.text/synthesis are sanitized above where they render.
+    # NOTE: this strips escapes, not plain-text grammar — a model body can still
+    # print a look-alike "[ok  ] x" line inertly (report-grammar mimicry residual,
+    # SECURITY.md); framing model bodies is a tracked fast-follow.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"

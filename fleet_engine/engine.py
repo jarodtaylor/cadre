@@ -196,8 +196,13 @@ def _judge_prompt(config: FleetConfig, task: str, successes: list[AgentResult], 
     (R5, #5). It is a **cross-module format contract** with
     ``judge_grade.parse_grades``, which requires the same nonce — see the coupling
     test. Because a specialist never sees this prompt, it cannot pre-plant the
-    nonce; a ``=== LANE:`` a specialist quotes (and the judge echoes) lacks the
-    nonce and is ignored, closing the single-injected-marker false-full.
+    nonce; a ``=== LANE:`` a specialist quotes (and the judge *accidentally* echoes)
+    lacks the nonce and is ignored, closing the accidental/quoted-echo false-full.
+    **Residual (not closed):** the nonce is disclosed to the judge here, so a
+    specialist that *semantically injects* the judge — instructing it to copy the
+    nonce into a forged marker — can still forge a grade if the judge obeys. That is
+    the documented semantic-injection residual (see SECURITY.md), not something the
+    nonce defends against.
     """
     base = config.judge.prompt or (
         "Grade each specialist's output independently. "

@@ -8,17 +8,26 @@ not a claim that Cadre is "injection-proof."
 
 ## What is defended (structural hardening)
 
-- **Display spoofing.** Every model-influenced string printed to the terminal or
-  written to a run folder (`~/.cadre/runs/`) — specialist output, the synthesis or
-  judge body, error text, and model-derived `manifest.json` fields — is stripped of
-  terminal-escape, control, and bidi bytes before it is rendered. A tampered fleet or
-  an injected document cannot forge a provenance row, hide a warning, or move your
-  cursor. Legitimate content renders unchanged.
-- **Forged judge lane markers.** The judge convergence mode grades each lane behind a
-  `=== LANE: <role> <nonce> ===` marker carrying a per-run nonce. The caller-layer
-  parser requires that nonce, so a `=== LANE:` a specialist quotes (and the judge
-  echoes) — which cannot carry the nonce, because a specialist never sees the judge
-  prompt — is ignored. A quoted or injected marker can no longer forge a grade.
+- **Terminal-escape display spoofing.** Every model-influenced string printed to the
+  terminal or written to a run folder (`~/.cadre/runs/`) — specialist output, the
+  synthesis or judge body, error text, and model-derived `manifest.json` fields — is
+  stripped of terminal-escape, control, and bidi bytes before it is rendered, so it
+  cannot move your cursor, clear a line, or hide a printed warning. Legitimate content
+  renders unchanged. **This does not defend the report *grammar*:** a model body can
+  contain plain text like `[ok  ] ghost (1/1)` or `--- role ---` with no escape bytes,
+  which renders inertly in the body but can mimic a real provenance row or lane
+  delimiter to a skimming reader or an agent grepping for those lines. Structurally
+  framing model-output bodies so they cannot impersonate harness rows is a bounded
+  residual, tracked as a fast-follow.
+- **Accidentally-echoed / quoted judge lane markers.** The judge convergence mode grades
+  each lane behind a `=== LANE: <role> <nonce> ===` marker carrying a per-run nonce. The
+  caller-layer parser requires that nonce, so a nonce-free `=== LANE:` — one a specialist
+  quotes in its output and the judge accidentally echoes, which cannot carry the nonce
+  because a specialist never sees the judge prompt — is ignored. This closes the
+  accidental / quoted-echo false-full. **It does not defend against a semantically
+  injected judge:** a specialist can instruct the judge to copy the nonce (which the
+  judge *does* see, in its own instructions) into a forged marker, and if the judge
+  obeys, that marker authenticates. That path is the semantic-injection residual below.
 - **The fleet preview is a faithful, un-spoofable approval surface.** `--preview`
   renders from the parsed fleet config (not any paraphrase), with every
   fleet-controlled field sanitized and `⚠ PRIVILEGED TOOLS ENABLED` shown when a
@@ -45,6 +54,15 @@ not a claim that Cadre is "injection-proof."
   the specialist→synthesizer fan-in) are read only by a downstream model. Forging one
   manipulates that model's belief — semantic injection, above — not a machine parser,
   so they are intentionally not given the structural nonce treatment.
+- **Report-grammar mimicry (fast-follow).** Model-output bodies are stripped of escape
+  bytes but still render in the same plain-text grammar as trusted harness rows, so a
+  body can contain `[ok  ] ghost (1/1)` or `--- role ---` and read like real provenance
+  to a skimming human or an agent grepping those lines. Framing model bodies so they
+  cannot impersonate harness rows is a bounded residual, tracked as a fast-follow.
+- **Semantically injected judge marker.** The per-run judge nonce closes the
+  accidental/quoted-echo false-full, but a specialist that instructs the judge to copy
+  the nonce (which the judge sees in its instructions) into a forged `=== LANE:` marker
+  can still forge a grade if the judge obeys — a special case of semantic injection.
 - **The agent-driven handoff path is not hardened for untrusted operators.** The
   `cadre-fleet` skill (an agent driving Cadre conversationally) relies on a
   procedural preview-then-approve control, not a forgery-proof approval artifact, and
