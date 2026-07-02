@@ -2746,5 +2746,43 @@ class TestIterativeSynthesisMd(unittest.TestCase):
         self.assertNotIn("chain halted", md)
 
 
+class TestCaptureSinkCompleteness(unittest.TestCase):
+    """Codex #5 findings: the failure-note capture path and the fleet-controlled
+    manifest identity fields must be sanitized like every other capture sink."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_synth_failure_note_sanitized_in_synthesis_md(self):
+        result = _result(
+            synthesis=None, ok=False, synth_ok=False,
+            notes=["synthesizer failed: boom \x1b[2K forged"],
+        )
+        md = _synthesis_md(result)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
+
+    def test_judge_failure_note_sanitized_in_synthesis_md(self):
+        result = _judge_result(
+            judge=None, judge_ok=False, ok=False,
+            notes=["judge failed: boom \x1b[31m forged"],
+        )
+        md = _synthesis_md(result)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
+
+    def test_manifest_identity_fields_sanitized(self):
+        # A tampered fleet's provider/model carry an escape byte; the manifest a
+        # consumer prints must not smuggle it (matches the .md blocks + render).
+        lane = _lane(role="web", provider="acme\x1b[2K", model="m\x1b[31m", toolset=["web"])
+        result = _result(specialists=[lane], synthesis="# T\n\nbody", ok=True, synth_ok=True)
+        save_run(_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("\x1b", manifest["lanes"][0]["provider"])
+        self.assertNotIn("\x1b", manifest["lanes"][0]["model"])
+        self.assertNotIn("\x1b", json.dumps(manifest["models"]))
+
+
 if __name__ == "__main__":
     unittest.main()

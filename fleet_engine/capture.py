@@ -528,7 +528,9 @@ def _synthesis_md(result: FleetResult) -> str:
                 (note for note in result.notes if note.startswith("judge failed:")),
                 "judge failed",
             )
-            return f"No judge grade — {judge_note}."
+            # The note embeds adapter/model error text — sanitize before it reaches
+            # synthesis.md (a persisted trust surface), matching the render notes path.
+            return f"No judge grade — {_sanitize(judge_note, multiline=True)}."
         # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
         # over the survivors (DEGRADED with result.judge set — fell through above).
         # #5 U2: the judge text is model output and is now _sanitize'd (multiline=True)
@@ -572,7 +574,8 @@ def _synthesis_md(result: FleetResult) -> str:
         (n for n in result.notes if "synthesizer failed" in n),
         "synthesizer failed",
     )
-    return f"No synthesis — {synth_note}."
+    # Embeds adapter/model error text — sanitize before writing to synthesis.md.
+    return f"No synthesis — {_sanitize(synth_note, multiline=True)}."
 
 
 def _representative_file(result: FleetResult, lane, fmap: dict[str, str]) -> str:  # lane: AgentResult
@@ -615,9 +618,11 @@ def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[d
         round_out: list[dict] = []
         for lane in round_list:
             round_out.append({
-                "role": lane.role,
-                "provider": lane.provider,
-                "model": lane.model,
+                # Fleet-controlled identity fields — sanitized so a manifest a consumer
+                # prints can't be spoofed, matching the .md attribution blocks + render.
+                "role": _sanitize(lane.role),
+                "provider": _sanitize(lane.provider),
+                "model": _sanitize(lane.model),
                 "ok": lane.ok,
                 # Model/adapter output — sanitized so a manifest a consumer prints
                 # can't be spoofed (#5 U2); None preserved as JSON null.
@@ -639,17 +644,21 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
     index to the files — even when sanitization caused two roles to share a base
     name and one was renamed to ``...-2.md``.
     """
+    # Fleet-controlled identity strings are sanitized throughout the manifest so a
+    # consumer that prints it can't be spoofed — matching the .md attribution blocks
+    # and the terminal render. (task stays raw below: it is untrusted *input*, and
+    # sanitizing it would corrupt the record of what was actually run — KTD6.)
     participating_models = [
-        {"provider": s.provider, "model": s.model}
+        {"provider": _sanitize(s.provider), "model": _sanitize(s.model)}
         for s in result.specialists
     ]
 
     lanes = []
     for lane, filename in zip(result.specialists, lane_filenames):
         lanes.append({
-            "role": lane.role,
-            "provider": lane.provider,
-            "model": lane.model,
+            "role": _sanitize(lane.role),
+            "provider": _sanitize(lane.provider),
+            "model": _sanitize(lane.model),
             "ok": lane.ok,
             # Model/adapter output — sanitized to match the rounds manifest + render
             # (#5 U2); None preserved as JSON null.
@@ -665,14 +674,14 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
     # for synthesize and collect fleets.  Key on convergence (KTD1) — not the
     # optional block — so a collect/judge fleet with a stray block is still correct.
     manifest: dict = {
-        "fleet": result.fleet,
-        "task": result.task,
+        "fleet": _sanitize(result.fleet),
+        "task": result.task,  # untrusted INPUT — deliberately raw (sanitizing corrupts the run record; KTD6)
         "title": _synthesis_title(result),
         "timestamp": datetime.now().isoformat(),
         "models": participating_models,
-        "synthesizer": {"provider": cfg.synthesis.provider, "model": cfg.synthesis.model}
+        "synthesizer": {"provider": _sanitize(cfg.synthesis.provider), "model": _sanitize(cfg.synthesis.model)}
                        if result.convergence == "synthesize" else None,
-        "judge": {"provider": cfg.judge.provider, "model": cfg.judge.model}
+        "judge": {"provider": _sanitize(cfg.judge.provider), "model": _sanitize(cfg.judge.model)}
                  if result.convergence == "judge" else None,
         "convergence": result.convergence,
         "topology": result.topology,                     # "parallel" or "sequential"
