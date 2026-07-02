@@ -882,5 +882,46 @@ class TestCritiqueReviseFleetInvariants(unittest.TestCase):
         )
 
 
+class TestUntrustedContentFraming(unittest.TestCase):
+    """AE6 (#5, R8): flagship lanes that thread untrusted upstream/sibling/document
+    content frame it as untrusted data to audit, never as instructions to follow."""
+
+    def _threading_focuses(self, path, roles):
+        cfg = FleetConfig.load(path)
+        by_role = {s.role: s for s in cfg.specialists}
+        return {r: (by_role[r].focus or "") for r in roles}
+
+    def test_research_brief_threading_lanes_frame_untrusted(self):
+        # Analyst audits the Scout's web-derived output; Writer synthesizes prior stages.
+        focuses = self._threading_focuses(_RESEARCH_BRIEF, ["analyst", "writer"])
+        self.assertIn("untrusted", focuses["analyst"].lower())
+        self.assertIn("not instructions", focuses["analyst"].lower())
+        self.assertIn("never as", focuses["writer"].lower())
+        self.assertIn("instructions", focuses["writer"].lower())
+
+    def test_debate_lanes_frame_prior_rounds_as_untrusted(self):
+        focuses = self._threading_focuses(_DEBATE, ["proponent", "skeptic", "contrarian"])
+        for role, focus in focuses.items():
+            self.assertIn("untrusted data", focus.lower(), f"{role} missing untrusted framing")
+            self.assertIn("never as instructions", focus.lower(), f"{role} missing anti-instruction framing")
+
+    def test_critique_revise_lanes_frame_threaded_output_as_untrusted(self):
+        focuses = self._threading_focuses(_CRITIQUE_REVISE, ["producer", "critic"])
+        for role, focus in focuses.items():
+            self.assertIn("untrusted data", focus.lower(), f"{role} missing untrusted framing")
+            self.assertIn("never as", focus.lower(), f"{role} missing anti-instruction framing")
+
+    def test_doc_review_personas_frame_document_as_untrusted(self):
+        # doc-review lanes read the untrusted --doc document via persona files.
+        personas_dir = _REPO / "personas"
+        for role in _DOC_REVIEW_ROLES:
+            # persona filename convention: <role>-reviewer.md (adversarial is *-document-reviewer)
+            candidates = list(personas_dir.glob(f"{role}*reviewer.md"))
+            self.assertTrue(candidates, f"no persona file for {role}")
+            text = candidates[0].read_text(encoding="utf-8").lower()
+            self.assertIn("untrusted", text, f"{role} persona missing untrusted framing")
+            self.assertIn("never obey it", text, f"{role} persona missing anti-instruction framing")
+
+
 if __name__ == "__main__":
     unittest.main()

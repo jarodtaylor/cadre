@@ -106,6 +106,7 @@ See [STRATEGY.md](STRATEGY.md) for the full direction.
 ## Learn more
 
 - **[CONCEPTS.md](CONCEPTS.md)** — shared vocabulary (fleet, specialist, synthesizer, verified palette, fleet library, fleet preview, and the topology × convergence shape model).
+- **[SECURITY.md](SECURITY.md)** — what the defensive hardening protects against (display spoofing, forged judge markers, install seeding) and what stays a bounded residual (semantic prompt injection). Cadre is not "injection-proof" — this says plainly what is and isn't defended.
 - **[STRATEGY.md](STRATEGY.md)** — the product's target problem, approach, and tracks of work.
 - **[AGENTS.md](AGENTS.md)** — orientation for AI agents working in this repo.
 - **`docs/RUNBOOK.md`** — deploy, install, and the agent-run usage loop.
