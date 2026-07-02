@@ -6,6 +6,7 @@ Fixtures build FleetResult/AgentResult directly — no live model calls.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -1175,7 +1176,9 @@ class TestOnDiskIdentitySanitization(unittest.TestCase):
     role/provider/model are attacker-controllable (fleet tampering) and are used as
     markdown delimiters in persisted run records, which vouch for attribution. A
     newline could forge a second header or '--- role ---' block. They are _sanitize'd
-    exactly as the terminal renderer does; lane.text (content) stays raw.
+    exactly as the terminal renderer does. lane.text (content) is ALSO sanitized as of
+    #5 U2, but with multiline=True so its newlines/tabs survive (plain content is
+    byte-identical) — see the body-preservation test below.
     """
 
     def test_specialist_md_role_newline_cannot_forge_header(self):
@@ -1198,11 +1201,29 @@ class TestOnDiskIdentitySanitization(unittest.TestCase):
         delimiters = [ln for ln in md.splitlines() if ln.startswith("--- ")]
         self.assertEqual(len(delimiters), 1)  # only the one legit delimiter, no forged second
 
-    def test_collect_synthesis_md_body_text_preserved_raw(self):
-        # CONTENT (lane.text) is NOT an identity claim — it stays raw, multi-line intact.
+    def test_collect_synthesis_md_body_newlines_preserved(self):
+        # CONTENT (lane.text) is sanitized with multiline=True (#5 U2): control bytes
+        # are stripped but newlines/tabs survive, so plain multi-line text is intact.
         lane = _lane(role="web", toolset=["web"], text="line one\nline two", ok=True)
         md = _synthesis_md(_collect_result(specialists=[lane]))
         self.assertIn("line one\nline two", md)
+
+    def test_specialist_md_output_escape_stripped(self):
+        # The per-lane .md Output body is the primary on-disk artifact for a synthesize
+        # fleet — a control byte in lane.text must be stripped (#5 U2).
+        lane = _lane(role="web", toolset=["web"], text="finding \x1b[2K forged\nnext line", ok=True)
+        md = _specialist_md(lane)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("finding", md)
+        self.assertIn("next line", md)  # multiline preserved
+
+    def test_specialist_md_error_escape_stripped(self):
+        # The per-lane .md Error body (lane.error, adapter output) is likewise sanitized.
+        lane = _lane(role="web", toolset=["web"], ok=False, error="boom \x1b[31m red")
+        lane.text = None
+        md = _specialist_md(lane)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
 
 
 class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
@@ -1255,10 +1276,14 @@ class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
 # Judge convergence fixtures (U5)
 # ---------------------------------------------------------------------------
 
+# Per-run judge marker nonce (R5, #5): the engine sets result.judge_marker_nonce
+# and the parser requires it, so judge fixtures carry it in their markers.
+_JUDGE_NONCE = "cap7x2ab"
+
 # Canonical two-lane judge text that parse_grades can fully parse.
 _JUDGE_TEXT_FULL = (
-    "=== LANE: web ===\nGrade: A\nRationale: Excellent grounding.\n\n"
-    "=== LANE: social ===\nGrade: B\nRationale: Good social coverage."
+    f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: Excellent grounding.\n\n"
+    f"=== LANE: social {_JUDGE_NONCE} ===\nGrade: B\nRationale: Good social coverage."
 )
 
 
@@ -1303,6 +1328,7 @@ def _judge_result(
         status=_derive_status(ok, None, judge_ok, "judge"),
         judge=judge,
         judge_ok=judge_ok,
+        judge_marker_nonce=_JUDGE_NONCE,
     )
 
 
@@ -1494,7 +1520,7 @@ class TestJudgeManifest(unittest.TestCase):
     def test_judge_manifest_partial_coverage_ungraded(self):
         """Partial coverage: ungraded lists the lane whose role was not graded."""
         # Only "web" graded — "social" will land in ungraded.
-        partial_judge_text = "=== LANE: web ===\nGrade: A\nRationale: Good."
+        partial_judge_text = f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: Good."
         result = _judge_result(judge=partial_judge_text, judge_ok=True)
         manifest = self._load_manifest(result=result)
         self.assertEqual(len(manifest["grades"]), 1)
@@ -1608,21 +1634,24 @@ class TestJudgeSaveRunNoRaise(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestJudgeGradeUnmutated(unittest.TestCase):
-    """The judge grade text must reach disk UNCHANGED — _sanitize is the render boundary's job.
+class TestJudgeGradeSanitizedOnDisk(unittest.TestCase):
+    """The judge grade text is sanitized before it reaches disk (#5 U2, reverses KTD8).
 
-    KTD8: capture writes the judge text verbatim; the terminal renderer (_sanitize) is
-    the only place that strips control characters. A terminal escape in the judge text
-    must survive in synthesis.md — if capture sanitized it, that would corrupt the record.
+    A persisted synthesis.md is a trust surface a human/agent reads back, so it must be
+    as un-spoofable as the terminal render (which already sanitizes judge text). A
+    terminal escape in the judge text must NOT survive in synthesis.md.
     """
 
     def setUp(self):
         self.run_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.run_dir)
 
-    def test_terminal_escape_survives_in_synthesis_md(self):
-        """A terminal escape in the judge text is preserved verbatim on disk (KTD8)."""
-        # Use a clearly-synthetic ANSI escape as a canary — _sanitize would strip it.
+    def test_terminal_escape_stripped_in_synthesis_md(self):
+        """A terminal escape in the judge text is stripped on disk (#5 U2 — reverses KTD8).
+
+        The on-disk record is a trust surface a human/agent reads back, so it must
+        be as un-spoofable as the terminal render (which already sanitizes judge text).
+        """
         escape = "\x1b[31m"
         judge_text_with_escape = (
             f"{escape}=== LANE: web ===\nGrade: A\nRationale: {escape}Bold finding."
@@ -1630,8 +1659,9 @@ class TestJudgeGradeUnmutated(unittest.TestCase):
         result = _judge_result(judge=judge_text_with_escape)
         save_run(_judge_cfg(), result, self.run_dir)
         on_disk = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
-        self.assertIn(escape, on_disk,
-                      "KTD8 violated: capture _sanitize'd the judge text; it must stay raw")
+        self.assertNotIn(escape, on_disk,
+                         "#5 U2: capture must sanitize the judge text; the ESC byte must be gone")
+        self.assertIn("Bold finding.", on_disk)  # visible content survives
 
 
 # ---------------------------------------------------------------------------
@@ -1648,6 +1678,13 @@ class _FakeClient:
     def run(self, *, role, provider, model, prompt, toolset=()):
         kind, payload = self.behavior.get(role, ("ok", f"{role}-output"))
         ok = kind == "ok"
+        # Nonce-aware judge fake: a real judge reads the per-run marker nonce from
+        # its prompt and reproduces it. Model that by substituting the nonce we can
+        # read out of the prompt for the <NONCE> placeholder in the payload (R5, #5).
+        if ok and payload and "<NONCE>" in payload:
+            m = re.search(r"=== LANE: \S+ ([0-9a-f]+) ===", prompt)
+            assert m, "fake judge could not find the marker nonce in its prompt"
+            payload = payload.replace("<NONCE>", m.group(1))
         return AgentResult(
             role=role, provider=provider, model=model, ok=ok,
             text=payload if ok else None, error=None if ok else payload,
@@ -1662,10 +1699,12 @@ class TestJudgeEndToEnd(unittest.TestCase):
     path in one test, catching any edge-wiring break introduced by U2–U5.
     """
 
-    # Canonical judge text: both lanes graded → parse_grades returns 2 entries, 0 ungraded.
+    # Canonical judge text: both lanes graded → parse_grades returns 2 entries, 0
+    # ungraded. <NONCE> is substituted with the run's actual marker nonce by the
+    # nonce-aware _FakeClient (mirrors a real judge reproducing the nonce, R5 #5).
     _JUDGE_RESPONSE = (
-        "=== LANE: web ===\nGrade: A\nRationale: Strong grounding.\n\n"
-        "=== LANE: social ===\nGrade: B\nRationale: Adequate social coverage."
+        "=== LANE: web <NONCE> ===\nGrade: A\nRationale: Strong grounding.\n\n"
+        "=== LANE: social <NONCE> ===\nGrade: B\nRationale: Adequate social coverage."
     )
 
     def setUp(self):
@@ -1690,7 +1729,12 @@ class TestJudgeEndToEnd(unittest.TestCase):
         """run_fleet returns judge_ok=True and the raw judge text."""
         _, result = self._run()
         self.assertIs(result.judge_ok, True)
-        self.assertEqual(result.judge, self._JUDGE_RESPONSE)
+        # The fake judge reproduced the run's nonce, so result.judge carries the
+        # real marker (not the <NONCE> placeholder) with the grades intact.
+        self.assertNotIn("<NONCE>", result.judge)
+        self.assertIn("Grade: A", result.judge)
+        self.assertIsNotNone(result.judge_marker_nonce)
+        self.assertIn(f"=== LANE: web {result.judge_marker_nonce} ===", result.judge)
         self.assertEqual(result.convergence, "judge")
 
     def test_e2e_render_result_contains_judge_text(self):
@@ -2700,6 +2744,62 @@ class TestIterativeSynthesisMd(unittest.TestCase):
         self.assertIn("specialists failed", md)
         self.assertIn("judge mode", md)
         self.assertNotIn("chain halted", md)
+
+
+class TestCaptureSinkCompleteness(unittest.TestCase):
+    """Codex #5 findings: the failure-note capture path and the fleet-controlled
+    manifest identity fields must be sanitized like every other capture sink."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_synth_failure_note_sanitized_in_synthesis_md(self):
+        result = _result(
+            synthesis=None, ok=False, synth_ok=False,
+            notes=["synthesizer failed: boom \x1b[2K forged"],
+        )
+        md = _synthesis_md(result)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
+
+    def test_judge_failure_note_sanitized_in_synthesis_md(self):
+        result = _judge_result(
+            judge=None, judge_ok=False, ok=False,
+            notes=["judge failed: boom \x1b[31m forged"],
+        )
+        md = _synthesis_md(result)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
+
+    def test_manifest_identity_fields_sanitized(self):
+        # A tampered fleet's provider/model carry an escape byte; the manifest a
+        # consumer prints must not smuggle it (matches the .md blocks + render).
+        lane = _lane(role="web", provider="acme\x1b[2K", model="m\x1b[31m", toolset=["web"])
+        result = _result(specialists=[lane], synthesis="# T\n\nbody", ok=True, synth_ok=True)
+        save_run(_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("\x1b", manifest["lanes"][0]["provider"])
+        self.assertNotIn("\x1b", manifest["lanes"][0]["model"])
+        self.assertNotIn("\x1b", json.dumps(manifest["models"]))
+
+    def test_manifest_toolset_entries_sanitized(self):
+        lane = _lane(role="web", toolset=["web\x1b[2K", "x_search"])
+        result = _result(specialists=[lane], synthesis="# T\n\nbody", ok=True, synth_ok=True)
+        save_run(_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("\x1b", json.dumps(manifest["lanes"][0]["toolset"]))
+        self.assertEqual(manifest["lanes"][0]["toolset"], ["web[2K", "x_search"])  # [] stays list
+
+    def test_manifest_grade_entry_identity_sanitized(self):
+        # grade-entry role/model (from the matched lane) are sanitized like lanes[].
+        lane = _lane(role="web", model="m\x1b[31m", toolset=["web"])
+        judge_text = f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: ok.\n"
+        result = _judge_result(judge=judge_text, judge_ok=True, specialists=[lane])
+        save_run(_judge_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["grades"])  # the lane graded
+        self.assertNotIn("\x1b", json.dumps(manifest["grades"]))
 
 
 if __name__ == "__main__":

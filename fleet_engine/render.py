@@ -17,6 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
+from fleet_engine.text_safety import sanitize
 from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_CAP
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
@@ -71,45 +72,10 @@ def _cost_warning(provider: str, model: str) -> str | None:
     return "  ⚠ bills at API rates inside Hermes"
 
 
-# Unicode line/paragraph separators and bidi format controls are never legitimate
-# in a fleet field; >=0xA0 would otherwise pass them through and re-enable the
-# fake-line / display-spoof the C0/C1 strip closes.
-_UNSAFE_UNICODE = frozenset(
-    "  "                      # line / paragraph separators
-    "‪‫‬‭‮"    # bidi embeddings / overrides
-    "⁦⁧⁨⁩"          # bidi isolates
-)
-
-
-def _sanitize(text: str, *, multiline: bool = False) -> str:
-    """Strip terminal-control characters from fleet-controlled text before display.
-
-    A fleet YAML is attacker-controllable (library tampering — see the cadre-fleet
-    SKILL.md Safety section), and its strings flow into this preview, which is the
-    operative human-okay control. An embedded ANSI/cursor escape sequence could
-    otherwise overwrite or hide a printed warning (e.g. the privileged-tools line),
-    spoofing the very output the human approves. Drop C0 controls (0x00–0x1F),
-    DEL (0x7F), and C1 (0x80–0x9F): removing the ESC/CR/BS bytes defangs any
-    sequence (a residual ``[2J`` then renders as inert text). Also drops Unicode
-    line/paragraph separators (U+2028, U+2029) and bidi format controls
-    (U+202A–U+202E, U+2066–U+2069), which >=0xA0 would otherwise pass through and
-    re-enable the fake-line / display-spoof the C0/C1 strip closes. Newlines survive
-    only for the multi-line synthesis prompt; TAB is also preserved in multiline mode
-    only; elsewhere both are dropped so a single-line field cannot inject a fake line.
-    Printable Unicode (>= 0xA0) other than the excluded set passes through untouched,
-    so a legitimate prompt renders byte-identically.
-    """
-    return "".join(
-        ch
-        for ch in text
-        if (
-            (ch == "\n" and multiline)
-            or (ch == "\t" and multiline)
-            or (0x20 <= ord(ch) <= 0x7E)
-            or ord(ch) >= 0xA0
-        )
-        and ch not in _UNSAFE_UNICODE
-    )
+# The sanitizer now lives in fleet_engine.text_safety (GH #23 — a shared trust
+# boundary imported across modules deserves a public home). Keep the private
+# alias so render's in-file call sites and any legacy importer keep working.
+_sanitize = sanitize
 
 
 def render_fleet_preview(
@@ -405,11 +371,11 @@ def render_result(result: FleetResult) -> str:
         # outside the per-lane blocks (an overall summary, a ranking, cross-lane notes);
         # the parsed structure is for the manifest, not the report (plan §High-Level
         # Design). parse_grades drives ONLY the partial-coverage note here. Grade text
-        # is sanitized (KTD8); specialist r.text is model output and intentionally NOT
-        # sanitized (deferred #5/#23).
+        # and specialist r.text are both sanitized (#5 U2 — model output can carry
+        # escape bytes that spoof a provenance row or hide a warning on this surface).
         judge_text = result.judge or ""
         surviving = [(r.role, r.model) for r in result.successes]
-        pg = parse_grades(judge_text, surviving)
+        pg = parse_grades(judge_text, surviving, result.judge_marker_nonce)
         if judge_text:
             out.append(f"\n{_sanitize(judge_text, multiline=True)}")
         # Partial-coverage note (R14/AE7): only when we parsed structure AND a survivor
@@ -419,15 +385,15 @@ def render_result(result: FleetResult) -> str:
             out.append(f"\nnote: {len(pg.ungraded)} lane(s) not graded by judge: {ungraded_roles}")
         # Attributed specialist outputs always follow.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
     elif result.synthesis:
-        out.append(result.synthesis)
+        out.append(_sanitize(result.synthesis, multiline=True))
     elif result.successes:
         # No synthesis (synthesizer failed) but lanes succeeded — surface their raw
         # findings in labeled sections so the user still gets the work, not just
         # provenance rows.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
     if result.threading_truncated:
         # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
         # iterative round (inter-round) produced threaded output that exceeded
@@ -435,10 +401,13 @@ def render_result(result: FleetResult) -> str:
         unit = "inter-round" if result.topology == "iterative" else "inter-stage"
         out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
-    # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
-    # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,
-    # result.synthesis) is deliberately NOT stripped here — that's the deferred
-    # injection->terminal chain (GH #5), not this surface's job.
+    # Every fleet/model-derived field on this surface is sanitized against escape
+    # bytes: the identity fields (fleet/role/provider/model) and r.error
+    # (model/adapter output) so neither can smuggle a control sequence into the row
+    # it renders (#5 U2). r.text/synthesis are sanitized above where they render.
+    # NOTE: this strips escapes, not plain-text grammar — a model body can still
+    # print a look-alike "[ok  ] x" line inertly (report-grammar mimicry residual,
+    # SECURITY.md); framing model bodies is a tracked fast-follow.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"
@@ -448,14 +417,17 @@ def render_result(result: FleetResult) -> str:
             suffix = ""
         elif r.timed_out:
             tag = "TIMEOUT"
-            suffix = f": {r.error}" if r.error else ""
+            suffix = f": {_sanitize(r.error)}" if r.error else ""
         else:
             tag = "FAIL"
-            suffix = f": {r.error}" if r.error else ""
+            suffix = f": {_sanitize(r.error)}" if r.error else ""
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")
-        out.extend(f"  - {n}" for n in result.notes)
+        # notes embed fleet-controlled role names and adapter error text
+        # (e.g. "specialist 'x' failed: <error>") — sanitize so this same-surface
+        # block can't forge a row or hide a warning the provenance rows above guard (#5 U2).
+        out.extend(f"  - {_sanitize(n)}" for n in result.notes)
     return "\n".join(out)
 
 

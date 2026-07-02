@@ -79,6 +79,19 @@ def _seed_files(
     """
     old_umask = os.umask(0o077)
     try:
+        # Directory-level symlink guard (#5, R7): the per-file O_NOFOLLOW below
+        # refuses a symlinked *file*, but mkdir(exist_ok=True) silently succeeds
+        # through a symlinked *directory* — an attacker-planted ~/.cadre/fleets ->
+        # /elsewhere would then receive our seeds. Reject a symlinked dest_dir
+        # before writing (lstat does not follow the link). Degrade like the
+        # create-failure branch: warn and skip, never crash the install.
+        if dest_dir.is_symlink():
+            print(
+                f"[cadre] warning: refusing to seed into {dest_dir}: it is a symlink "
+                "(possible tampering); remove it and re-run to seed.",
+                file=sys.stderr,
+            )
+            return
         try:
             dest_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError as exc:

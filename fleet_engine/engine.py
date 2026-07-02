@@ -38,6 +38,7 @@ path is testable against a fake with no live calls.
 from __future__ import annotations
 
 import queue
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -106,6 +107,7 @@ class FleetResult:
     status: FleetStatus = FleetStatus.FAILED         # explicit tri-state; set at every run_fleet return point
     judge: str | None = None                         # judge's raw text, or None if judge didn't run or failed
     judge_ok: bool | None = None                     # None=not attempted; True=succeeded; False=ran+failed
+    judge_marker_nonce: str | None = None            # per-run token embedded in the judge === LANE: marker so a nonce-free marker (quoted/injected in specialist text) can't forge a lane boundary (R5, #5); None unless judge mode ran
     threading_truncated: bool = False                # True iff any inter-stage output was capped at CHAIN_STAGE_CAP (sequential inter-stage or iterative inter-round; always False for parallel)
     terminal_produced: bool | None = None            # None=not a chain run (parallel); True=terminal lane produced output; False=terminal lane ran but produced nothing, or chain broke before reaching it (terminal lane skipped)
     rounds: list[list[AgentResult]] | None = None   # per-round list of per-lane results (iterative audit transcript); None for non-iterative runs (parallel/sequential)
@@ -182,13 +184,25 @@ def _synthesis_prompt(config: FleetConfig, task: str, successes: list[AgentResul
     return f"{base}\n\nTask: {task}\n\nSpecialist findings:\n{findings}"
 
 
-def _judge_prompt(config: FleetConfig, task: str, successes: list[AgentResult]) -> str:
+def _judge_prompt(config: FleetConfig, task: str, successes: list[AgentResult], marker_nonce: str) -> str:
     """Build the prompt sent to the judge over the surviving specialist outputs.
 
     Each survivor is labeled by its exact ``role`` string — the stable key the
-    caller-layer parser (U3) uses to match grade entries back to lanes. The
-    format contract below is pinned to the parser's expected markers so label
-    drift degrades toward a false-partial, never a false-full (KTD9).
+    caller-layer parser uses to match grade entries back to lanes. The format
+    contract below is pinned to the parser's expected markers so label drift
+    degrades toward a false-partial, never a false-full (KTD9).
+
+    ``marker_nonce`` is a per-run token embedded after the role in every marker
+    (R5, #5). It is a **cross-module format contract** with
+    ``judge_grade.parse_grades``, which requires the same nonce — see the coupling
+    test. Because a specialist never sees this prompt, it cannot pre-plant the
+    nonce; a ``=== LANE:`` a specialist quotes (and the judge *accidentally* echoes)
+    lacks the nonce and is ignored, closing the accidental/quoted-echo false-full.
+    **Residual (not closed):** the nonce is disclosed to the judge here, so a
+    specialist that *semantically injects* the judge — instructing it to copy the
+    nonce into a forged marker — can still forge a grade if the judge obeys. That is
+    the documented semantic-injection residual (see SECURITY.md), not something the
+    nonce defends against.
     """
     base = config.judge.prompt or (
         "Grade each specialist's output independently. "
@@ -198,12 +212,13 @@ def _judge_prompt(config: FleetConfig, task: str, successes: list[AgentResult]) 
     role_list = ", ".join(r.role for r in successes)
     example_role = successes[0].role if successes else "role-name"
     format_block = (
-        "\n\nFor each specialist lane listed above, output a block in this exact format:\n\n"
-        f"=== LANE: {example_role} ===\n"
+        "\n\nFor each specialist lane listed above, output a block in this exact format\n"
+        f"(reproduce the token {marker_nonce} verbatim after the role — it authenticates the marker):\n\n"
+        f"=== LANE: {example_role} {marker_nonce} ===\n"
         "Grade: <a score, letter grade, or PASS/FAIL — your choice of scale>\n"
         "Rationale: <your justification; may span multiple lines>\n\n"
-        "Copy each lane's exact role string verbatim into the === LANE: <role> === marker — "
-        "never paraphrase or rename it. "
+        f"Copy each lane's exact role string verbatim into the === LANE: <role> {marker_nonce} === marker — "
+        f"never paraphrase or rename it, and always include the {marker_nonce} token. "
         f"Output one block per specialist, in any order, for these roles: {role_list}."
     )
     return f"{base}\n\nTask: {task}\n\nSpecialist findings:\n{findings}{format_block}"
@@ -478,13 +493,22 @@ def _run_convergence(
         # (daemon thread + deadline), but with toolset=[] explicit (KTD6) and its own progress
         # events and result fields (KTD2).
         progress(JudgeStarted(survivors=len(successes)))
+        # Per-run marker nonce (R5, #5): unpredictable to the specialists (who never
+        # see the judge prompt), embedded in the === LANE: <role> <nonce> === marker
+        # the judge is told to reproduce. The caller-layer parser requires the nonce,
+        # so a nonce-free === LANE: (a specialist quoting the marker in its output, which
+        # the judge then echoes) can't forge a lane boundary. Set on result here so it
+        # reaches both parse_grades consumers (render, capture) via FleetResult across
+        # all three topologies (all route through this helper). Pure stdlib, no I/O.
+        nonce = secrets.token_hex(16)  # 128-bit — this is the anti-forgery trust boundary
+        result.judge_marker_nonce = nonce
         judge_started = _start_daemon(
             lambda: client.run(
                 role="judge",
                 provider=config.judge.provider,
                 model=config.judge.model,
                 toolset=[],  # fail-closed zero tools over untrusted specialist text (KTD6)
-                prompt=_judge_prompt(config, task, successes),
+                prompt=_judge_prompt(config, task, successes, nonce),
             ),
             name="fleet-judge",
         )

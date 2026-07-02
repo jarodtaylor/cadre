@@ -27,7 +27,7 @@ from typing import Optional
 import yaml
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.render import _sanitize  # caller-layer sibling; render does not import this module (no cycle)
+from fleet_engine.text_safety import sanitize as _sanitize  # shared trust boundary (GH #23)
 
 # Default palette location — mirrors the CADRE_RUN_DIR convention in capture.py.
 DEFAULT_PALETTE_PATH = "~/.cadre/palette.yaml"

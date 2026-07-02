@@ -79,6 +79,12 @@ def make_lane(
     )
 
 
+# Per-run judge marker nonce (R5, #5): judge fixtures carry it in their markers,
+# and make_result sets result.judge_marker_nonce to it for judge-mode results so
+# the parser (which requires the nonce) matches.
+_R_NONCE = "rnd7x2ab"
+
+
 def make_result(
     fleet="test-fleet",
     task="test task",
@@ -90,8 +96,13 @@ def make_result(
     convergence="synthesize",
     judge=None,
     judge_ok=None,
+    judge_marker_nonce=None,
 ):
     """Return a FleetResult; caller provides the specialists list and result state."""
+    # Judge-mode results get the fixture nonce by default so the nonced markers in
+    # the judge-text fixtures parse; callers can override explicitly.
+    if judge_marker_nonce is None and convergence == "judge":
+        judge_marker_nonce = _R_NONCE
     return FleetResult(
         fleet=fleet,
         task=task,
@@ -103,6 +114,7 @@ def make_result(
         convergence=convergence,
         judge=judge,
         judge_ok=judge_ok,
+        judge_marker_nonce=judge_marker_nonce,
     )
 
 
@@ -1041,13 +1053,37 @@ class TestRenderResultSanitizesConfigFields(unittest.TestCase):
         rendered = render_result(result)
         self.assertNotIn("\x1b", rendered)
 
-    def test_model_output_not_sanitized(self):
-        """r.text and result.synthesis are NOT stripped (model output, deferred chain)."""
+    def test_model_output_is_sanitized(self):
+        """r.text and result.synthesis ARE stripped (#5 U2 — model output can spoof this surface)."""
         lane = make_lane(role="web", ok=True, text="output with \x1b[31m escape")
         result = make_result(specialists=[lane], synthesis="synth with \x1b escape", synth_ok=True, ok=True)
         rendered = render_result(result)
-        # The ESC in text and synthesis must still be present (not stripped by render_result).
-        self.assertIn("\x1b", rendered)
+        # Synthesize mode renders the synthesis body (not per-lane text); its ESC is
+        # stripped while the visible words survive.
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("synth with", rendered)
+
+    def test_notes_section_is_sanitized(self):
+        """result.notes embed role + adapter error text; the notes block on the same
+        surface must be sanitized too (#5 U2), not just the provenance rows."""
+        lane = make_lane(role="web", ok=True, text="ok")
+        result = make_result(
+            specialists=[lane], synthesis="S", synth_ok=True, ok=True,
+            notes=["specialist 'web' failed: boom \x1b[2K forged"],
+        )
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("boom", rendered)
+
+    def test_specialist_text_is_sanitized_in_collect_mode(self):
+        """In collect mode the per-lane r.text renders — and is sanitized (#5 U2)."""
+        lane = make_lane(role="web", ok=True, text="finding with \x1b[31m escape")
+        result = make_result(
+            specialists=[lane], convergence="collect", synthesis=None, ok=True,
+        )
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("finding with", rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -1111,9 +1147,9 @@ class TestSanitizeUnicodeExclusions(unittest.TestCase):
 
 
 class TestRenderResultTabInSynthesis(unittest.TestCase):
-    """The synthesis text is model output and is NOT sanitized; this test verifies
-    that a multiline synthesis prompt with a tab in the fleet preview (which IS
-    sanitized with multiline=True) preserves the tab."""
+    """Model output IS sanitized with multiline=True (#5 U2), which preserves tabs
+    and newlines while stripping control bytes; this test verifies a multiline field
+    with a tab keeps the tab under multiline=True."""
 
     def setUp(self):
         from fleet_engine.render import _sanitize
@@ -1728,18 +1764,18 @@ class TestRenderFleetPreviewJudge(unittest.TestCase):
 
 # Judge text fixture for two-lane tests.
 _JUDGE_TEXT_TWO_LANES = (
-    "=== LANE: web ===\n"
+    "=== LANE: web rnd7x2ab ===\n"
     "Grade: A\n"
     "Rationale: Strong sourcing.\n"
     "\n"
-    "=== LANE: analysis ===\n"
+    "=== LANE: analysis rnd7x2ab ===\n"
     "Grade: B+\n"
     "Rationale: Solid but could go deeper.\n"
 )
 
 # Judge text fixture for one-lane (partial coverage) tests.
 _JUDGE_TEXT_ONE_LANE = (
-    "=== LANE: web ===\n"
+    "=== LANE: web rnd7x2ab ===\n"
     "Grade: A\n"
     "Rationale: Excellent.\n"
 )
@@ -1896,11 +1932,11 @@ class TestRenderResultJudgeLeadsWithRawText(unittest.TestCase):
         judge_text = (
             "OVERALL: web edged out analysis on sourcing depth.\n"
             "\n"
-            "=== LANE: web ===\n"
+            "=== LANE: web rnd7x2ab ===\n"
             "Grade: A\n"
             "Rationale: Strong sourcing.\n"
             "\n"
-            "=== LANE: analysis ===\n"
+            "=== LANE: analysis rnd7x2ab ===\n"
             "Grade: B+\n"
             "Rationale: Solid.\n"
         )
@@ -1963,14 +1999,14 @@ class TestRenderResultJudgeAllSpecialistsFailed(unittest.TestCase):
 
 
 class TestJudgeGradeTextSanitized(unittest.TestCase):
-    """Grade text is sanitized at render (KTD8); specialist r.text is NOT sanitized."""
+    """Both the judge grade text and specialist r.text are sanitized at render (#5 U2)."""
 
     def test_esc_in_grade_stripped(self):
         """A terminal escape in the judge's grade is stripped; specialist text is clean."""
         # Only the judge text carries the ESC — specialist r.text is clean so
         # assertNotIn("\x1b") is NOT a false pass from an unsanitized lane.
         judge_text = (
-            "=== LANE: web ===\n"
+            "=== LANE: web rnd7x2ab ===\n"
             "Grade: A\x1b[2J\n"
             "Rationale: Good.\n"
         )

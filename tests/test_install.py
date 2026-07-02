@@ -431,6 +431,34 @@ class TestSeedStarterFleets(unittest.TestCase):
         # The symlink target is untouched — seeding refused to follow the link and write through.
         self.assertEqual(sentinel.read_text(), "OPERATOR SECRET")
 
+    def test_symlinked_dest_dir_refused(self):
+        """A symlinked ~/.cadre/fleets *directory* is refused before seeding (#5, R7).
+
+        The per-file O_NOFOLLOW guards a symlinked file; this guards a symlinked
+        destination directory, which mkdir(exist_ok=True) would otherwise follow.
+        """
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir(mode=0o700)
+        fleets_link = self.cadre_home / "fleets"
+        fleets_link.symlink_to(elsewhere, target_is_directory=True)
+
+        rv.seed_starter_fleets(self.repo_root, self.cadre_home)  # must not raise
+
+        # Nothing was written through the symlink into the attacker's target.
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        # The symlink itself was not replaced by a real dir with seeds.
+        self.assertTrue(fleets_link.is_symlink())
+
+    def test_symlinked_dest_dir_refusal_does_not_write_stdout(self):
+        """The dir-symlink refusal warns to stderr, never stdout (stdout stays clean)."""
+        elsewhere = Path(self.tmp) / "attacker-target-2"
+        elsewhere.mkdir(mode=0o700)
+        (self.cadre_home / "fleets").symlink_to(elsewhere, target_is_directory=True)
+        stdout_buf = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buf):
+            rv.seed_starter_fleets(self.repo_root, self.cadre_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
     def test_palette_not_seeded(self):
         """palette.yaml and palette.example.yaml must NOT be seeded."""
         rv.seed_starter_fleets(self.repo_root, self.cadre_home)
