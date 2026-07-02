@@ -1255,10 +1255,14 @@ class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
 # Judge convergence fixtures (U5)
 # ---------------------------------------------------------------------------
 
+# Per-run judge marker nonce (R5, #5): the engine sets result.judge_marker_nonce
+# and the parser requires it, so judge fixtures carry it in their markers.
+_JUDGE_NONCE = "cap7x2ab"
+
 # Canonical two-lane judge text that parse_grades can fully parse.
 _JUDGE_TEXT_FULL = (
-    "=== LANE: web ===\nGrade: A\nRationale: Excellent grounding.\n\n"
-    "=== LANE: social ===\nGrade: B\nRationale: Good social coverage."
+    f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: Excellent grounding.\n\n"
+    f"=== LANE: social {_JUDGE_NONCE} ===\nGrade: B\nRationale: Good social coverage."
 )
 
 
@@ -1303,6 +1307,7 @@ def _judge_result(
         status=_derive_status(ok, None, judge_ok, "judge"),
         judge=judge,
         judge_ok=judge_ok,
+        judge_marker_nonce=_JUDGE_NONCE,
     )
 
 
@@ -1494,7 +1499,7 @@ class TestJudgeManifest(unittest.TestCase):
     def test_judge_manifest_partial_coverage_ungraded(self):
         """Partial coverage: ungraded lists the lane whose role was not graded."""
         # Only "web" graded — "social" will land in ungraded.
-        partial_judge_text = "=== LANE: web ===\nGrade: A\nRationale: Good."
+        partial_judge_text = f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: Good."
         result = _judge_result(judge=partial_judge_text, judge_ok=True)
         manifest = self._load_manifest(result=result)
         self.assertEqual(len(manifest["grades"]), 1)
@@ -1652,6 +1657,13 @@ class _FakeClient:
     def run(self, *, role, provider, model, prompt, toolset=()):
         kind, payload = self.behavior.get(role, ("ok", f"{role}-output"))
         ok = kind == "ok"
+        # Nonce-aware judge fake: a real judge reads the per-run marker nonce from
+        # its prompt and reproduces it. Model that by substituting the nonce we can
+        # read out of the prompt for the <NONCE> placeholder in the payload (R5, #5).
+        if ok and payload and "<NONCE>" in payload:
+            import re as _re
+            m = _re.search(r"=== LANE: \S+ ([0-9a-f]+) ===", prompt)
+            payload = payload.replace("<NONCE>", m.group(1) if m else "")
         return AgentResult(
             role=role, provider=provider, model=model, ok=ok,
             text=payload if ok else None, error=None if ok else payload,
@@ -1666,10 +1678,12 @@ class TestJudgeEndToEnd(unittest.TestCase):
     path in one test, catching any edge-wiring break introduced by U2–U5.
     """
 
-    # Canonical judge text: both lanes graded → parse_grades returns 2 entries, 0 ungraded.
+    # Canonical judge text: both lanes graded → parse_grades returns 2 entries, 0
+    # ungraded. <NONCE> is substituted with the run's actual marker nonce by the
+    # nonce-aware _FakeClient (mirrors a real judge reproducing the nonce, R5 #5).
     _JUDGE_RESPONSE = (
-        "=== LANE: web ===\nGrade: A\nRationale: Strong grounding.\n\n"
-        "=== LANE: social ===\nGrade: B\nRationale: Adequate social coverage."
+        "=== LANE: web <NONCE> ===\nGrade: A\nRationale: Strong grounding.\n\n"
+        "=== LANE: social <NONCE> ===\nGrade: B\nRationale: Adequate social coverage."
     )
 
     def setUp(self):
@@ -1694,7 +1708,12 @@ class TestJudgeEndToEnd(unittest.TestCase):
         """run_fleet returns judge_ok=True and the raw judge text."""
         _, result = self._run()
         self.assertIs(result.judge_ok, True)
-        self.assertEqual(result.judge, self._JUDGE_RESPONSE)
+        # The fake judge reproduced the run's nonce, so result.judge carries the
+        # real marker (not the <NONCE> placeholder) with the grades intact.
+        self.assertNotIn("<NONCE>", result.judge)
+        self.assertIn("Grade: A", result.judge)
+        self.assertIsNotNone(result.judge_marker_nonce)
+        self.assertIn(f"=== LANE: web {result.judge_marker_nonce} ===", result.judge)
         self.assertEqual(result.convergence, "judge")
 
     def test_e2e_render_result_contains_judge_text(self):

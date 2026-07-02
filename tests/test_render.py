@@ -79,6 +79,12 @@ def make_lane(
     )
 
 
+# Per-run judge marker nonce (R5, #5): judge fixtures carry it in their markers,
+# and make_result sets result.judge_marker_nonce to it for judge-mode results so
+# the parser (which requires the nonce) matches.
+_R_NONCE = "rnd7x2ab"
+
+
 def make_result(
     fleet="test-fleet",
     task="test task",
@@ -90,8 +96,13 @@ def make_result(
     convergence="synthesize",
     judge=None,
     judge_ok=None,
+    judge_marker_nonce=None,
 ):
     """Return a FleetResult; caller provides the specialists list and result state."""
+    # Judge-mode results get the fixture nonce by default so the nonced markers in
+    # the judge-text fixtures parse; callers can override explicitly.
+    if judge_marker_nonce is None and convergence == "judge":
+        judge_marker_nonce = _R_NONCE
     return FleetResult(
         fleet=fleet,
         task=task,
@@ -103,6 +114,7 @@ def make_result(
         convergence=convergence,
         judge=judge,
         judge_ok=judge_ok,
+        judge_marker_nonce=judge_marker_nonce,
     )
 
 
@@ -1740,18 +1752,18 @@ class TestRenderFleetPreviewJudge(unittest.TestCase):
 
 # Judge text fixture for two-lane tests.
 _JUDGE_TEXT_TWO_LANES = (
-    "=== LANE: web ===\n"
+    "=== LANE: web rnd7x2ab ===\n"
     "Grade: A\n"
     "Rationale: Strong sourcing.\n"
     "\n"
-    "=== LANE: analysis ===\n"
+    "=== LANE: analysis rnd7x2ab ===\n"
     "Grade: B+\n"
     "Rationale: Solid but could go deeper.\n"
 )
 
 # Judge text fixture for one-lane (partial coverage) tests.
 _JUDGE_TEXT_ONE_LANE = (
-    "=== LANE: web ===\n"
+    "=== LANE: web rnd7x2ab ===\n"
     "Grade: A\n"
     "Rationale: Excellent.\n"
 )
@@ -1908,11 +1920,11 @@ class TestRenderResultJudgeLeadsWithRawText(unittest.TestCase):
         judge_text = (
             "OVERALL: web edged out analysis on sourcing depth.\n"
             "\n"
-            "=== LANE: web ===\n"
+            "=== LANE: web rnd7x2ab ===\n"
             "Grade: A\n"
             "Rationale: Strong sourcing.\n"
             "\n"
-            "=== LANE: analysis ===\n"
+            "=== LANE: analysis rnd7x2ab ===\n"
             "Grade: B+\n"
             "Rationale: Solid.\n"
         )
@@ -1982,7 +1994,7 @@ class TestJudgeGradeTextSanitized(unittest.TestCase):
         # Only the judge text carries the ESC — specialist r.text is clean so
         # assertNotIn("\x1b") is NOT a false pass from an unsanitized lane.
         judge_text = (
-            "=== LANE: web ===\n"
+            "=== LANE: web rnd7x2ab ===\n"
             "Grade: A\x1b[2J\n"
             "Rationale: Good.\n"
         )

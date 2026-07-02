@@ -695,6 +695,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             pg = parse_grades(
                 result.judge or "",
                 [(r.role, r.model) for r in result.successes],
+                result.judge_marker_nonce,
             )
             # grade/rationale are judge model output — sanitize before they land in
             # the manifest a consumer may print (#5 U2). role/model come from the

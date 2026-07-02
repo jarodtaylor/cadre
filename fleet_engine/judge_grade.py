@@ -61,10 +61,10 @@ class ParsedGrades:
 # Internal regex helpers
 # ---------------------------------------------------------------------------
 
-# Matches a LANE marker.  Label is group(1), captured verbatim then .strip()ed.
-# Keyword keywords (=== LANE:) are case-insensitive; the label itself is not
-# touched — matching happens on the raw stripped label (case-sensitive, KTD9).
-_LANE_RE = re.compile(r"===\s*LANE:\s*(.+?)\s*===", re.IGNORECASE)
+# The LANE marker regex is built per-call inside parse_grades from the per-run
+# marker_nonce (R5, #5) — it is not a module constant because the nonce varies.
+# Label is group(1), captured verbatim then .strip()ed; keyword (=== LANE:) is
+# case-insensitive, the label itself is matched case-sensitively (KTD9).
 
 # Matches the first "Grade:" field in a block body (rest of that line only).
 # The value-gap is horizontal whitespace ONLY (`[^\S\n]*`, not `\s*`): a bare
@@ -109,17 +109,31 @@ def _parse_block(block_text: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def parse_grades(judge_text: str, surviving_lanes: list[tuple[str, str]]) -> ParsedGrades:
+def parse_grades(
+    judge_text: str,
+    surviving_lanes: list[tuple[str, str]],
+    marker_nonce: str | None,
+) -> ParsedGrades:
     """Parse the judge's raw text into per-lane structured entries.
 
     ``surviving_lanes`` is the list of ``(role, model)`` the judge was asked
     to grade — callers build it as ``[(r.role, r.model) for r in result.successes]``.
 
+    ``marker_nonce`` is the per-run token the engine embedded in every marker
+    (``result.judge_marker_nonce``); a marker is recognized ONLY when it carries
+    this exact nonce after the role (R5, #5). This is a cross-module format
+    contract with ``engine._judge_prompt`` — the coupling test binds the two.
+    A specialist never sees the judge prompt, so it cannot pre-plant the nonce;
+    a ``=== LANE:`` it quotes (nonce-free) that the judge echoes is ignored,
+    closing the single-injected-marker false-full. When ``marker_nonce`` is
+    falsy (defensive — judge mode always sets it), no marker matches and the
+    caller falls back to the raw judge text (KTD2).
+
     Matching rules (KTD9):
 
-    - Each ``=== LANE: <label> ===`` marker is matched to a surviving lane on
-      the EXACT ``role`` string (case-sensitive). A drifted or paraphrased
-      label finds no match and is ignored.
+    - Each ``=== LANE: <label> <nonce> ===`` marker is matched to a surviving
+      lane on the EXACT ``role`` string (case-sensitive). A drifted, paraphrased,
+      or nonce-free label finds no match and is ignored.
     - A matched block without a non-empty grade is NOT turned into an entry
       (the lane lands in ``ungraded``).
     - A surviving lane with no matching block (or an empty-grade match) lands
@@ -144,20 +158,28 @@ def parse_grades(judge_text: str, surviving_lanes: list[tuple[str, str]]) -> Par
     entries: list[dict] = []
     matched_roles: set[str] = set()
 
-    if judge_text:
-        matches = list(_LANE_RE.finditer(judge_text))
-        # Count markers per surviving role FIRST. A role whose `=== LANE: <role> ===`
+    # A marker is recognized ONLY when it carries the exact per-run nonce after the
+    # role (R5, #5). Built per-call because the nonce varies per run — this is the
+    # parser half of the format contract with engine._judge_prompt. A falsy nonce
+    # (defensive; judge mode always sets one) matches nothing → fall back to raw text.
+    lane_re = (
+        re.compile(rf"===\s*LANE:\s*(.+?)\s+{re.escape(marker_nonce)}\s*===", re.IGNORECASE)
+        if marker_nonce
+        else None
+    )
+
+    if judge_text and lane_re is not None:
+        matches = list(lane_re.finditer(judge_text))
+        # Count markers per surviving role FIRST. A role whose `=== LANE: <role> <nonce> ===`
         # marker appears more than once is AMBIGUOUS and is left ungraded — there is no
-        # safe way to tell the judge's real block from a duplicate the judge quoted out
-        # of untrusted specialist text (e.g. a lane that embedded a fake
-        # `=== LANE: <sibling> === / Grade: F` block which the judge then echoed).
-        # Picking the first would let an injected/quoted block forge a grade for a lane
-        # the judge never graded and report it as graded — a false-FULL, the one
-        # direction KTD9 forbids. Counting first turns that into a false-PARTIAL (the
-        # lane lands in `ungraded`). Honest output names each lane once, so it is
-        # unaffected. The single-injected-marker case (a quoted block with no real
-        # sibling block, count==1) still slips through — its fix is an engine-side
-        # nonce in the marker, deferred to the trust-safety pass (#5).
+        # safe way to tell the judge's real block from a duplicate. Picking the first would
+        # let a repeated block forge a grade for a lane the judge graded once and report an
+        # ambiguous result as graded — a false-FULL, the one direction KTD9 forbids.
+        # Counting first turns that into a false-PARTIAL (the lane lands in `ungraded`).
+        # Honest output names each lane once, so it is unaffected. The nonce closes the
+        # single-injected-marker case: a specialist that embeds `=== LANE: <sibling> ===`
+        # (which it cannot nonce, never having seen the judge prompt) and the judge echoes
+        # is nonce-free, so lane_re does not match it at all.
         label_counts: dict[str, int] = {}
         for m in matches:
             lbl = m.group(1).strip()

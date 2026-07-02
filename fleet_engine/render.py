@@ -375,7 +375,7 @@ def render_result(result: FleetResult) -> str:
         # escape bytes that spoof a provenance row or hide a warning on this surface).
         judge_text = result.judge or ""
         surviving = [(r.role, r.model) for r in result.successes]
-        pg = parse_grades(judge_text, surviving)
+        pg = parse_grades(judge_text, surviving, result.judge_marker_nonce)
         if judge_text:
             out.append(f"\n{_sanitize(judge_text, multiline=True)}")
         # Partial-coverage note (R14/AE7): only when we parsed structure AND a survivor
