@@ -19,10 +19,10 @@ from __future__ import annotations
 # in a fleet field; >=0xA0 would otherwise pass them through and re-enable the
 # fake-line / display-spoof the C0/C1 strip closes.
 _UNSAFE_UNICODE = frozenset(
-    "  "                      # line / paragraph separators
-    "‪‫‬‭‮"    # bidi embeddings / overrides
-    "⁦⁧⁨⁩"          # bidi isolates
-    "؜‎‏"                      # ALM (U+061C), LRM (U+200E), RLM (U+200F) directional marks
+    "\u2028\u2029"                            # line / paragraph separators
+    "\u202a\u202b\u202c\u202d\u202e"              # bidi embeddings / overrides (LRE..PDF, RLO)
+    "\u2066\u2067\u2068\u2069"                    # bidi isolates (LRI, RLI, FSI, PDI)
+    "\u061c\u200e\u200f"                          # directional marks (ALM, LRM, RLM)
 )
 
 
@@ -60,7 +60,7 @@ def sanitize(text: object, *, multiline: bool = False) -> str:
         # the wrong type.
         try:
             text = str(text)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- never-raises contract (R4) intentionally catches all
             return "\ufffd"  # replacement char — a visible, inert placeholder
     return "".join(
         ch

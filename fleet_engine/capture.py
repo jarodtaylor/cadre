@@ -628,7 +628,7 @@ def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[d
                 # can't be spoofed (#5 U2); None preserved as JSON null.
                 "error": _sanitize(lane.error, multiline=True) if lane.error else None,
                 "elapsed_s": lane.elapsed_s,
-                "toolset": list(lane.toolset),  # never coerce [] to None
+                "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
                 "timed_out": lane.timed_out,
                 "file": f"{subdir}/{fmap[lane.role]}",
             })
@@ -664,7 +664,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             # (#5 U2); None preserved as JSON null.
             "error": _sanitize(lane.error, multiline=True) if lane.error else None,
             "elapsed_s": lane.elapsed_s,
-            "toolset": list(lane.toolset),  # explicit list — never coerce [] to None
+            "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
             "timed_out": lane.timed_out,
             "skipped": lane.skipped,   # True = chain never ran this lane; distinct from a real failure
             "file": filename,
@@ -708,17 +708,19 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
                 [(r.role, r.model) for r in result.successes],
                 result.judge_marker_nonce,
             )
-            # grade/rationale are judge model output — sanitize before they land in
-            # the manifest a consumer may print (#5 U2). role/model come from the
-            # matched lane (config-derived, role already control-char-validated).
+            # grade/rationale are judge model output; role/model are the matched
+            # lane's config strings — sanitize ALL four so no field of a grade entry
+            # the manifest a consumer prints can smuggle control bytes (#5 U2),
+            # matching the lanes[] identity-field treatment.
             manifest["grades"] = [
-                {**e,
+                {"role": _sanitize(e.get("role", "")),
+                 "model": _sanitize(e.get("model", "")),
                  "grade": _sanitize(e.get("grade", ""), multiline=True),
                  "rationale": _sanitize(e.get("rationale", ""), multiline=True)}
                 for e in pg.entries
             ]
             manifest["ungraded"] = [
-                {"role": role, "model": model} for role, model in pg.ungraded
+                {"role": _sanitize(role), "model": _sanitize(model)} for role, model in pg.ungraded
             ]
             if not pg.parsed_ok:
                 # judge_ok is True here but nothing parsed — flag it even when the judge

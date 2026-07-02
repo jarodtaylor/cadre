@@ -2783,6 +2783,24 @@ class TestCaptureSinkCompleteness(unittest.TestCase):
         self.assertNotIn("\x1b", manifest["lanes"][0]["model"])
         self.assertNotIn("\x1b", json.dumps(manifest["models"]))
 
+    def test_manifest_toolset_entries_sanitized(self):
+        lane = _lane(role="web", toolset=["web\x1b[2K", "x_search"])
+        result = _result(specialists=[lane], synthesis="# T\n\nbody", ok=True, synth_ok=True)
+        save_run(_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("\x1b", json.dumps(manifest["lanes"][0]["toolset"]))
+        self.assertEqual(manifest["lanes"][0]["toolset"], ["web[2K", "x_search"])  # [] stays list
+
+    def test_manifest_grade_entry_identity_sanitized(self):
+        # grade-entry role/model (from the matched lane) are sanitized like lanes[].
+        lane = _lane(role="web", model="m\x1b[31m", toolset=["web"])
+        judge_text = f"=== LANE: web {_JUDGE_NONCE} ===\nGrade: A\nRationale: ok.\n"
+        result = _judge_result(judge=judge_text, judge_ok=True, specialists=[lane])
+        save_run(_judge_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["grades"])  # the lane graded
+        self.assertNotIn("\x1b", json.dumps(manifest["grades"]))
+
 
 if __name__ == "__main__":
     unittest.main()
