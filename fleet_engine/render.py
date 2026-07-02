@@ -422,7 +422,10 @@ def render_result(result: FleetResult) -> str:
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")
-        out.extend(f"  - {n}" for n in result.notes)
+        # notes embed fleet-controlled role names and adapter error text
+        # (e.g. "specialist 'x' failed: <error>") — sanitize so this same-surface
+        # block can't forge a row or hide a warning the provenance rows above guard (#5 U2).
+        out.extend(f"  - {_sanitize(n)}" for n in result.notes)
     return "\n".join(out)
 
 

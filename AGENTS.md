@@ -144,11 +144,14 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 - **Judge‑specific seams:** the engine returns the judge's raw text in `result.judge`
   and stays pure (no parsing). `fleet_engine/judge_grade.py` (caller‑layer) parses it
   into per-lane structure (`{role, model, grade, rationale}`, plus `ungraded` lanes and
-  `parsed_ok`). **Prompt↔parser label contract:** `_judge_prompt` labels each surviving
-  specialist by its exact `role` string (response format: `=== LANE: <role> ===` /
-  `Grade:` / `Rationale:`); `parse_grades` matches each grade entry to a surviving lane
-  on that exact key. Label drift (paraphrase or wrong role name) degrades toward
-  *false-partial* (lane flagged ungraded) — never *false-full* (skipped lane hidden).
+  `parsed_ok`). **Prompt↔parser label contract (nonce-bound, #5):** `_judge_prompt`
+  labels each surviving specialist by its exact `role` string plus a per-run marker
+  nonce (`result.judge_marker_nonce`, `secrets.token_hex`) — response format
+  `=== LANE: <role> <nonce> ===` / `Grade:` / `Rationale:`; `parse_grades(…, marker_nonce)`
+  requires the nonce, so a nonce-free `=== LANE:` (a specialist can't know the per-run
+  nonce, never seeing the judge prompt) is ignored. Emitter and parser are a cross-module
+  format contract bound by a coupling test. Label drift (paraphrase or wrong role name)
+  degrades toward *false-partial* (lane flagged ungraded) — never *false-full* (skipped lane hidden).
   Partial coverage exits 0; only a judge error/timeout or total specialist failure exits
   1. The judge passes `toolset=[]` explicitly — the `[]`-vs-`None` invariant applies
   (never `None`, which enables every tool over untrusted specialist text).
@@ -156,8 +159,12 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   focus‑grounding validation) is caller‑layer — imported only by `run.py`/`cli.py`,
   never by the engine — and warns, never blocks. Every fleet‑controlled string printed
   by any preview/validate surface (the rendered fleet, the lint warnings, the validate
-  summary) goes through `render._sanitize`: the preview is the human‑okay control and
-  must not be spoofable by terminal escapes in a tampered fleet.
+  summary) goes through `fleet_engine.text_safety.sanitize` (the public chokepoint since
+  #5/#23; `render._sanitize` is now a compat alias): the preview is the human‑okay control
+  and must not be spoofable by terminal escapes in a tampered fleet. **Since #5 the same
+  `sanitize` also covers model *output* — specialist text, synthesis/judge bodies, error
+  strings, and model-derived `manifest.json` fields — on both the terminal and on-disk
+  capture surfaces; only `--doc`/prompt *input* content stays raw (below).**
 - **Caller‑side file input (`--doc`):** `fleet_engine/file_input.py` is caller‑layer —
   imported only by `run.py`/`cli.py`, never by the engine (`TestEngineIsolation` guards
   both directions). `compose(task, docs)` reads each `--doc PATH` and appends it to the
@@ -167,9 +174,9 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   `resolve`; oversize files truncate at `MAX_FILE_BYTES` with a visible note. `--preview`
   lists the `--doc` paths as given — not canonicalized (`render.render_file_inputs`,
   sanitized) — and read‑checks them.
-  **Boundary:** the path *labels* shown in the preview are `_sanitize`d, but the injected
-  file *content* is **not** — sanitizing it would corrupt the reviewed document;
-  output‑side content hardening is the deferred #5/#23 surface.
+  **Boundary:** the path *labels* shown in the preview are sanitized, but the injected
+  file *content* is **not** — sanitizing it would corrupt the reviewed document. (Model
+  *output* over that content IS sanitized as of #5; input content is deliberately raw.)
 
 ## Repo layout for reviewers
 

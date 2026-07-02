@@ -651,7 +651,9 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             "provider": lane.provider,
             "model": lane.model,
             "ok": lane.ok,
-            "error": lane.error,
+            # Model/adapter output — sanitized to match the rounds manifest + render
+            # (#5 U2); None preserved as JSON null.
+            "error": _sanitize(lane.error, multiline=True) if lane.error else None,
             "elapsed_s": lane.elapsed_s,
             "toolset": list(lane.toolset),  # explicit list — never coerce [] to None
             "timed_out": lane.timed_out,

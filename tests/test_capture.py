@@ -6,6 +6,7 @@ Fixtures build FleetResult/AgentResult directly — no live model calls.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -1175,7 +1176,9 @@ class TestOnDiskIdentitySanitization(unittest.TestCase):
     role/provider/model are attacker-controllable (fleet tampering) and are used as
     markdown delimiters in persisted run records, which vouch for attribution. A
     newline could forge a second header or '--- role ---' block. They are _sanitize'd
-    exactly as the terminal renderer does; lane.text (content) stays raw.
+    exactly as the terminal renderer does. lane.text (content) is ALSO sanitized as of
+    #5 U2, but with multiline=True so its newlines/tabs survive (plain content is
+    byte-identical) — see the body-preservation test below.
     """
 
     def test_specialist_md_role_newline_cannot_forge_header(self):
@@ -1198,11 +1201,29 @@ class TestOnDiskIdentitySanitization(unittest.TestCase):
         delimiters = [ln for ln in md.splitlines() if ln.startswith("--- ")]
         self.assertEqual(len(delimiters), 1)  # only the one legit delimiter, no forged second
 
-    def test_collect_synthesis_md_body_text_preserved_raw(self):
-        # CONTENT (lane.text) is NOT an identity claim — it stays raw, multi-line intact.
+    def test_collect_synthesis_md_body_newlines_preserved(self):
+        # CONTENT (lane.text) is sanitized with multiline=True (#5 U2): control bytes
+        # are stripped but newlines/tabs survive, so plain multi-line text is intact.
         lane = _lane(role="web", toolset=["web"], text="line one\nline two", ok=True)
         md = _synthesis_md(_collect_result(specialists=[lane]))
         self.assertIn("line one\nline two", md)
+
+    def test_specialist_md_output_escape_stripped(self):
+        # The per-lane .md Output body is the primary on-disk artifact for a synthesize
+        # fleet — a control byte in lane.text must be stripped (#5 U2).
+        lane = _lane(role="web", toolset=["web"], text="finding \x1b[2K forged\nnext line", ok=True)
+        md = _specialist_md(lane)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("finding", md)
+        self.assertIn("next line", md)  # multiline preserved
+
+    def test_specialist_md_error_escape_stripped(self):
+        # The per-lane .md Error body (lane.error, adapter output) is likewise sanitized.
+        lane = _lane(role="web", toolset=["web"], ok=False, error="boom \x1b[31m red")
+        lane.text = None
+        md = _specialist_md(lane)
+        self.assertNotIn("\x1b", md)
+        self.assertIn("boom", md)
 
 
 class TestCollectVsSynthesizeManifestDistinguishability(unittest.TestCase):
@@ -1613,12 +1634,12 @@ class TestJudgeSaveRunNoRaise(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestJudgeGradeUnmutated(unittest.TestCase):
-    """The judge grade text must reach disk UNCHANGED — _sanitize is the render boundary's job.
+class TestJudgeGradeSanitizedOnDisk(unittest.TestCase):
+    """The judge grade text is sanitized before it reaches disk (#5 U2, reverses KTD8).
 
-    KTD8: capture writes the judge text verbatim; the terminal renderer (_sanitize) is
-    the only place that strips control characters. A terminal escape in the judge text
-    must survive in synthesis.md — if capture sanitized it, that would corrupt the record.
+    A persisted synthesis.md is a trust surface a human/agent reads back, so it must be
+    as un-spoofable as the terminal render (which already sanitizes judge text). A
+    terminal escape in the judge text must NOT survive in synthesis.md.
     """
 
     def setUp(self):
@@ -1661,9 +1682,9 @@ class _FakeClient:
         # its prompt and reproduces it. Model that by substituting the nonce we can
         # read out of the prompt for the <NONCE> placeholder in the payload (R5, #5).
         if ok and payload and "<NONCE>" in payload:
-            import re as _re
-            m = _re.search(r"=== LANE: \S+ ([0-9a-f]+) ===", prompt)
-            payload = payload.replace("<NONCE>", m.group(1) if m else "")
+            m = re.search(r"=== LANE: \S+ ([0-9a-f]+) ===", prompt)
+            assert m, "fake judge could not find the marker nonce in its prompt"
+            payload = payload.replace("<NONCE>", m.group(1))
         return AgentResult(
             role=role, provider=provider, model=model, ok=ok,
             text=payload if ok else None, error=None if ok else payload,

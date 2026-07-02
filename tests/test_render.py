@@ -1063,6 +1063,18 @@ class TestRenderResultSanitizesConfigFields(unittest.TestCase):
         self.assertNotIn("\x1b", rendered)
         self.assertIn("synth with", rendered)
 
+    def test_notes_section_is_sanitized(self):
+        """result.notes embed role + adapter error text; the notes block on the same
+        surface must be sanitized too (#5 U2), not just the provenance rows."""
+        lane = make_lane(role="web", ok=True, text="ok")
+        result = make_result(
+            specialists=[lane], synthesis="S", synth_ok=True, ok=True,
+            notes=["specialist 'web' failed: boom \x1b[2K forged"],
+        )
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("boom", rendered)
+
     def test_specialist_text_is_sanitized_in_collect_mode(self):
         """In collect mode the per-lane r.text renders — and is sanitized (#5 U2)."""
         lane = make_lane(role="web", ok=True, text="finding with \x1b[31m escape")
@@ -1135,9 +1147,9 @@ class TestSanitizeUnicodeExclusions(unittest.TestCase):
 
 
 class TestRenderResultTabInSynthesis(unittest.TestCase):
-    """The synthesis text is model output and is NOT sanitized; this test verifies
-    that a multiline synthesis prompt with a tab in the fleet preview (which IS
-    sanitized with multiline=True) preserves the tab."""
+    """Model output IS sanitized with multiline=True (#5 U2), which preserves tabs
+    and newlines while stripping control bytes; this test verifies a multiline field
+    with a tab keeps the tab under multiline=True."""
 
     def setUp(self):
         from fleet_engine.render import _sanitize
@@ -1987,7 +1999,7 @@ class TestRenderResultJudgeAllSpecialistsFailed(unittest.TestCase):
 
 
 class TestJudgeGradeTextSanitized(unittest.TestCase):
-    """Grade text is sanitized at render (KTD8); specialist r.text is NOT sanitized."""
+    """Both the judge grade text and specialist r.text are sanitized at render (#5 U2)."""
 
     def test_esc_in_grade_stripped(self):
         """A terminal escape in the judge's grade is stripped; specialist text is clean."""
