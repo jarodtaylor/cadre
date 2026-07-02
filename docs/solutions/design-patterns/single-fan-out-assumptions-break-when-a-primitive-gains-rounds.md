@@ -87,4 +87,4 @@ The general remedy — enumerate the surfaces before trusting green tests — is
 
 ## Related
 
-- A cheap **pre-build probe** validated the primitive's *value* before the executor was built and found debate's value is *process* (preserved cross-lane disagreement), not sharper *output* — flipping the flagship from `synthesize` to `collect` and avoiding building the wrong thing. A blind human check + cross-model reconcile caught the same-model advisor's confirmation bias. Full write-up: `docs/plans/2026-07-01-iterative-probe-verdict.md` (local).
+- A cheap **pre-build probe** validated the primitive's *value* before the executor was built and found debate's value is *process* (preserved cross-lane disagreement), not sharper *output* — flipping the flagship from `synthesize` to `collect` and avoiding building the wrong thing. A blind human check + cross-model reconcile caught the same-model advisor's confirmation bias. Full write-up: `docs/plans/2026-07-01-iterative-probe-verdict.md` (a local process doc under the gitignored `docs/plans/` — intentionally not linked because it is not in the repo).

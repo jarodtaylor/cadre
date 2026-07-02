@@ -30,9 +30,9 @@ Cadre's iterative topology (#18) runs the same lanes for N *rounds* and threads 
 
 ## Guidance
 
-Use the one thing instruction-following cannot fake: **round 1 runs all lanes concurrently with zero prior data, so a round-1 output physically cannot reference a sibling.** Two assertions separate real threading from theater:
+Use the one thing instruction-following cannot fake: **round 1 receives zero prior-round sibling data, so a round-1 output physically cannot reference a sibling — regardless of whether the lanes ran concurrently or serially.** Two assertions separate real threading from theater:
 
-1. **Every round-1 opener is sibling-free** — no lane names or rebuts another (it can't; they ran at the same instant).
+1. **Every round-1 opener is sibling-free** — no lane names or rebuts another (it can't; no sibling output existed to thread in).
 2. **Round 2+ outputs cite a specific particular a *sibling* introduced and the citing lane never raised itself** — a borrowed example, number, or framing. This is the smoking gun: a lane cannot rebut something it never saw unless the prior-round output was genuinely threaded in. Generic "as others might argue" does **not** count; look for a concrete borrowed particular.
 
 If (1) and (2) both hold, the threading is mechanically real. If round-1 openers already cross-reference, the "debate" is a shared-prompt artifact and the pipe is unproven.
