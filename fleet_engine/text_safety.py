@@ -22,10 +22,11 @@ _UNSAFE_UNICODE = frozenset(
     "  "                      # line / paragraph separators
     "‪‫‬‭‮"    # bidi embeddings / overrides
     "⁦⁧⁨⁩"          # bidi isolates
+    "؜‎‏"                      # ALM (U+061C), LRM (U+200E), RLM (U+200F) directional marks
 )
 
 
-def sanitize(text: str, *, multiline: bool = False) -> str:
+def sanitize(text: object, *, multiline: bool = False) -> str:
     """Strip terminal-control characters from attacker-influenced text before display.
 
     A fleet YAML is attacker-controllable (library tampering — see the cadre-fleet
@@ -46,14 +47,21 @@ def sanitize(text: str, *, multiline: bool = False) -> str:
 
     Degrades, never raises (R4): a non-``str`` value (``None``, an int, a
     wrong-typed YAML value, or bytes) is coerced with ``str(...)`` so a control
-    surface shows a safe placeholder rather than tracebacking. This is the
+    surface shows a coerced/placeholder string rather than tracebacking (even a
+    hostile __str__ falls back to a placeholder). This is the
     fail-safe direction for a gate that must always render its go/no-go.
     """
     if not isinstance(text, str):
         # Malformed/wrong-typed input must not crash the surface. Coerce to a str
         # representation, then sanitize it like any other untrusted text — a
         # bytes object's repr, None, an int, etc. all become inert display text.
-        text = str(text)
+        # str() itself can raise on a hostile/broken __str__, so guard it: the
+        # never-raises contract wins over faithfulness for a value that was already
+        # the wrong type.
+        try:
+            text = str(text)
+        except Exception:
+            return "\ufffd"  # replacement char — a visible, inert placeholder
     return "".join(
         ch
         for ch in text

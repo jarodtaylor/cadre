@@ -399,6 +399,15 @@ class TestNonSurvivorLabel(unittest.TestCase):
         # The forged-but-nonced marker IS accepted — the nonce does not defend here.
         self.assertIn("victim", {e["role"] for e in result.entries})
 
+    def test_case_variant_nonce_does_not_match(self):
+        """IGNORECASE is scoped to the LANE keyword only — the nonce is matched
+        case-sensitively, so an uppercased echo of a lowercase-hex nonce is ignored."""
+        lanes = [("web", "m")]
+        response = f"=== LANE: web {_NONCE.upper()} ===\nGrade: A\nRationale: x.\n"
+        result = parse_grades(response, lanes, _NONCE)
+        self.assertFalse(result.parsed_ok)
+        self.assertIn("web", {r for (r, _) in result.ungraded})
+
     def test_none_nonce_falls_back_to_raw(self):
         """A falsy nonce (defensive — judge mode always sets one) matches nothing,
         so the caller falls back to the raw judge text (KTD2)."""

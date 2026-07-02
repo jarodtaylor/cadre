@@ -162,8 +162,11 @@ def parse_grades(
     # role (R5, #5). Built per-call because the nonce varies per run — this is the
     # parser half of the format contract with engine._judge_prompt. A falsy nonce
     # (defensive; judge mode always sets one) matches nothing → fall back to raw text.
+    # Case-insensitivity is scoped to the `LANE` keyword via `(?i:...)`; the nonce is
+    # matched case-SENSITIVELY so a case-variant echo (ZZ9… for zz9…) cannot match a
+    # lowercased-hex nonce (roles are also matched case-sensitively per KTD9).
     lane_re = (
-        re.compile(rf"===\s*LANE:\s*(.+?)\s+{re.escape(marker_nonce)}\s*===", re.IGNORECASE)
+        re.compile(rf"(?i:===\s*LANE:)\s*(.+?)\s+{re.escape(marker_nonce)}\s*===")
         if marker_nonce
         else None
     )

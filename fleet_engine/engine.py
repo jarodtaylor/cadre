@@ -500,7 +500,7 @@ def _run_convergence(
         # the judge then echoes) can't forge a lane boundary. Set on result here so it
         # reaches both parse_grades consumers (render, capture) via FleetResult across
         # all three topologies (all route through this helper). Pure stdlib, no I/O.
-        nonce = secrets.token_hex(4)
+        nonce = secrets.token_hex(16)  # 128-bit — this is the anti-forgery trust boundary
         result.judge_marker_nonce = nonce
         judge_started = _start_daemon(
             lambda: client.run(

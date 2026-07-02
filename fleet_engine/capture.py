@@ -728,6 +728,9 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
                 # model_client maps an empty response to ok=False today, but the manifest
                 # contract must hold regardless.
                 manifest["parse_failed"] = True
+                # "raw" = the UNPARSED judge text (vs. the structured `grades`), not
+                # "unsanitized": like every capture field it is escape-stripped for
+                # display safety (#5 U2). The name denotes parse state, not raw bytes.
                 manifest["judge_text_raw"] = _sanitize(result.judge or "", multiline=True)
         else:
             manifest["grades"] = []

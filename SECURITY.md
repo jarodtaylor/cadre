@@ -28,10 +28,12 @@ not a claim that Cadre is "injection-proof."
   injected judge:** a specialist can instruct the judge to copy the nonce (which the
   judge *does* see, in its own instructions) into a forged marker, and if the judge
   obeys, that marker authenticates. That path is the semantic-injection residual below.
-- **The fleet preview is a faithful, un-spoofable approval surface.** `--preview`
-  renders from the parsed fleet config (not any paraphrase), with every
-  fleet-controlled field sanitized and `⚠ PRIVILEGED TOOLS ENABLED` shown when a
-  fleet requests non-safe toolsets.
+- **The fleet preview is a faithful approval surface, hardened against escape
+  spoofing.** `--preview` renders from the parsed fleet config (not any paraphrase),
+  with every fleet-controlled field escape/bidi-sanitized and `⚠ PRIVILEGED TOOLS
+  ENABLED` shown when a fleet requests non-safe toolsets. (The escape-spoofing defense
+  is complete; the plain-text report-grammar mimicry residual below is not a preview
+  concern — the preview renders config fields, not model output.)
 - **Install seeding.** Starter fleets/personas are written owner-only (`0o600`) with
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything

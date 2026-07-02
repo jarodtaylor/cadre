@@ -29,6 +29,12 @@ class TestSanitizeStripsControlBytes(unittest.TestCase):
         self.assertEqual(sanitize("a b‮c⁦d"), "abcd")
 
 
+    def test_strips_directional_marks(self):
+        # ALM (U+061C), LRM (U+200E), RLM (U+200F) are directional format chars that
+        # sit >= 0xA0 and were added to the denylist (CodeRabbit).
+        self.assertEqual(sanitize("a\u061cb\u200ec\u200fd"), "abcd")
+
+
 class TestSanitizePreservesLegitimateContent(unittest.TestCase):
     def test_printable_ascii_and_unicode_byte_identical(self):
         s = "Hello — a normal prompt with “curly quotes”, em-dash, café, 日本語."
@@ -61,6 +67,16 @@ class TestSanitizeDegradesNeverRaises(unittest.TestCase):
         # A wrong-typed YAML value (list where a string was expected) renders as
         # its inert repr rather than crashing the surface.
         self.assertEqual(sanitize(["a", "b"]), "['a', 'b']")
+
+    def test_faulty_str_falls_back_to_placeholder_not_raise(self):
+        # str() itself can raise on a hostile/broken __str__ — the never-raises
+        # contract must still hold (Copilot).
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        out = sanitize(Boom())
+        self.assertIsInstance(out, str)  # no exception propagated
 
     def test_bytes_with_embedded_nul_coerces_without_raising(self):
         # bytes -> repr string; no NUL survives, no exception.
