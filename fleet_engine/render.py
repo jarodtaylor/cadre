@@ -17,6 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
+from fleet_engine.text_safety import sanitize
 from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_CAP
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
@@ -71,45 +72,10 @@ def _cost_warning(provider: str, model: str) -> str | None:
     return "  ⚠ bills at API rates inside Hermes"
 
 
-# Unicode line/paragraph separators and bidi format controls are never legitimate
-# in a fleet field; >=0xA0 would otherwise pass them through and re-enable the
-# fake-line / display-spoof the C0/C1 strip closes.
-_UNSAFE_UNICODE = frozenset(
-    "  "                      # line / paragraph separators
-    "‪‫‬‭‮"    # bidi embeddings / overrides
-    "⁦⁧⁨⁩"          # bidi isolates
-)
-
-
-def _sanitize(text: str, *, multiline: bool = False) -> str:
-    """Strip terminal-control characters from fleet-controlled text before display.
-
-    A fleet YAML is attacker-controllable (library tampering — see the cadre-fleet
-    SKILL.md Safety section), and its strings flow into this preview, which is the
-    operative human-okay control. An embedded ANSI/cursor escape sequence could
-    otherwise overwrite or hide a printed warning (e.g. the privileged-tools line),
-    spoofing the very output the human approves. Drop C0 controls (0x00–0x1F),
-    DEL (0x7F), and C1 (0x80–0x9F): removing the ESC/CR/BS bytes defangs any
-    sequence (a residual ``[2J`` then renders as inert text). Also drops Unicode
-    line/paragraph separators (U+2028, U+2029) and bidi format controls
-    (U+202A–U+202E, U+2066–U+2069), which >=0xA0 would otherwise pass through and
-    re-enable the fake-line / display-spoof the C0/C1 strip closes. Newlines survive
-    only for the multi-line synthesis prompt; TAB is also preserved in multiline mode
-    only; elsewhere both are dropped so a single-line field cannot inject a fake line.
-    Printable Unicode (>= 0xA0) other than the excluded set passes through untouched,
-    so a legitimate prompt renders byte-identically.
-    """
-    return "".join(
-        ch
-        for ch in text
-        if (
-            (ch == "\n" and multiline)
-            or (ch == "\t" and multiline)
-            or (0x20 <= ord(ch) <= 0x7E)
-            or ord(ch) >= 0xA0
-        )
-        and ch not in _UNSAFE_UNICODE
-    )
+# The sanitizer now lives in fleet_engine.text_safety (GH #23 — a shared trust
+# boundary imported across modules deserves a public home). Keep the private
+# alias so render's in-file call sites and any legacy importer keep working.
+_sanitize = sanitize
 
 
 def render_fleet_preview(

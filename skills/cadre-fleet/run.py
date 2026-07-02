@@ -25,8 +25,8 @@ from fleet_engine.model_client import ModelClient  # noqa: E402
 from fleet_engine.personas import default_pool_dir, resolve  # noqa: E402
 from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
+from fleet_engine.text_safety import sanitize as _sanitize  # noqa: E402  (GH #23)
 from fleet_engine.render import (  # noqa: E402
-    _sanitize,
     render_file_inputs,
     render_fleet_preview,
     render_result,
