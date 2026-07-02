@@ -1041,13 +1041,25 @@ class TestRenderResultSanitizesConfigFields(unittest.TestCase):
         rendered = render_result(result)
         self.assertNotIn("\x1b", rendered)
 
-    def test_model_output_not_sanitized(self):
-        """r.text and result.synthesis are NOT stripped (model output, deferred chain)."""
+    def test_model_output_is_sanitized(self):
+        """r.text and result.synthesis ARE stripped (#5 U2 — model output can spoof this surface)."""
         lane = make_lane(role="web", ok=True, text="output with \x1b[31m escape")
         result = make_result(specialists=[lane], synthesis="synth with \x1b escape", synth_ok=True, ok=True)
         rendered = render_result(result)
-        # The ESC in text and synthesis must still be present (not stripped by render_result).
-        self.assertIn("\x1b", rendered)
+        # Synthesize mode renders the synthesis body (not per-lane text); its ESC is
+        # stripped while the visible words survive.
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("synth with", rendered)
+
+    def test_specialist_text_is_sanitized_in_collect_mode(self):
+        """In collect mode the per-lane r.text renders — and is sanitized (#5 U2)."""
+        lane = make_lane(role="web", ok=True, text="finding with \x1b[31m escape")
+        result = make_result(
+            specialists=[lane], convergence="collect", synthesis=None, ok=True,
+        )
+        rendered = render_result(result)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("finding with", rendered)
 
 
 # ---------------------------------------------------------------------------

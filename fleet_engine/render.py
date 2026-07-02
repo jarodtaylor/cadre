@@ -371,8 +371,8 @@ def render_result(result: FleetResult) -> str:
         # outside the per-lane blocks (an overall summary, a ranking, cross-lane notes);
         # the parsed structure is for the manifest, not the report (plan §High-Level
         # Design). parse_grades drives ONLY the partial-coverage note here. Grade text
-        # is sanitized (KTD8); specialist r.text is model output and intentionally NOT
-        # sanitized (deferred #5/#23).
+        # and specialist r.text are both sanitized (#5 U2 — model output can carry
+        # escape bytes that spoof a provenance row or hide a warning on this surface).
         judge_text = result.judge or ""
         surviving = [(r.role, r.model) for r in result.successes]
         pg = parse_grades(judge_text, surviving)
@@ -385,15 +385,15 @@ def render_result(result: FleetResult) -> str:
             out.append(f"\nnote: {len(pg.ungraded)} lane(s) not graded by judge: {ungraded_roles}")
         # Attributed specialist outputs always follow.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
     elif result.synthesis:
-        out.append(result.synthesis)
+        out.append(_sanitize(result.synthesis, multiline=True))
     elif result.successes:
         # No synthesis (synthesizer failed) but lanes succeeded — surface their raw
         # findings in labeled sections so the user still gets the work, not just
         # provenance rows.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{r.text or ''}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
     if result.threading_truncated:
         # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
         # iterative round (inter-round) produced threaded output that exceeded
@@ -401,10 +401,11 @@ def render_result(result: FleetResult) -> str:
         unit = "inter-round" if result.topology == "iterative" else "inter-stage"
         out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")
-    # Sanitize only the CONFIG-derived identity fields (fleet/role/provider/model)
-    # so a tampered fleet can't forge provenance rows. Model output (r.text/r.error,
-    # result.synthesis) is deliberately NOT stripped here — that's the deferred
-    # injection->terminal chain (GH #5), not this surface's job.
+    # Every fleet/model-derived field on this surface is sanitized: the identity
+    # fields (fleet/role/provider/model) so a tampered fleet can't forge a
+    # provenance row, and r.error (model/adapter output) so an error string can't
+    # smuggle escape bytes into the row it renders (#5 U2). r.text/synthesis are
+    # sanitized above where they render.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"
@@ -414,10 +415,10 @@ def render_result(result: FleetResult) -> str:
             suffix = ""
         elif r.timed_out:
             tag = "TIMEOUT"
-            suffix = f": {r.error}" if r.error else ""
+            suffix = f": {_sanitize(r.error)}" if r.error else ""
         else:
             tag = "FAIL"
-            suffix = f": {r.error}" if r.error else ""
+            suffix = f": {_sanitize(r.error)}" if r.error else ""
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")

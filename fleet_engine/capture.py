@@ -473,9 +473,9 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
             "No model call was made.",
         ]
     elif lane.ok:
-        lines += ["## Output", "", lane.text or ""]
+        lines += ["## Output", "", _sanitize(lane.text or "", multiline=True)]
     else:
-        lines += ["## Error", "", lane.error or "(no error detail)"]
+        lines += ["## Error", "", _sanitize(lane.error or "(no error detail)", multiline=True)]
     return "\n".join(lines)
 
 
@@ -491,11 +491,12 @@ def _synthesis_md(result: FleetResult) -> str:
             # fleet could embed newlines in role/provider/model to forge a fake
             # "--- role ---" delimiter and misattribute output, so the identity
             # fields are _sanitize'd here exactly as the terminal renderer does.
-            # lane.text (model-generated CONTENT, not an identity claim) stays raw;
-            # the two attributed-block renderers stay separate (terminal vs disk)
-            # but share this identity-sanitize invariant.
+            # lane.text (model output) is also _sanitize'd (#5 U2 — a persisted
+            # record read/re-rendered later must be as un-spoofable as the terminal;
+            # multiline=True keeps the body's newlines). The two attributed-block
+            # renderers stay separate (terminal vs disk) but share this invariant.
             blocks = [
-                f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{lane.text or ''}"
+                f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{_sanitize(lane.text or '', multiline=True)}"
                 for lane in successes
             ]
             return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
@@ -506,7 +507,7 @@ def _synthesis_md(result: FleetResult) -> str:
         n = len(result.specialists)
         return f"No specialist outputs — all {n} specialists failed (collect mode)."
 
-    # Judge mode: write raw grade text (KTD8 — UNMUTATED, no _sanitize) + attributed blocks.
+    # Judge mode: write the judge grade text + attributed blocks, all _sanitize'd (#5 U2).
     if result.convergence == "judge":
         if result.status is FleetStatus.FAILED:
             # Judge never invoked (no survivors). Under sequential topology this is a
@@ -530,25 +531,27 @@ def _synthesis_md(result: FleetResult) -> str:
             return f"No judge grade — {judge_note}."
         # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
         # over the survivors (DEGRADED with result.judge set — fell through above).
-        # KTD8: the judge text is written UNMUTATED so the record is accurate;
-        # _sanitize is the render boundary's job, not capture's.
-        # Identity fields on the delimiter (role/provider/model) are still
-        # _sanitize'd to guard the trust surface (same as collect mode on-disk).
+        # #5 U2: the judge text is model output and is now _sanitize'd (multiline=True)
+        # — a persisted record that a human or agent reads back is a trust surface,
+        # so it must be as un-spoofable as the terminal render (which already
+        # sanitizes judge text). Identity fields on the delimiter and lane.text are
+        # sanitized for the same reason.
         successes = result.successes
         blocks = [
-            f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{lane.text or ''}"
+            f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{_sanitize(lane.text or '', multiline=True)}"
             for lane in successes
         ]
         specialist_section = "\n\n".join(blocks)
         return (
             "# Judge grade\n\n"
-            + (result.judge or "")
+            + _sanitize(result.judge or "", multiline=True)
             + ("\n\n# Specialist outputs\n\n" + specialist_section if specialist_section else "")
         )
 
-    # Synthesize mode: existing logic unchanged.
+    # Synthesize mode: sanitize the synthesizer's output (#5 U2 — model output on a
+    # persisted trust surface, same rationale as the collect/judge blocks above).
     if result.synthesis is not None:
-        return result.synthesis
+        return _sanitize(result.synthesis, multiline=True)
 
     # synthesis is None in two cases:
     #   status is FAILED  → all specialists failed, synthesis never attempted
@@ -616,7 +619,9 @@ def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[d
                 "provider": lane.provider,
                 "model": lane.model,
                 "ok": lane.ok,
-                "error": lane.error,
+                # Model/adapter output — sanitized so a manifest a consumer prints
+                # can't be spoofed (#5 U2); None preserved as JSON null.
+                "error": _sanitize(lane.error, multiline=True) if lane.error else None,
                 "elapsed_s": lane.elapsed_s,
                 "toolset": list(lane.toolset),  # never coerce [] to None
                 "timed_out": lane.timed_out,
@@ -691,7 +696,15 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
                 result.judge or "",
                 [(r.role, r.model) for r in result.successes],
             )
-            manifest["grades"] = pg.entries
+            # grade/rationale are judge model output — sanitize before they land in
+            # the manifest a consumer may print (#5 U2). role/model come from the
+            # matched lane (config-derived, role already control-char-validated).
+            manifest["grades"] = [
+                {**e,
+                 "grade": _sanitize(e.get("grade", ""), multiline=True),
+                 "rationale": _sanitize(e.get("rationale", ""), multiline=True)}
+                for e in pg.entries
+            ]
             manifest["ungraded"] = [
                 {"role": role, "model": model} for role, model in pg.ungraded
             ]
@@ -703,7 +716,7 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
                 # model_client maps an empty response to ok=False today, but the manifest
                 # contract must hold regardless.
                 manifest["parse_failed"] = True
-                manifest["judge_text_raw"] = result.judge or ""
+                manifest["judge_text_raw"] = _sanitize(result.judge or "", multiline=True)
         else:
             manifest["grades"] = []
             manifest["ungraded"] = []

@@ -1620,9 +1620,12 @@ class TestJudgeGradeUnmutated(unittest.TestCase):
         self.run_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.run_dir)
 
-    def test_terminal_escape_survives_in_synthesis_md(self):
-        """A terminal escape in the judge text is preserved verbatim on disk (KTD8)."""
-        # Use a clearly-synthetic ANSI escape as a canary — _sanitize would strip it.
+    def test_terminal_escape_stripped_in_synthesis_md(self):
+        """A terminal escape in the judge text is stripped on disk (#5 U2 — reverses KTD8).
+
+        The on-disk record is a trust surface a human/agent reads back, so it must
+        be as un-spoofable as the terminal render (which already sanitizes judge text).
+        """
         escape = "\x1b[31m"
         judge_text_with_escape = (
             f"{escape}=== LANE: web ===\nGrade: A\nRationale: {escape}Bold finding."
@@ -1630,8 +1633,9 @@ class TestJudgeGradeUnmutated(unittest.TestCase):
         result = _judge_result(judge=judge_text_with_escape)
         save_run(_judge_cfg(), result, self.run_dir)
         on_disk = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
-        self.assertIn(escape, on_disk,
-                      "KTD8 violated: capture _sanitize'd the judge text; it must stay raw")
+        self.assertNotIn(escape, on_disk,
+                         "#5 U2: capture must sanitize the judge text; the ESC byte must be gone")
+        self.assertIn("Bold finding.", on_disk)  # visible content survives
 
 
 # ---------------------------------------------------------------------------
