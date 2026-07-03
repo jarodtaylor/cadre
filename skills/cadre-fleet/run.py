@@ -12,13 +12,19 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+import time
 from pathlib import Path
 
 # Make the repo root importable when run from the skill directory.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from fleet_engine.approval import default_approval_path, surface_digest, write_approval  # noqa: E402
+from fleet_engine.approval import (  # noqa: E402
+    consume_approval,
+    default_approval_path,
+    surface_digest,
+    write_approval,
+)
 from fleet_engine.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
@@ -141,6 +147,23 @@ def main(argv: list[str] | None = None) -> int:
     if composed_task is None:
         print("provide --task and/or --doc (unless --preview)")
         return 2
+
+    # Preview-bound approval gate (#5 Part 2, R1/R4): a real run executes only
+    # when it presents a valid, unconsumed approval bound to THIS exact surface
+    # — the config, the composed task (--task + --doc bytes), and the resolved
+    # profile. consume_approval unlinks the token before reading, so one-shot
+    # holds even for a mismatch (a burned attempt forces a fresh --preview).
+    # Fail-closed: absent / mismatched / expired all refuse. The direct-human
+    # `python -m fleet_engine.cli` runner is intentionally NOT gated (a human
+    # invoking it IS the operator); this binding scopes to the agent handoff.
+    token = consume_approval()
+    expected_digest = _surface_digest_for(cfg, composed_task)
+    if token is None or token.digest != expected_digest or token.is_expired(time.time()):
+        print(
+            "No valid preview-bound approval for this run. Run `--preview` first to "
+            "approve this exact fleet + task + docs + profile, then run again."
+        )
+        return 1
 
     # No --preview here to disclose truncation (or it was skipped), so warn on the
     # [cadre] stream that an oversize --doc is being reviewed only partially — the
