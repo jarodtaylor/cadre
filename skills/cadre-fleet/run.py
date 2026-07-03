@@ -79,6 +79,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--approve-privileged",
+        action="store_true",
+        default=False,
+        help=(
+            "Mint a PRIVILEGED preview-bound approval for a fleet with "
+            "allow_privileged_tools: true. A plain --preview does not approve a "
+            "privileged fleet; this is the deliberate act that does."
+        ),
+    )
+    parser.add_argument(
         "--no-capture",
         action="store_true",
         default=False,
@@ -110,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     # prepare_run_dir, BEFORE run_fleet. Zero model calls, zero capture.
     # THIS SHORT-CIRCUIT IS LOAD-BEARING: the human approves the parsed fleet,
     # not the agent's paraphrase of it.
-    if args.preview:
+    if args.preview or args.approve_privileged:
         # Show the profile the run will use (env-sourced, not part of the fleet
         # config) so the human okays the fleet AND the profile it runs under — an
         # unset HERMES_HOME silently falls back to the default, which is how a run
@@ -128,17 +138,30 @@ def main(argv: list[str] | None = None) -> int:
         # stdout as part of the preview the human approves (no [cadre] stderr
         # infra on the preview path).
         print(render_preview_warnings(cfg))
-        # Render the composed task the run will feed the models, and mint an
+        # Render the composed task the run will feed the models, then mint an
         # approval token bound to this exact surface. A task-less preview
         # (composed_task is None) renders the fleet shape only and mints nothing
-        # — matching the run path's own None refusal. A privileged fleet mints
-        # nothing here: it needs the deliberate --approve-privileged act (U5).
+        # — matching the run path's own None refusal.
         if composed_task is not None:
             print(render_composed_task(composed_task))
-            if not cfg.allow_privileged_tools:
+            if cfg.allow_privileged_tools and not args.approve_privileged:
+                # A privileged fleet is NOT approved by a plain --preview — it
+                # needs the deliberate --approve-privileged act (F2/R5). Mint
+                # nothing; tell the operator how to approve it.
+                print(
+                    "\n⚠ This fleet enables privileged tools and is NOT approved by a "
+                    "plain --preview. Re-run with --approve-privileged to mint a "
+                    "privileged approval for this exact surface."
+                )
+            else:
+                # Mint the approval. Flavor = whether this was the privileged act.
+                # A non-privileged fleet under --approve-privileged still mints a
+                # privileged-flavored token; the run accepts either flavor for a
+                # non-privileged fleet (no lock-out).
                 digest = _surface_digest_for(cfg, composed_task)
-                write_approval(digest, privileged=False)
-                print(f"\nPreview-bound approval written: {default_approval_path()}")
+                write_approval(digest, privileged=args.approve_privileged)
+                flavor = "privileged " if args.approve_privileged else ""
+                print(f"\nPreview-bound {flavor}approval written: {default_approval_path()}")
                 print("This run is now approved to execute this exact previewed surface once.")
         return 0
 
@@ -162,6 +185,18 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "No valid preview-bound approval for this run. Run `--preview` first to "
             "approve this exact fleet + task + docs + profile, then run again."
+        )
+        return 1
+
+    # Privileged fleets require a privileged-flavored approval (R5/AE4). The digest
+    # already binds allow_privileged_tools, so a tampered false->true is caught by
+    # mismatch above; this forces the deliberate --approve-privileged act on a
+    # legitimately-privileged fleet. A non-privileged fleet accepts either flavor
+    # (no lock-out), so this check only fires for a privileged fleet.
+    if cfg.allow_privileged_tools and not token.privileged:
+        print(
+            "This fleet enables privileged tools and requires a privileged approval. "
+            "Run `--approve-privileged` (not a plain `--preview`) to approve it."
         )
         return 1
 

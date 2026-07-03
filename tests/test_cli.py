@@ -13,7 +13,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fleet_engine.approval import consume_approval, surface_digest
+import yaml
+
+from fleet_engine.approval import consume_approval, surface_digest, write_approval
 from fleet_engine.capture import _slugify, resolve_run_dir, resolved_hermes_home
 from fleet_engine.cli import main as cli_main, run_command, validate_command
 from fleet_engine.config import FleetConfig
@@ -716,8 +718,9 @@ class TestSkillPreviewMintsApprovalToken(unittest.TestCase):
         self.assertFalse(os.path.exists(token_path))
 
     def test_privileged_fleet_plain_preview_mints_no_token(self):
-        """A privileged fleet's plain --preview mints nothing — U5 adds the
-        deliberate --approve-privileged act that this build does not implement."""
+        """A privileged fleet's plain --preview mints nothing — approving it
+        requires the deliberate --approve-privileged act (U5, tested fully in
+        TestSkillPrivilegedApproval; this test covers only the mint-nothing half)."""
         priv_fleet = self.tmp / "priv.yaml"
         priv_fleet.write_text(json.dumps({
             "name": "priv",
@@ -876,6 +879,115 @@ class TestSkillApprovalGate(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0, "AE6: colluding preview-then-run proceeds by design")
+
+
+class TestSkillPrivilegedApproval(unittest.TestCase):
+    """U5 — a distinct --approve-privileged act. A fleet with
+    allow_privileged_tools: true is NOT approved by a plain --preview; only the
+    deliberate --approve-privileged act mints the privileged-flavored token the
+    run gate requires for it. A non-privileged fleet accepts either flavor (no
+    lock-out) — mirrors the mint/gate pair in TestSkillPreviewMintsApprovalToken
+    (U3) / TestSkillApprovalGate (U4).
+
+    Every test isolates the token file via CADRE_APPROVAL_PATH so none of them
+    ever touch the real ~/.cadre/approval.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.token_path = str(self.tmp / "approval")
+        self.priv_fleet = self.tmp / "priv.yaml"
+        with open(self.priv_fleet, "w") as f:
+            yaml.safe_dump(
+                {
+                    "name": "priv",
+                    "convergence": "collect",
+                    "specialists": [
+                        {"role": "a", "provider": "p", "model": "m", "focus": "f"}
+                    ],
+                    "allow_privileged_tools": True,
+                },
+                f,
+            )
+
+    def _env(self):
+        return {"CADRE_APPROVAL_PATH": self.token_path}
+
+    def test_plain_preview_of_privileged_fleet_mints_nothing_and_instructs(self):
+        """A plain --preview of a privileged fleet mints no token and tells the
+        operator how to approve it instead of silently doing nothing."""
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--preview", "--task", "t"]
+                    )
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.token_path))
+        self.assertIn("--approve-privileged", buf.getvalue())
+
+    def test_approve_privileged_mints_privileged_token(self):
+        """--approve-privileged mints a token whose privileged flavor is True."""
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--approve-privileged", "--task", "t"]
+                    )
+        self.assertEqual(code, 0)
+        token = consume_approval(path=self.token_path)
+        self.assertIsNotNone(token)
+        self.assertTrue(token.privileged)
+
+    def test_privileged_fleet_run_with_normal_token_refused(self):
+        """AE4: a NORMAL-flavored token bound to the exact privileged-fleet
+        surface is still refused — the flavor check gates independently of the
+        digest match. Zero model calls."""
+        cfg = FleetConfig.load(str(self.priv_fleet))
+        resolve(cfg, default_pool_dir())
+        composed_task, _doc_paths, _truncated = compose("t", [])
+        digest = surface_digest(cfg, composed_task, resolved_hermes_home())
+        write_approval(digest, privileged=False, path=self.token_path)
+
+        fake_client_cls = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--approve-privileged", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_privileged_fleet_run_with_privileged_token_proceeds(self):
+        """--approve-privileged mint followed by a matching run proceeds."""
+        fake = FakeClient({"a": ("ok", "A OUTPUT")})
+        run_argv = ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--approve-privileged"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
+
+    def test_nonprivileged_fleet_accepts_privileged_token_no_lockout(self):
+        """A non-privileged fleet approved via --approve-privileged still runs —
+        the flavor check only fires for a fleet that is itself privileged."""
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--approve-privileged"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
 
 
 class TestSkillPreviewFlagsAPIBilledSynthesizer(unittest.TestCase):
