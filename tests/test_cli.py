@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -12,9 +13,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fleet_engine.capture import _slugify, resolve_run_dir
+from fleet_engine.approval import consume_approval, surface_digest
+from fleet_engine.capture import _slugify, resolve_run_dir, resolved_hermes_home
 from fleet_engine.cli import main as cli_main, run_command, validate_command
+from fleet_engine.config import FleetConfig
+from fleet_engine.file_input import compose
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import default_pool_dir, resolve
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
 
@@ -577,6 +582,144 @@ class TestSkillPreviewMakesNoModelCalls(unittest.TestCase):
                     self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
         output = stdout_buf.getvalue()
         self.assertIn("allow_privileged_tools", output)
+
+
+class TestSkillPreviewMintsApprovalToken(unittest.TestCase):
+    """--preview WITH --task mints a preview-bound approval token (U3 — the mint
+    half; RUN-side enforcement is U4).
+
+    Still zero model calls / zero capture (the existing invariant must not
+    weaken); the minted token's digest matches an independently-computed
+    ``surface_digest`` over the same (config, composed_task, profile); the
+    composed task itself renders on the approval surface; different --doc
+    content binds to a different digest; a task-less preview mints nothing
+    (matches the run path's own None refusal); and a privileged fleet's PLAIN
+    preview mints nothing (U5 adds the deliberate --approve-privileged mint).
+
+    Every test isolates the token file via CADRE_APPROVAL_PATH so none of
+    them ever touch the real ~/.cadre/approval.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _token_path(self, name="approval"):
+        return str(self.tmp / name)
+
+    def test_preview_with_task_still_zero_model_calls(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": self._token_path()}):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        code = self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "hello"]
+                        )
+        self.assertEqual(code, 0)
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_preview_with_task_mints_bound_token(self):
+        token_path = self._token_path()
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "hello"]
+                        )
+        token = consume_approval(path=token_path)
+        self.assertIsNotNone(token)
+        self.assertFalse(token.privileged)
+
+        cfg = FleetConfig.load(_EXAMPLE_FLEET)
+        resolve(cfg, default_pool_dir())
+        composed_task, _doc_paths, _truncated = compose("hello", [])
+        expected_digest = surface_digest(cfg, composed_task, resolved_hermes_home())
+        self.assertEqual(token.digest, expected_digest)
+
+    def test_preview_renders_composed_task(self):
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": self._token_path()}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        self.run_mod.main(
+                            [
+                                "--fleet", _EXAMPLE_FLEET,
+                                "--preview",
+                                "--task", "a distinctive composed-task marker string",
+                            ]
+                        )
+        output = stdout_buf.getvalue()
+        self.assertIn("a distinctive composed-task marker string", output)
+
+    def test_preview_with_doc_binds_doc_content(self):
+        """Same --task, DIFFERENT --doc content -> different minted digest."""
+        doc_a = self.tmp / "a.md"
+        doc_a.write_text("content A")
+        doc_b = self.tmp / "b.md"
+        doc_b.write_text("content B")
+        token_path_1 = self._token_path("approval1")
+        token_path_2 = self._token_path("approval2")
+
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path_1}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "t", "--doc", str(doc_a)]
+                        )
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path_2}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "t", "--doc", str(doc_b)]
+                        )
+
+        token_1 = consume_approval(path=token_path_1)
+        token_2 = consume_approval(path=token_path_2)
+        self.assertIsNotNone(token_1)
+        self.assertIsNotNone(token_2)
+        self.assertNotEqual(token_1.digest, token_2.digest)
+
+    def test_taskless_preview_mints_no_token(self):
+        """No --task and no --doc: composed_task is None, so preview renders the
+        fleet shape only and mints nothing — the token file never gets created."""
+        token_path = self._token_path()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        self.assertFalse(os.path.exists(token_path))
+
+    def test_privileged_fleet_plain_preview_mints_no_token(self):
+        """A privileged fleet's plain --preview mints nothing — U5 adds the
+        deliberate --approve-privileged act that this build does not implement."""
+        priv_fleet = self.tmp / "priv.yaml"
+        priv_fleet.write_text(json.dumps({
+            "name": "priv",
+            "convergence": "collect",
+            "specialists": [{"role": "a", "provider": "p", "model": "m", "focus": "f"}],
+            "allow_privileged_tools": True,
+        }))
+        token_path = self._token_path()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        code = self.run_mod.main(
+                            ["--fleet", str(priv_fleet), "--preview", "--task", "hello"]
+                        )
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(token_path))
 
 
 class TestSkillPreviewFlagsAPIBilledSynthesizer(unittest.TestCase):

@@ -35,6 +35,7 @@ from fleet_engine.progress import (
 )
 from fleet_engine.render import (
     ProgressRenderer,
+    render_composed_task,
     render_file_inputs,
     render_fleet_preview,
     render_result,
@@ -1680,6 +1681,40 @@ class TestRenderFileInputs(unittest.TestCase):
     def test_no_truncation_marker_when_nothing_truncated(self):
         """With no truncated paths, no marker appears (default arg, byte-clean block)."""
         self.assertNotIn("truncated", render_file_inputs(["a.md", "b.md"]))
+
+
+# ---------------------------------------------------------------------------
+# render_composed_task — the composed --task/--doc preview block (#5 Part 2 U3)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderComposedTask(unittest.TestCase):
+    """render_composed_task renders the composed --task/--doc text for the
+    preview. The composed task is what the run actually feeds the models and
+    what the approval binds, so it must be sanitized multi-line like the
+    synthesis-prompt block — a --doc's content could otherwise smuggle a
+    terminal escape onto the human-approval surface.
+    """
+
+    def test_task_text_appears_in_output(self):
+        rendered = render_composed_task("what should we build next?")
+        self.assertIn("what should we build next?", rendered)
+        self.assertIn("Composed task", rendered)
+
+    def test_escapes_stripped_text_kept(self):
+        """Mirrors TestRenderFleetPreviewSanitization's prompt-sanitize test: the
+        composed task keeps legit text, drops control bytes."""
+        rendered = render_composed_task("line1\x1b[31m\nline2\rmore")
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\r", rendered)
+        self.assertIn("line1", rendered)
+        self.assertIn("line2", rendered)
+
+    def test_newlines_preserved(self):
+        """A clean multi-line task keeps its newlines and is indented like the
+        synthesis-prompt block (multiline=True, not the single-line stripping)."""
+        rendered = render_composed_task("line1\nline2")
+        self.assertIn("line1\n  line2", rendered)
 
 
 # ---------------------------------------------------------------------------

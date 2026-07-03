@@ -289,6 +289,20 @@ def render_file_inputs(paths: list[str], truncated: list[str] | None = None) -> 
     return "\n".join(out)
 
 
+def render_composed_task(task: str) -> str:
+    """Render the composed task (--task + any --doc blocks) for the preview.
+
+    The composed task is what the run actually feeds the models and what the
+    approval binds; the operator must see it to approve the real inputs, not a
+    config in isolation. Sanitized multi-line like the synthesis-prompt block —
+    a --doc's content could otherwise smuggle a terminal escape onto the
+    approval surface.
+    """
+    body = sanitize(task, multiline=True)
+    indented = body.replace(chr(10), chr(10) + "  ")
+    return f"\nComposed task (--task + --doc):\n  {indented}"
+
+
 def render_result(result: FleetResult) -> str:
     # Key the header on (convergence, status) so every (mode, outcome) pair is read from
     # the engine-declared status, not re-derived from ok/synth_ok/judge_ok.

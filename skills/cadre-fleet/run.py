@@ -18,6 +18,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from fleet_engine.approval import default_approval_path, surface_digest, write_approval  # noqa: E402
 from fleet_engine.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
@@ -27,10 +28,19 @@ from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
 from fleet_engine.text_safety import sanitize as _sanitize  # noqa: E402  (GH #23)
 from fleet_engine.render import (  # noqa: E402
+    render_composed_task,
     render_file_inputs,
     render_fleet_preview,
     render_result,
 )
+
+
+def _surface_digest_for(cfg, composed_task):
+    """The surface digest that BOTH the preview-mint (U3) and the run-enforce
+    (U4) bind to — one call site so the two can never drift on which inputs
+    they hash (KTD1). Reads the resolved profile internally so both paths
+    bind the same HERMES_HOME."""
+    return surface_digest(cfg, composed_task, resolved_hermes_home())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +122,18 @@ def main(argv: list[str] | None = None) -> int:
         # stdout as part of the preview the human approves (no [cadre] stderr
         # infra on the preview path).
         print(render_preview_warnings(cfg))
+        # Render the composed task the run will feed the models, and mint an
+        # approval token bound to this exact surface. A task-less preview
+        # (composed_task is None) renders the fleet shape only and mints nothing
+        # — matching the run path's own None refusal. A privileged fleet mints
+        # nothing here: it needs the deliberate --approve-privileged act (U5).
+        if composed_task is not None:
+            print(render_composed_task(composed_task))
+            if not cfg.allow_privileged_tools:
+                digest = _surface_digest_for(cfg, composed_task)
+                write_approval(digest, privileged=False)
+                print(f"\nPreview-bound approval written: {default_approval_path()}")
+                print("This run is now approved to execute this exact previewed surface once.")
         return 0
 
     # Real run: need at least one of --task / --doc. composed_task is None only when
