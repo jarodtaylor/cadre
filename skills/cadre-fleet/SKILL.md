@@ -170,17 +170,22 @@ what the approval is bound to:
 The run refuses — fail-closed, non-zero exit, no model calls — unless it finds a
 preview-bound approval whose digest matches this exact invocation. That makes
 three things load-bearing:
-- **Preview immediately before you run.** Only one approval is pending at a
-  time (a newer preview replaces an older one), so don't preview, go preview a
-  *different* fleet in between, then come back to run the first.
+- **Preview immediately before you run.** Each *minting* preview overwrites the
+  previous token, so at most one approval is live at a time — don't preview, go
+  preview a *different* fleet in between, then come back to run the first. (A
+  preview that mints nothing — a privileged fleet's plain `--preview`, or a
+  task-less `--preview` — does not clear a prior token, so re-preview the exact
+  run you intend rather than relying on a no-mint preview to "reset" state.)
 - **One attempt per approval.** The approval is consumed the moment a run reads
   it — even a *refused* run (wrong surface, or none found) burns whatever was
   pending. A refusal is not a retry loop: re-run `--preview` (or
   `--approve-privileged` for a privileged fleet) to mint a fresh approval, then
   run again.
 - **Don't change `HERMES_HOME` in between.** The approval binds the resolved
-  profile, so a different profile at run time is a surface change like any
-  other and is refused the same way.
+  profile path, so a different profile at run time is a surface change like any
+  other and is refused the same way. Use a stable, absolute `HERMES_HOME` — a
+  relative value resolves against the current directory, so running the preview
+  and the run from different directories is itself a surface change.
 
 Use `--doc PATH` (repeatable) to read a file's contents into the task — the
 "name the plan, no pasting" path, with the doc-review fleet as the primary

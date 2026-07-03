@@ -159,7 +159,21 @@ def main(argv: list[str] | None = None) -> int:
                 # privileged-flavored token; the run accepts either flavor for a
                 # non-privileged fleet (no lock-out).
                 digest = _surface_digest_for(cfg, composed_task)
-                write_approval(digest, privileged=args.approve_privileged)
+                try:
+                    write_approval(digest, privileged=args.approve_privileged)
+                except OSError as exc:
+                    # Never a traceback (the repo's clean-error contract): a symlinked
+                    # or otherwise-unwritable approval path fails closed HERE (no token
+                    # minted -> the subsequent run is refused) with a clear message
+                    # instead of crashing the preview. Sanitize the exception text (it
+                    # can carry a path with control bytes) like every other rendered string.
+                    print(
+                        f"\nCould not write the approval token at {default_approval_path()}: "
+                        f"{_sanitize(str(exc))}\n"
+                        "Ensure ~/.cadre (or CADRE_APPROVAL_PATH) is an owner-only, "
+                        "non-symlink path, then re-preview."
+                    )
+                    return 1
                 flavor = "privileged " if args.approve_privileged else ""
                 print(f"\nPreview-bound {flavor}approval written: {default_approval_path()}")
                 print("This run is now approved to execute this exact previewed surface once.")

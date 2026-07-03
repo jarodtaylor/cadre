@@ -827,6 +827,29 @@ class TestSkillApprovalGate(unittest.TestCase):
         self.assertIn("--preview", buf.getvalue())
         fake_client_cls.assert_not_called()
 
+    def test_profile_swap_refused(self):
+        """The HERMES_HOME profile is a bound axis end-to-end: preview under one
+        profile, run under another -> refused (digest mismatch), zero model calls.
+        Fills the profile axis of the refusal matrix (config/task/one-shot are
+        covered above); the pure-function digest test in test_approval only covers
+        surface_digest, never run.py's HERMES_HOME env wiring. Absolute paths so the
+        binding is cwd-independent."""
+        fake_client_cls = MagicMock()
+        env_a = {**self._env(), "HERMES_HOME": "/tmp/cadre-profile-a"}
+        env_b = {**self._env(), "HERMES_HOME": "/tmp/cadre-profile-b"}
+        with patch.dict(os.environ, env_a):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t", "--preview"])
+        buf = io.StringIO()
+        with patch.dict(os.environ, env_b):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"])
+        self.assertEqual(code, 1)
+        self.assertIn("--preview", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
     def test_one_shot_reuse_second_run_refused(self):
         """AE3: --preview mints once; the first run consumes it and proceeds; a
         second run on the SAME approval path is refused (token already consumed)."""
@@ -928,6 +951,23 @@ class TestSkillPrivilegedApproval(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(os.path.exists(self.token_path))
         self.assertIn("--approve-privileged", buf.getvalue())
+
+    def test_approve_privileged_rerenders_privileged_preview(self):
+        """--approve-privileged re-renders the SAME preview (the PRIVILEGED TOOLS
+        ENABLED warning + the fleet's specialists), not just a silent mint — so a
+        human approving a privileged fleet still sees the warning on THAT invocation.
+        Guards against a refactor that short-circuits it to mint-only."""
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--approve-privileged", "--task", "t"]
+                    )
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("PRIVILEGED TOOLS ENABLED", out)
+        self.assertIn("[a]", out)  # the fleet's specialist role, via render_fleet_preview
 
     def test_approve_privileged_mints_privileged_token(self):
         """--approve-privileged mints a token whose privileged flavor is True."""

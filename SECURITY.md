@@ -38,14 +38,20 @@ not a claim that Cadre is "injection-proof."
   handoff, a real run executes only when it presents a one-shot, owner-only
   approval token bound to a `sha256` digest of the exact previewed surface — the
   parsed fleet config, the composed task (`--task` + `--doc` contents), the
-  resolved personas, and the `HERMES_HOME` profile. A run whose surface differs
-  in any of these from a fresh `--preview` is refused (fail-closed, non-zero
-  exit); the token is one-shot (consumed on use). A fleet with
+  resolved personas, and the `HERMES_HOME` profile **path**. A run whose surface
+  differs in any of these from a fresh `--preview` is refused (fail-closed,
+  non-zero exit); the token is one-shot (consumed on use). A fleet with
   `allow_privileged_tools: true` requires a separate, deliberate
   `--approve-privileged` act. This upgrades the v0 preview-then-approve control
   from a procedural instruction to a code-enforced **binding**: what runs is what
-  was previewed. Unforgeability rests on the token file's owner-only `~/.cadre`
-  permissions (no MAC/secret) — appropriate for the single-operator posture.
+  was previewed. (The binding covers the profile *path*, not the profile's
+  *contents* — a profile whose creds/tools change at the same path between preview
+  and run is operator-controlled host config, outside the tampered-library threat
+  model, so it is deliberately not digested.) Unforgeability rests on the token
+  file's owner-only `~/.cadre` permissions (no MAC/secret) — appropriate for the
+  single-operator posture; if you relocate the token with `CADRE_APPROVAL_PATH`,
+  it must stay in an owner-only directory (the digest is not a secret, so a
+  group/world-writable location would let a co-resident user forge an approval).
 - **Install seeding.** Starter fleets/personas are written owner-only (`0o600`) with
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything
