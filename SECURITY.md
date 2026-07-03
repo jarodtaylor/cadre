@@ -56,6 +56,17 @@ not a claim that Cadre is "injection-proof."
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything
   privileged or unrecognized requires an explicit `allow_privileged_tools: true`.
+- **Palette toolsets are proven to fire, not merely declared.** The verify step
+  live-probes each declared toolset with a forced tool-call prompt via
+  `run_conversation()` (never `chat()` — only the full conversation history can
+  show a tool actually fired) and records only the ones observed firing in
+  `~/.cadre/palette.yaml`; an unprovisioned declared toolset is omitted and
+  warned by name at verify time instead of being silently included. Honest
+  caveat: a provisioned tool a model simply *declines* to call on this one
+  forced probe is indistinguishable from an unprovisioned one, so it is
+  conservatively omitted too (fail-closed, false-negative-safe) — the failure
+  mode this closes is a toolset running silently ungrounded, not a toolset
+  missing from the palette.
 
 ## What is NOT defended (bounded, documented residuals)
 
@@ -91,10 +102,6 @@ not a claim that Cadre is "injection-proof."
   routing approval outside the agent's process, which this single-operator
   deployment does not do. The direct-human dev CLI (`python -m fleet_engine.cli`)
   is intentionally **not** gated — a human invoking it directly *is* the operator.
-- **Palette toolsets are declared, not live-probed (Finding 3, pending).** The
-  palette records the toolsets a profile declares, safe-filtered, but does not yet
-  probe that each one fires live — so a lane can answer from training knowledge
-  with no error. Live per-toolset verification is the remaining Part-2 slice.
 
 ## Posture
 

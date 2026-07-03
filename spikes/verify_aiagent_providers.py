@@ -12,18 +12,25 @@ RUNS ON THE HERMES HOST with the Hermes venv Python:
 
 **(1) Live verification** — not testable on the dev machine (no hermes-agent).
     `verify_candidates(candidates)` calls AIAgent on the Hermes host and returns
-    a list of VerifyRecord. Never call this here; the test suite patches `_agent`.
+    a list of VerifyRecord. `probe_toolsets(records, toolsets)` then live-probes
+    each declared toolset with a strongly tool-forcing prompt via
+    `run_conversation()` (never `chat()` — it returns only final text, which can
+    never show a tool fire) and returns only the toolsets a tool call was actually
+    observed for. Never call either here; the test suite patches `_agent`.
 
 **(2) Pure writer** — fully testable here with fake records.
-    `write_palette(records, toolsets, path)` takes a record list + declared toolsets,
-    filters to ok pairs + safe toolsets, and writes owner-only 0o600 YAML.
+    `write_palette(records, proven_toolsets, path, declared_toolsets=...)` takes a
+    record list + the toolsets `probe_toolsets` proved fire, filters to ok pairs +
+    safe toolsets, warns by name on any declared toolset that didn't make it in,
+    and writes owner-only 0o600 YAML.
 
 ---
 
 ## One-time host workflow
 
 1. Edit CANDIDATES (or ~/.cadre/palette-candidates.yaml) with your real strings.
-2. Run this spike via the Hermes venv — verifies + writes ~/.cadre/palette.yaml.
+2. Run this spike via the Hermes venv — verifies models, live-probes declared
+   toolsets, and writes ~/.cadre/palette.yaml.
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -204,22 +211,217 @@ def _reason_from_capture(captured: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Live per-toolset probing (NOT testable on dev; runs on Hermes host)
+#
+# U7 (issue #5 Finding 3): a model resolving via verify_candidates() tells us
+# NOTHING about whether its declared toolsets actually fire — Hermes tools are
+# profile-scoped, so a model can answer fine while its web/search tool is
+# unprovisioned, and a lane reading that toolset runs silently ungrounded (no
+# error). This closes that gap with a live, forced-tool-call probe.
+# ---------------------------------------------------------------------------
+
+# Tailored tool-forcing prompts for the toolsets most relevant to the failure this
+# probe exists to catch (a lane silently answering from training knowledge instead
+# of grounding via a declared-but-unprovisioned web/search tool). Anything else
+# falls back to _forcing_prompt's generic phrasing below — covers every other
+# current SAFE_TOOLSETS member and degrades gracefully if that allowlist grows.
+# Wording is best-effort; a live host dogfood (not a unit test) is the real
+# reliability check.
+_PROBE_PROMPT_OVERRIDES: dict[str, str] = {
+    "web": (
+        "Search the web right now for today's exact date and cite the source URL. "
+        "You MUST call your web/search tool to do this; do not answer from memory."
+    ),
+    "search": (
+        "Use your search tool right now to look up today's exact date and cite "
+        "the source URL. You MUST call the tool; do not answer from memory."
+    ),
+    "x_search": (
+        "Use your X (Twitter) search tool right now to find one real, recent post "
+        "and quote it verbatim with its URL. You MUST call the tool; do not answer "
+        "from memory."
+    ),
+}
+
+# Small SAME-MODEL retry budget: guards the false-negative where a capable model
+# just declines to call a tool on one attempt. This is NOT a cross-model sweep —
+# see probe_toolsets() for why a single representative candidate is used per
+# toolset (toolsets are profile-scoped, so one successful probe proves the tool
+# is provisioned for the whole profile; KTD6).
+_MAX_PROBE_ATTEMPTS = 2
+
+
+def _forcing_prompt(toolset: str) -> str:
+    """A strongly tool-forcing prompt for a single toolset probe.
+
+    Uses the tailored override when one exists (_PROBE_PROMPT_OVERRIDES);
+    otherwise falls back to a generic forcing phrasing that names the toolset.
+    """
+    if toolset in _PROBE_PROMPT_OVERRIDES:
+        return _PROBE_PROMPT_OVERRIDES[toolset]
+    return (
+        f"Use your {toolset} tool right now and report concrete evidence that you "
+        f"actually called it. You MUST call the {toolset} tool at least once; do "
+        "not answer from memory or merely describe what you would do."
+    )
+
+
+def _has_tool_call_evidence(messages: object) -> bool:
+    """Scan a run_conversation() ``messages`` history for a tool-call/tool-role entry.
+
+    docs/reference/hermes/python-library.md confirms only the conversation-level
+    shape: run_conversation() "returns a dictionary with the full response,
+    message history, and metadata", whose ``messages`` key is "The complete
+    message history (system, user, assistant, tool calls)". It does NOT document
+    the per-message dict schema for a tool call — and a live call can't be run
+    here to observe one — so this scans defensively for several known
+    agent-framework shapes rather than assuming a single one: OpenAI-style (a
+    "tool" role message, or an assistant message carrying a non-empty
+    "tool_calls" list), the legacy single "function_call" dict, and
+    Anthropic-style content-block items (a list "content" containing a dict whose
+    "type" is "tool_use"/"tool_result"/"function_call"). Any one is accepted as
+    fire evidence, including a bare tool-call *request* without yet seeing its
+    result.
+
+    That's deliberately not tightened to require a tool *result*: AGENTS.md
+    verified-fact #1 records that Hermes runs a per-tool ``check_fn`` before a
+    toolset ever reaches the model, so a model generally cannot even emit a call
+    for a toolset it wasn't given — a bare request is already meaningful evidence,
+    not a hallucinated intent. If a live dogfood ever shows a recorded-but-
+    still-ungrounded toolset, tighten this to require a tool-result (role="tool")
+    specifically.
+    """
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") in ("tool", "function"):
+            return True
+        if msg.get("tool_calls"):
+            return True
+        if msg.get("function_call"):
+            return True
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in (
+                    "tool_use",
+                    "tool_result",
+                    "function_call",
+                ):
+                    return True
+    return False
+
+
+def _probe_toolset(provider: str, model: str, toolset: str) -> bool:
+    """Probe whether ``toolset`` actually fires for (provider, model) via a live,
+    strongly tool-forcing call. Returns True only if a tool call was OBSERVED in
+    the conversation history.
+
+    Uses ``run_conversation()``, never ``chat()``: "chat() ... returns just the
+    final text response" (python-library.md) — final text alone can never show a
+    tool fired. ``run_conversation()``'s ``messages`` carries the full history
+    including tool calls, which is the only place the fire signal can be
+    observed. Call shape confirmed against the vendored guide's own example:
+    ``agent.run_conversation(user_message=..., task_id=...)`` (python-library.md,
+    "Full Conversation Control").
+
+    Retries up to ``_MAX_PROBE_ATTEMPTS`` times — a fresh agent each attempt,
+    mirroring the "one AIAgent per task, never shared" thread-safety guidance —
+    before giving up. Fail-closed: any exception, or no tool-call evidence across
+    the whole budget, returns False. This function never raises and never
+    returns True on an error path.
+
+    Output-suppressed exactly like _verify_one (redirect_stdout/stderr to a sink
+    + logging.disable in a try/finally), so a multi-toolset sweep doesn't spam
+    raw provider errors to the terminal.
+    """
+    prompt = _forcing_prompt(toolset)
+    sink = io.StringIO()
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            for attempt in range(_MAX_PROBE_ATTEMPTS):
+                try:
+                    agent = _agent(provider, model, toolset=[toolset])
+                    result = agent.run_conversation(
+                        user_message=prompt,
+                        task_id=f"cadre-probe-{toolset}-{attempt}",
+                    )
+                except Exception:  # noqa: BLE001 — fail-closed: try again, never crash the sweep
+                    continue
+                messages = result.get("messages") if isinstance(result, dict) else None
+                if _has_tool_call_evidence(messages):
+                    return True
+    finally:
+        logging.disable(logging.NOTSET)
+    return False
+
+
+def probe_toolsets(records: list[VerifyRecord], toolsets: list[str]) -> list[str]:
+    """Live-probe each SAFE declared toolset and return only the ones PROVEN to
+    fire (input order preserved).
+
+    Probes against a single representative candidate — the first ok=True record
+    — not every verified candidate. _probe_toolset's own retry budget already
+    guards the single-model-declines false negative, and toolsets are
+    profile-scoped (the palette's ``toolsets`` is one global list for the whole
+    profile, not per-model — KTD6), so there is one fact to establish, not a
+    per-model matrix. A toolset that never fires on that candidate is left out;
+    write_palette then omits it with a warning. This is a deliberate,
+    documented, conservative (false-negative-safe) trade-off — see SECURITY.md.
+
+    Non-safe toolset names are skipped without probing (SAFE_TOOLSETS would drop
+    them from the palette regardless of proof, so spending a live call on one
+    would be wasted). Returns [] if there are no ok candidates, or no safe
+    toolsets, to probe.
+    """
+    from fleet_engine.config import SAFE_TOOLSETS  # noqa: PLC0415
+
+    ok_records = [r for r in records if r.ok]
+    candidates = [t for t in toolsets if t in SAFE_TOOLSETS]
+    if not ok_records or not candidates:
+        return []
+
+    provider, model = ok_records[0].provider, ok_records[0].model
+    proven: list[str] = []
+    for toolset in candidates:
+        if _probe_toolset(provider, model, toolset):
+            print(f"  ✓ toolset proven live: {toolset}")
+            proven.append(toolset)
+        else:
+            print(f"  ✗ toolset NOT proven live: {toolset}  — will be omitted from the palette")
+    return proven
+
+
+# ---------------------------------------------------------------------------
 # Pure writer (fully testable with fake records)
 # ---------------------------------------------------------------------------
 
 
 def write_palette(
     records: list[VerifyRecord],
-    toolsets: list[str],
+    proven_toolsets: list[str],
     path: Path | str,
+    *,
+    declared_toolsets: list[str] | None = None,
 ) -> None:
     """Write the verified palette to ``path`` as owner-only YAML (0o600).
 
-    Filters ``records`` to only ``ok=True`` pairs. Intersects ``toolsets`` with
-    ``fleet_engine.config.SAFE_TOOLSETS``, preserving input order (list
+    Filters ``records`` to only ``ok=True`` pairs. Intersects ``proven_toolsets``
+    with ``fleet_engine.config.SAFE_TOOLSETS``, preserving input order (list
     comprehension, not set intersection — order is locked by the downstream
     schema). Raises ValueError (before any filesystem side-effects) if there are
     zero ok records.
+
+    ``proven_toolsets`` must already be the toolsets ``probe_toolsets`` observed
+    firing live — NOT merely declared (U7/U8, issue #5 Finding 3). When
+    ``declared_toolsets`` is also given, every declared-and-safe toolset that
+    isn't in ``proven_toolsets`` is named in a loud warning — never silently
+    dropped on an inconclusive probe. A toolset that's declared but not safe
+    (e.g. ``terminal``) is dropped the same way it always was, silently — that's
+    the separate, pre-existing privilege gate, not a probe outcome.
 
     The written YAML has the locked schema::
 
@@ -233,8 +435,11 @@ def write_palette(
 
     Args:
         records: Verification records from ``verify_candidates`` (or test fakes).
-        toolsets: Declared toolsets for this profile; non-safe names are dropped.
+        proven_toolsets: Toolsets ``probe_toolsets`` proved fire live; non-safe
+            names are dropped.
         path: Destination path for the palette YAML (parent is created if missing).
+        declared_toolsets: The profile's originally declared toolsets, used only
+            to name-and-warn about ones that didn't make it into the palette.
 
     Raises:
         ValueError: If there are no ``ok=True`` records (nothing to write).
@@ -251,8 +456,27 @@ def write_palette(
             "check candidates and host auth"
         )
 
-    # Order-preserving safe-toolset filter (NOT set intersection).
-    safe_toolsets = [t for t in toolsets if t in SAFE_TOOLSETS]
+    # Order-preserving safe-toolset filter (NOT set intersection) — the
+    # load-bearing allowlist still applies even to a toolset the live probe
+    # proved fires.
+    safe_toolsets = [t for t in proven_toolsets if t in SAFE_TOOLSETS]
+
+    # Loudly name every declared-and-safe toolset that did NOT make it into the
+    # palette — fail-closed: an inconclusive/unproven/errored probe omits, it
+    # never guesses. (A declared-but-not-safe toolset, e.g. terminal, is
+    # silently dropped as always — that's the unrelated privilege gate, not a
+    # probe outcome, so it's excluded from this warning.)
+    if declared_toolsets:
+        omitted = [
+            t for t in declared_toolsets
+            if t in SAFE_TOOLSETS and t not in safe_toolsets
+        ]
+        for t in omitted:
+            print(
+                f"  ⚠ toolset '{t}' declared but NOT proven to fire live — "
+                "omitted from the palette (a lane reading it would run silently "
+                "ungrounded); provision it on this host/profile and re-run verify"
+            )
 
     # Build the palette dict in the locked field order.
     palette = {
@@ -261,17 +485,21 @@ def write_palette(
         "toolsets": safe_toolsets,
     }
 
-    # Honesty header at the point of use: models are live-verified, but toolsets
-    # are only DECLARED + safe-filtered, never tool-probed (verify_candidates runs
-    # a no-tool chat). A model can resolve while its search tool is unprovisioned,
-    # so a lane reading that toolset can run silently ungrounded. The full fix is
-    # host-side per-toolset probing (see RUNBOOK); until then this warns the reader.
+    # Honesty header at the point of use: models are live-verified AND each
+    # listed toolset FIRED LIVE during a forced tool-call probe (probe_toolsets)
+    # — not merely declared. A declared toolset the probe never observed firing
+    # is omitted here and was already warned above by name. The one residual: a
+    # provisioned tool a model simply DECLINES to call on this one forced probe
+    # is indistinguishable from an unprovisioned one, so it is conservatively
+    # omitted too (fail-closed, false-negative-safe — see SECURITY.md).
     header = (
         "# Cadre verified palette — generated by the verify step; do not hand-edit.\n"
         "# models:   provider/model pairs confirmed by a live chat call.\n"
-        "# toolsets: DECLARED safe toolsets, NOT tool-probed — provision each in the\n"
-        "#           Hermes profile (see RUNBOOK) or a lane using it runs silently\n"
-        "#           ungrounded (answers from training knowledge, with no error).\n"
+        "# toolsets: each one FIRED LIVE in a forced tool-call probe (not merely\n"
+        "#           declared) — see probe_toolsets. A declared toolset that\n"
+        "#           never fired is OMITTED here (warned by name at verify time),\n"
+        "#           so a lane reading a toolset below should not run silently\n"
+        "#           ungrounded the way an unprobed declaration could.\n"
     )
     content = header + yaml.safe_dump(palette, sort_keys=False, allow_unicode=True)
 
@@ -348,8 +576,17 @@ def main() -> int:
     records = verify_candidates(candidates)
 
     n_ok = sum(1 for r in records if r.ok)
+
+    if declared_toolsets:
+        print(
+            f"\nProbing {len(declared_toolsets)} declared toolset(s) live — a toolset\n"
+            "that never fires a tool call in a forced probe is omitted (fail-closed),\n"
+            "not merely skipped.\n"
+        )
+    proven_toolsets = probe_toolsets(records, declared_toolsets)
+
     try:
-        write_palette(records, declared_toolsets, palette_path)
+        write_palette(records, proven_toolsets, palette_path, declared_toolsets=declared_toolsets)
     except ValueError as exc:
         print(f"\n✗ {exc}")
         return 1
