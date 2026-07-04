@@ -36,7 +36,7 @@ from pathlib import Path
 from fleet_engine.config import FleetConfig
 from fleet_engine.engine import FleetResult, FleetStatus
 from fleet_engine.judge_grade import parse_grades
-from fleet_engine.text_safety import sanitize as _sanitize
+from fleet_engine.text_safety import frame_body, sanitize as _sanitize
 
 # Default Hermes profile location — recorded in the manifest and shown in the
 # fleet preview when HERMES_HOME is unset.
@@ -496,7 +496,7 @@ def _synthesis_md(result: FleetResult) -> str:
             # multiline=True keeps the body's newlines). The two attributed-block
             # renderers stay separate (terminal vs disk) but share this invariant.
             blocks = [
-                f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{_sanitize(lane.text or '', multiline=True)}"
+                f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{frame_body(lane.text or '')}"
                 for lane in successes
             ]
             return "# Collected specialist outputs (collect mode — no synthesis)\n\n" + "\n\n".join(blocks)
@@ -530,7 +530,7 @@ def _synthesis_md(result: FleetResult) -> str:
             )
             # The note embeds adapter/model error text — sanitize before it reaches
             # synthesis.md (a persisted trust surface), matching the render notes path.
-            return f"No judge grade — {_sanitize(judge_note, multiline=True)}."
+            return f"No judge grade — {frame_body(judge_note)}."
         # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
         # over the survivors (DEGRADED with result.judge set — fell through above).
         # #5 U2: the judge text is model output and is now _sanitize'd (multiline=True)
@@ -540,13 +540,13 @@ def _synthesis_md(result: FleetResult) -> str:
         # sanitized for the same reason.
         successes = result.successes
         blocks = [
-            f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{_sanitize(lane.text or '', multiline=True)}"
+            f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{frame_body(lane.text or '')}"
             for lane in successes
         ]
         specialist_section = "\n\n".join(blocks)
         return (
             "# Judge grade\n\n"
-            + _sanitize(result.judge or "", multiline=True)
+            + frame_body(result.judge or "")
             + ("\n\n# Specialist outputs\n\n" + specialist_section if specialist_section else "")
         )
 
@@ -578,7 +578,7 @@ def _synthesis_md(result: FleetResult) -> str:
         "synthesizer failed",
     )
     # Embeds adapter/model error text — sanitize before writing to synthesis.md.
-    return f"No synthesis — {_sanitize(synth_note, multiline=True)}."
+    return f"No synthesis — {frame_body(synth_note)}."
 
 
 def _representative_file(result: FleetResult, lane, fmap: dict[str, str]) -> str:  # lane: AgentResult
