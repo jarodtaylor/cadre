@@ -571,7 +571,10 @@ def _synthesis_md(result: FleetResult) -> str:
     # status is DEGRADED — synthesizer ran and failed.
     # Pull the synthesizer-failed note from result.notes if present.
     synth_note = next(
-        (n for n in result.notes if "synthesizer failed" in n),
+        # Prefix-match the known "synthesizer failed: <err>" format (engine.py), not a
+        # loose substring: a specialist failure note that merely CONTAINS the phrase would
+        # otherwise be mis-picked as the degrade reason (#33). Mirrors the judge path above.
+        (n for n in result.notes if n.startswith("synthesizer failed:")),
         "synthesizer failed",
     )
     # Embeds adapter/model error text — sanitize before writing to synthesis.md.
