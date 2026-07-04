@@ -111,7 +111,10 @@ not a claim that Cadre is "injection-proof."
   *inside* the guttered body line, so an un-anchored substring grep still matches it;
   this is why the `cadre-fleet` agent read-back reads structural provenance
   (`ok`/`status`/`judge_ok`/`grades`/…) from the forgery-immune `manifest.json` rather
-  than the report. (b) The **isolated on-disk deliverables** are deliberately left
+  than the report. The flush-left signal is per *logical* line: on a soft-wrapping
+  terminal one very long body line can wrap so its continuation sits at a visual
+  column 0 — the `.md` surfaces (which parse logical lines) and the manifest
+  read-back are unaffected. (b) The **isolated on-disk deliverables** are deliberately left
   native markdown — per-lane `specialist-*.md` and the synthesize-mode `synthesis.md`
   are safe only while each file stands alone: concatenating the run folder or ingesting
   several files re-creates a combined surface, and a per-lane file already interleaves

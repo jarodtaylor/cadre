@@ -418,10 +418,10 @@ def render_result(result: FleetResult) -> str:
     # Every fleet/model-derived field on this surface is sanitized against escape
     # bytes: the identity fields (fleet/role/provider/model) and r.error
     # (model/adapter output) so neither can smuggle a control sequence into the row
-    # it renders (#5 U2). r.text/synthesis are sanitized above where they render.
-    # NOTE: this strips escapes, not plain-text grammar — a model body can still
-    # print a look-alike "[ok  ] x" line inertly (report-grammar mimicry residual,
-    # SECURITY.md); framing model bodies is a tracked fast-follow.
+    # it renders (#5 U2). r.text/synthesis/judge bodies are gutter-framed above
+    # (frame_body, GH #45) so a model body cannot render a flush-left look-alike
+    # row; the inline r.error/notes fields here are single-line via non-multiline
+    # sanitize, so they cannot open a second row either.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"

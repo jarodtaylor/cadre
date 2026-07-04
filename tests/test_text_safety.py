@@ -117,6 +117,25 @@ class TestSanitizeNonMultilineDropsAllLineBreakers(unittest.TestCase):
             self.assertEqual(out.count("\n"), 0)
 
 
+class TestSanitizeMultilineKeepsOnlyNewlineAsLineBoundary(unittest.TestCase):
+    """GH #45 — frame_body's "no body line at column 0" guarantee rests on MULTILINE
+    sanitize dropping every line-boundary except ``\\n`` (so ``body.split("\\n")`` is
+    the exact set of lines a renderer sees and every one gets the gutter). Pin it: a
+    future refactor that let another breaker survive multiline would let a body line
+    escape the gutter.
+    """
+
+    def test_multiline_drops_every_line_breaker_but_newline(self):
+        for ch in ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]:
+            out = sanitize(f"a{ch}b", multiline=True)
+            self.assertEqual(
+                out, "ab", f"multiline sanitize kept line-breaker U+{ord(ch):04X}"
+            )
+
+    def test_multiline_keeps_newline_and_tab(self):
+        self.assertEqual(sanitize("a\nb\tc", multiline=True), "a\nb\tc")
+
+
 class TestFrameBody(unittest.TestCase):
     """GH #45 — frame_body gutters every model-body line so none is flush-left."""
 

@@ -42,7 +42,13 @@ _FORGE_BODY = "intro\n" + "\n".join(_FORGE_TOKENS) + "\ntail"
 class TestReportGrammarFramingStructuralGuard(unittest.TestCase):
     """The model-body render sites route through frame_body; the R6 isolated-file
     exemptions stay native. Fails on a reverted site or an accidentally-framed
-    exemption — a routing-contract coupling test, updated consciously."""
+    exemption — a routing-contract coupling test, updated consciously.
+
+    Source-string-scrape by design: it distinguishes the R6 exemption (double-quoted
+    ``lane.text or ""``) from the framed combined-block form (single-quoted
+    ``lane.text or ''``) by quote style, so a quote-normalizing formatter would break
+    it — loudly (a failing assert), never a silent wrong-pass. Re-derive the expected
+    literals if the routing or the source formatting changes."""
 
     _RENDER = (_REPO / "fleet_engine" / "render.py").read_text()
     _CAPTURE = (_REPO / "fleet_engine" / "capture.py").read_text()
