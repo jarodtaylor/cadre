@@ -11,6 +11,8 @@ applies_when:
 tags: [trust-safety, defense-in-depth, security, review-discipline, consumer-analysis, code-review, cross-cutting]
 ---
 
+# Verify the consumer actually uses the property a defense provides
+
 ## Context
 
 Cadre's #45 fast-follow (trust-safety track, PR #54) closed "report-grammar mimicry": on a combined surface — the terminal render and the collect/judge `synthesis.md` — a specialist's or synthesizer's model text sits directly beneath status rows the harness prints itself (`[ok  ] scout`, `--- role ---`). Nothing stopped a model body from printing its own flush-left `[ok  ] ghost-lane` or `--- injected role ---` line, which would render indistinguishably from a real harness row to a human reading the report.
