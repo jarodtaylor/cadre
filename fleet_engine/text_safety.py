@@ -73,3 +73,31 @@ def sanitize(text: object, *, multiline: bool = False) -> str:
         )
         and ch not in _UNSAFE_UNICODE
     )
+
+
+# The gutter that frames a model-output body on a combined surface so no body line
+# renders at column 0 and forges a trusted harness row (report-grammar mimicry, GH
+# #45). A NON-space glyph is required: markdown ignores up to three leading spaces
+# before ``#``/``---``, so a space indent would still let a body header forge on the
+# ``.md`` surfaces; U+2502 is markdown-inert and opens no trusted grammar token.
+BODY_GUTTER = "│ "  # U+2502 (box-drawing vertical) + a space
+
+
+def frame_body(text: object) -> str:
+    """Sanitize a model-output body and gutter every line so none renders at column 0.
+
+    The one chokepoint for framing untrusted multiline model output on a combined
+    surface (the terminal render; collect/judge ``synthesis.md``). It ``sanitize``s
+    the body (multiline) then prefixes ``BODY_GUTTER`` to EVERY line — including the
+    first, which renders immediately after a ``--- role ---`` delimiter, and blank
+    lines — so the invariant "only trusted harness rows render at column 0" holds and
+    is uniformly checkable (GH #45). Deliberately NOT
+    ``text.replace(chr(10), chr(10) + BODY_GUTTER)``: that idiom skips the first line,
+    leaving the delimiter-adjacent line flush-left and forgeable. Sanitizing internally
+    makes one call per sink safe by construction — callers pass raw model text, not a
+    pre-sanitized value. The gutter is fixed (``BODY_GUTTER``), not a parameter: it is
+    the one security-chosen glyph, and letting a caller pick a different prefix would be
+    a footgun (a grammar-opening gutter would re-enable the forgery).
+    """
+    body = sanitize(text, multiline=True)
+    return "\n".join(BODY_GUTTER + line for line in body.split("\n"))

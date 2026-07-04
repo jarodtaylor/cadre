@@ -13,12 +13,20 @@ not a claim that Cadre is "injection-proof."
   synthesis or judge body, error text, and model-derived `manifest.json` fields — is
   stripped of terminal-escape, control, and bidi bytes before it is rendered, so it
   cannot move your cursor, clear a line, or hide a printed warning. Legitimate content
-  renders unchanged. **This does not defend the report *grammar*:** a model body can
-  contain plain text like `[ok  ] ghost (1/1)` or `--- role ---` with no escape bytes,
-  which renders inertly in the body but can mimic a real provenance row or lane
-  delimiter to a skimming reader or an agent grepping for those lines. Structurally
-  framing model-output bodies so they cannot impersonate harness rows is a bounded
-  residual, tracked as a fast-follow.
+  renders unchanged. Escape-stripping defends the *bytes*; the report *grammar* — a
+  model body printing plain text like `[ok  ] ghost (1/1)` or `--- role ---` — is
+  defended separately by **report-grammar framing**, below.
+- **Report-grammar mimicry (structural framing).** Model-output bodies are
+  gutter-prefixed on every surface where they interleave with trusted harness grammar
+  — the terminal render and the combined collect/judge `synthesis.md` — so no body
+  line renders flush-left (column 0). The harness's structural rows (`--- role ---`,
+  `--- provenance ---`, `[ok  ]…`, and the on-disk `# Specialist:` / `# Judge grade`
+  headers) become the only flush-left content, and a model body can no longer forge
+  one *on those surfaces*. This holds even under semantic injection: the harness
+  prefixes every body line unconditionally, so no secret is involved and a model told
+  to forge a row still cannot. Escape-stripping (above) defends the bytes; this
+  defends the grammar. Its bounded limits are the "Report-grammar framing limits"
+  residual below.
 - **Accidentally-echoed / quoted judge lane markers.** The judge convergence mode grades
   each lane behind a `=== LANE: <role> <nonce> ===` marker carrying a per-run nonce. The
   caller-layer parser requires that nonce, so a nonce-free `=== LANE:` — one a specialist
@@ -32,7 +40,7 @@ not a claim that Cadre is "injection-proof."
   spoofing.** `--preview` renders from the parsed fleet config (not any paraphrase),
   with every fleet-controlled field escape/bidi-sanitized and `⚠ PRIVILEGED TOOLS
   ENABLED` shown when a fleet requests non-safe toolsets. (The escape-spoofing defense
-  is complete; the plain-text report-grammar mimicry residual below is not a preview
+  is complete; report-grammar framing is not a preview
   concern — the preview renders config fields, not model output.)
 - **The agent-handoff run is bound to its preview.** On the `cadre-fleet` agent
   handoff, a real run executes only when it presents a one-shot, owner-only
@@ -97,11 +105,23 @@ not a claim that Cadre is "injection-proof."
   the specialist→synthesizer fan-in) are read only by a downstream model. Forging one
   manipulates that model's belief — semantic injection, above — not a machine parser,
   so they are intentionally not given the structural nonce treatment.
-- **Report-grammar mimicry (fast-follow).** Model-output bodies are stripped of escape
-  bytes but still render in the same plain-text grammar as trusted harness rows, so a
-  body can contain `[ok  ] ghost (1/1)` or `--- role ---` and read like real provenance
-  to a skimming human or an agent grepping those lines. Framing model bodies so they
-  cannot impersonate harness rows is a bounded residual, tracked as a fast-follow.
+- **Report-grammar framing limits.** Framing closes structural row-forgery on the
+  framed render surfaces (see "What is defended"), but has three bounded limits.
+  (a) It defends a **column-0-anchored** consumer only — a forged token still exists
+  *inside* the guttered body line, so an un-anchored substring grep still matches it;
+  this is why the `cadre-fleet` agent read-back reads structural provenance
+  (`ok`/`status`/`judge_ok`/`grades`/…) from the forgery-immune `manifest.json` rather
+  than the report. The flush-left signal is per *logical* line: on a soft-wrapping
+  terminal one very long body line can wrap so its continuation sits at a visual
+  column 0 — the `.md` surfaces (which parse logical lines) and the manifest
+  read-back are unaffected. (b) The **isolated on-disk deliverables** are deliberately left
+  native markdown — per-lane `specialist-*.md` and the synthesize-mode `synthesis.md`
+  are safe only while each file stands alone: concatenating the run folder or ingesting
+  several files re-creates a combined surface, and a per-lane file already interleaves
+  a `# Specialist:` header with its unframed body, so a consumer must treat the whole
+  file as one lane's content and take attribution from `manifest.json`. (c)
+  Content-level deception — a model writing lies inside its own correctly-framed block
+  — is semantic injection (above), not structural forgery.
 - **Semantically injected judge marker.** The per-run judge nonce closes the
   accidental/quoted-echo false-full, but a specialist that instructs the judge to copy
   the nonce (which the judge sees in its instructions) into a forged `=== LANE:` marker

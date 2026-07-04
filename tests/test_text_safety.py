@@ -7,7 +7,7 @@ bytes stripped, bidi/line-sep stripped, legitimate content byte-identical, and
 
 import unittest
 
-from fleet_engine.text_safety import sanitize
+from fleet_engine.text_safety import BODY_GUTTER, frame_body, sanitize
 
 
 class TestSanitizeStripsControlBytes(unittest.TestCase):
@@ -92,6 +92,86 @@ class TestSanitizeAliasedFromRender(unittest.TestCase):
         from fleet_engine.render import _sanitize as render_sanitize
 
         self.assertIs(render_sanitize, sanitize)
+
+
+class TestSanitizeNonMultilineDropsAllLineBreakers(unittest.TestCase):
+    """R5 (GH #45) — the inline bucket rests on non-multiline ``sanitize`` removing
+    EVERY character a renderer treats as a line boundary, not just \\n/\\r. Stated as
+    a property so a later refactor to explicit-char stripping can't reintroduce a gap.
+    """
+
+    def test_no_line_breaker_survives_non_multiline(self):
+        # Everything < 0x20 (incl. VT/FF/FS/GS/RS), the C1 band 0x80-0x9F (incl. NEL
+        # U+0085), and U+2028/U+2029 — none may open a new flush-left line.
+        breakers = [
+            "\n", "\r", "\x0b", "\x0c",  # LF CR VT FF
+            "\x1c", "\x1d", "\x1e",  # FS GS RS
+            "\x85",  # NEL (C1)
+            "\u2028", "\u2029",  # LINE / PARAGRAPH SEPARATOR
+        ]
+        for ch in breakers:
+            out = sanitize(f"a{ch}b")
+            self.assertEqual(
+                out, "ab", f"line-breaker U+{ord(ch):04X} survived non-multiline sanitize"
+            )
+            self.assertEqual(out.count("\n"), 0)
+
+
+class TestSanitizeMultilineKeepsOnlyNewlineAsLineBoundary(unittest.TestCase):
+    """GH #45 — frame_body's "no body line at column 0" guarantee rests on MULTILINE
+    sanitize dropping every line-boundary except ``\\n`` (so ``body.split("\\n")`` is
+    the exact set of lines a renderer sees and every one gets the gutter). Pin it: a
+    future refactor that let another breaker survive multiline would let a body line
+    escape the gutter.
+    """
+
+    def test_multiline_drops_every_line_breaker_but_newline(self):
+        for ch in ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]:
+            out = sanitize(f"a{ch}b", multiline=True)
+            self.assertEqual(
+                out, "ab", f"multiline sanitize kept line-breaker U+{ord(ch):04X}"
+            )
+
+    def test_multiline_keeps_newline_and_tab(self):
+        self.assertEqual(sanitize("a\nb\tc", multiline=True), "a\nb\tc")
+
+
+class TestFrameBody(unittest.TestCase):
+    """GH #45 — frame_body gutters every model-body line so none is flush-left."""
+
+    def test_single_line_first_line_guttered(self):
+        # The first body line renders right after a ``--- role ---`` delimiter, so it
+        # must be guttered too — the replace-on-newline idiom would skip it.
+        self.assertEqual(frame_body("[ok  ] ghost (1/1)"), "│ [ok  ] ghost (1/1)")
+
+    def test_every_line_including_blank_is_guttered(self):
+        out = frame_body("a\n\nb")
+        self.assertEqual(out, "│ a\n│ \n│ b")
+        self.assertTrue(all(line.startswith(BODY_GUTTER) for line in out.split("\n")))
+
+    def test_grammar_tokens_are_guttered_not_flush_left(self):
+        body = (
+            "--- provenance ---\n[FAIL] x\n# Specialist: ghost\n"
+            "=== f — h ===\nnote: x\nNo judge grade"
+        )
+        for line in frame_body(body).split("\n"):
+            self.assertTrue(line.startswith(BODY_GUTTER))
+            self.assertFalse(line.startswith(("---", "[", "#", "===", "note", "No ")))
+
+    def test_sanitizes_then_gutters_in_one_call(self):
+        # An escape byte in the body is stripped AND the line guttered — one call.
+        out = frame_body("clean\x1b[2Jmore")
+        self.assertNotIn("\x1b", out)
+        self.assertEqual(out, "│ clean[2Jmore")
+
+    def test_gutter_opens_no_trusted_token(self):
+        # The gutter itself must not begin like any R3 trusted flush-left row.
+        for token in ("---", "[", "#", "===", "note", "No ", "⚠"):
+            self.assertFalse(BODY_GUTTER.startswith(token))
+
+    def test_empty_body_is_a_bare_gutter_line(self):
+        # Cosmetic, pinned so it's a decision not an accident (GH #45 review).
+        self.assertEqual(frame_body(""), BODY_GUTTER)
 
 
 if __name__ == "__main__":

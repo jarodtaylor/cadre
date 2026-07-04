@@ -17,7 +17,7 @@ import time
 from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
-from fleet_engine.text_safety import sanitize
+from fleet_engine.text_safety import frame_body, sanitize
 from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
@@ -391,7 +391,7 @@ def render_result(result: FleetResult) -> str:
         surviving = [(r.role, r.model) for r in result.successes]
         pg = parse_grades(judge_text, surviving, result.judge_marker_nonce)
         if judge_text:
-            out.append(f"\n{_sanitize(judge_text, multiline=True)}")
+            out.append(f"\n{frame_body(judge_text)}")
         # Partial-coverage note (R14/AE7): only when we parsed structure AND a survivor
         # went ungraded — flag the gap without hiding the judge's own words above.
         if pg.parsed_ok and pg.ungraded:
@@ -399,15 +399,15 @@ def render_result(result: FleetResult) -> str:
             out.append(f"\nnote: {len(pg.ungraded)} lane(s) not graded by judge: {ungraded_roles}")
         # Attributed specialist outputs always follow.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{frame_body(r.text or '')}")
     elif result.synthesis:
-        out.append(_sanitize(result.synthesis, multiline=True))
+        out.append(frame_body(result.synthesis))
     elif result.successes:
         # No synthesis (synthesizer failed) but lanes succeeded — surface their raw
         # findings in labeled sections so the user still gets the work, not just
         # provenance rows.
         for r in result.successes:
-            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{_sanitize(r.text or '', multiline=True)}")
+            out.append(f"\n--- {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}) ---\n{frame_body(r.text or '')}")
     if result.threading_truncated:
         # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
         # iterative round (inter-round) produced threaded output that exceeded
@@ -418,10 +418,10 @@ def render_result(result: FleetResult) -> str:
     # Every fleet/model-derived field on this surface is sanitized against escape
     # bytes: the identity fields (fleet/role/provider/model) and r.error
     # (model/adapter output) so neither can smuggle a control sequence into the row
-    # it renders (#5 U2). r.text/synthesis are sanitized above where they render.
-    # NOTE: this strips escapes, not plain-text grammar — a model body can still
-    # print a look-alike "[ok  ] x" line inertly (report-grammar mimicry residual,
-    # SECURITY.md); framing model bodies is a tracked fast-follow.
+    # it renders (#5 U2). r.text/synthesis/judge bodies are gutter-framed above
+    # (frame_body, GH #45) so a model body cannot render a flush-left look-alike
+    # row; the inline r.error/notes fields here are single-line via non-multiline
+    # sanitize, so they cannot open a second row either.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"
