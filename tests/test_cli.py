@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -12,9 +13,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fleet_engine.capture import _slugify, resolve_run_dir
+import yaml
+
+from fleet_engine.approval import consume_approval, surface_digest, write_approval
+from fleet_engine.capture import _slugify, resolve_run_dir, resolved_hermes_home
 from fleet_engine.cli import main as cli_main, run_command, validate_command
+from fleet_engine.config import FleetConfig
+from fleet_engine.file_input import compose
 from fleet_engine.model_client import AgentResult
+from fleet_engine.personas import default_pool_dir, resolve
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
 
@@ -431,14 +438,18 @@ class TestSkillEntryCapture(unittest.TestCase):
     def _run_skill(self, behavior=None, extra_argv=None):
         """Run the skill's main() with a fake client, redirected to self.tmp."""
         fake = FakeClient(behavior or {"synthesizer": ("ok", "SKILL SYNTH")})
+        fleet_path = str(
+            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+        )
+        run_argv = ["--task", "what is best?", "--fleet", fleet_path] + (extra_argv or [])
+        env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
 
-        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.tmp)}):
+        with patch.dict(os.environ, env):
             with patch.object(self.run_mod, "ModelClient", return_value=fake):
-                fleet_path = str(
-                    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
-                )
-                argv = ["--task", "what is best?", "--fleet", fleet_path] + (extra_argv or [])
-                return self.run_mod.main(argv), fake
+                # Mint the preview-bound approval for this exact surface first.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                return self.run_mod.main(run_argv), fake
 
     def test_skill_default_writes_folder(self):
         code, fake = self._run_skill()
@@ -457,14 +468,20 @@ class TestSkillEntryCapture(unittest.TestCase):
         blocker = self.tmp / "blocker"
         blocker.write_text("I am a file")
         bad_dir = str(blocker / "subdir")
+        fleet_path = str(
+            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+        )
+        run_argv = ["--task", "task", "--fleet", fleet_path]
 
         fake = FakeClient({"synthesizer": ("ok", "SYNTH")})
-        with patch.dict(os.environ, {"CADRE_RUN_DIR": bad_dir}):
+        env = {"CADRE_RUN_DIR": bad_dir, "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
             with patch.object(self.run_mod, "ModelClient", return_value=fake):
-                fleet_path = str(
-                    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
-                )
-                code = self.run_mod.main(["--task", "task", "--fleet", fleet_path])
+                # Mint the preview-bound approval first, so the run below fails on
+                # the BAD-DIR path (its intended target), not the approval gate.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                code = self.run_mod.main(run_argv)
 
         self.assertEqual(code, 1)
         self.assertEqual(len(fake.calls), 0, "no model calls should be made on dir failure")
@@ -481,14 +498,19 @@ class TestSkillEntryCapture(unittest.TestCase):
         sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
         fake = FakeClient({"synthesizer": ("ok", "S")})
         stdout_buf = io.StringIO()
-        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.tmp)}):
+        fleet_path = str(
+            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+        )
+        run_argv = ["--task", "t", "--fleet", fleet_path]
+        env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
             with patch.object(self.run_mod, "ModelClient", return_value=fake):
                 with patch.object(self.run_mod, "save_run", return_value=sentinel):
+                    # Mint the preview-bound approval for this exact surface first.
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(run_argv + ["--preview"])
                     with contextlib.redirect_stdout(stdout_buf):
-                        fleet_path = str(
-                            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
-                        )
-                        self.run_mod.main(["--task", "t", "--fleet", fleet_path])
+                        self.run_mod.main(run_argv)
         out = stdout_buf.getvalue()
         self.assertIn(f"Run folder: {sentinel}", out)
         self.assertNotIn(f"Run folder: {self.tmp}", out)
@@ -577,6 +599,455 @@ class TestSkillPreviewMakesNoModelCalls(unittest.TestCase):
                     self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
         output = stdout_buf.getvalue()
         self.assertIn("allow_privileged_tools", output)
+
+
+class TestSkillPreviewMintsApprovalToken(unittest.TestCase):
+    """--preview WITH --task mints a preview-bound approval token (U3 — the mint
+    half; RUN-side enforcement is U4).
+
+    Still zero model calls / zero capture (the existing invariant must not
+    weaken); the minted token's digest matches an independently-computed
+    ``surface_digest`` over the same (config, composed_task, profile); the
+    composed task itself renders on the approval surface; different --doc
+    content binds to a different digest; a task-less preview mints nothing
+    (matches the run path's own None refusal); and a privileged fleet's PLAIN
+    preview mints nothing (U5 adds the deliberate --approve-privileged mint).
+
+    Every test isolates the token file via CADRE_APPROVAL_PATH so none of
+    them ever touch the real ~/.cadre/approval.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _token_path(self, name="approval"):
+        return str(self.tmp / name)
+
+    def test_preview_with_task_still_zero_model_calls(self):
+        fake_client_cls = MagicMock()
+        mock_prepare = MagicMock()
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": self._token_path()}):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        code = self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "hello"]
+                        )
+        self.assertEqual(code, 0)
+        fake_client_cls.assert_not_called()
+        mock_prepare.assert_not_called()
+
+    def test_preview_with_task_mints_bound_token(self):
+        token_path = self._token_path()
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "hello"]
+                        )
+        token = consume_approval(path=token_path)
+        self.assertIsNotNone(token)
+        self.assertFalse(token.privileged)
+
+        cfg = FleetConfig.load(_EXAMPLE_FLEET)
+        resolve(cfg, default_pool_dir())
+        composed_task, _doc_paths, _truncated = compose("hello", [])
+        expected_digest = surface_digest(cfg, composed_task, resolved_hermes_home())
+        self.assertEqual(token.digest, expected_digest)
+
+    def test_preview_renders_composed_task(self):
+        stdout_buf = io.StringIO()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": self._token_path()}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(stdout_buf):
+                        self.run_mod.main(
+                            [
+                                "--fleet", _EXAMPLE_FLEET,
+                                "--preview",
+                                "--task", "a distinctive composed-task marker string",
+                            ]
+                        )
+        output = stdout_buf.getvalue()
+        self.assertIn("a distinctive composed-task marker string", output)
+
+    def test_preview_with_doc_binds_doc_content(self):
+        """Same --task, DIFFERENT --doc content -> different minted digest."""
+        doc_a = self.tmp / "a.md"
+        doc_a.write_text("content A")
+        doc_b = self.tmp / "b.md"
+        doc_b.write_text("content B")
+        token_path_1 = self._token_path("approval1")
+        token_path_2 = self._token_path("approval2")
+
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path_1}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "t", "--doc", str(doc_a)]
+                        )
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path_2}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(
+                            ["--fleet", _EXAMPLE_FLEET, "--preview", "--task", "t", "--doc", str(doc_b)]
+                        )
+
+        token_1 = consume_approval(path=token_path_1)
+        token_2 = consume_approval(path=token_path_2)
+        self.assertIsNotNone(token_1)
+        self.assertIsNotNone(token_2)
+        self.assertNotEqual(token_1.digest, token_2.digest)
+
+    def test_taskless_preview_mints_no_token(self):
+        """No --task and no --doc: composed_task is None, so preview renders the
+        fleet shape only and mints nothing — the token file never gets created."""
+        token_path = self._token_path()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview"])
+        self.assertFalse(os.path.exists(token_path))
+
+    def test_privileged_fleet_plain_preview_mints_no_token(self):
+        """A privileged fleet's plain --preview mints nothing — approving it
+        requires the deliberate --approve-privileged act (U5, tested fully in
+        TestSkillPrivilegedApproval; this test covers only the mint-nothing half)."""
+        priv_fleet = self.tmp / "priv.yaml"
+        priv_fleet.write_text(json.dumps({
+            "name": "priv",
+            "convergence": "collect",
+            "specialists": [{"role": "a", "provider": "p", "model": "m", "focus": "f"}],
+            "allow_privileged_tools": True,
+        }))
+        token_path = self._token_path()
+        with patch.dict(os.environ, {"CADRE_APPROVAL_PATH": token_path}):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", MagicMock()):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        code = self.run_mod.main(
+                            ["--fleet", str(priv_fleet), "--preview", "--task", "hello"]
+                        )
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(token_path))
+
+
+class TestSkillApprovalGate(unittest.TestCase):
+    """U4 — the load-bearing security gate: a REAL run refuses to execute unless it
+    presents a valid, unconsumed approval token bound to THIS exact surface (the
+    config, the composed task, and the resolved profile). Mirrors the mint side
+    tested in TestSkillPreviewMintsApprovalToken (U3).
+
+    Every test isolates the token file via CADRE_APPROVAL_PATH so none of them
+    ever touch the real ~/.cadre/approval.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.token_path = str(self.tmp / "approval")
+
+    def _env(self):
+        return {"CADRE_APPROVAL_PATH": self.token_path}
+
+    def test_no_approval_refused_zero_model_calls(self):
+        """AE2: a run with NO prior --preview is refused; the message names
+        --preview; ModelClient is never constructed (zero model calls)."""
+        fake_client_cls = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--preview", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_refused_run_makes_zero_capture(self):
+        """The gate is fail-closed BEFORE capture: a run with no approval and
+        capture ON (no --no-capture) never calls prepare_run_dir. Proves the gate
+        sits ahead of every side effect, not just the model calls AE2 covers."""
+        mock_prepare = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(buf):
+                        code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t"])
+        self.assertEqual(code, 1)
+        mock_prepare.assert_not_called()
+
+    def test_config_swap_refused(self):
+        """AE1: --preview fleet A (mint), then run a DIFFERENT valid fleet B on the
+        same approval path -> refused (digest mismatch), zero model calls."""
+        fleet_b = str(
+            Path(__file__).resolve().parents[1] / "fleets" / "code-review.example.yaml"
+        )
+        fake_client_cls = MagicMock()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t", "--preview"])
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", fleet_b, "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--preview", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_task_swap_refused(self):
+        """AE7: --preview with task T (mint), then run with a different task T' ->
+        refused (digest mismatch), zero model calls."""
+        fake_client_cls = MagicMock()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(
+                        ["--fleet", _EXAMPLE_FLEET, "--task", "original task", "--preview"]
+                    )
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", _EXAMPLE_FLEET, "--task", "swapped task", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--preview", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_profile_swap_refused(self):
+        """The HERMES_HOME profile is a bound axis end-to-end: preview under one
+        profile, run under another -> refused (digest mismatch), zero model calls.
+        Fills the profile axis of the refusal matrix (config/task/one-shot are
+        covered above); the pure-function digest test in test_approval only covers
+        surface_digest, never run.py's HERMES_HOME env wiring. Absolute paths so the
+        binding is cwd-independent."""
+        fake_client_cls = MagicMock()
+        # Two distinct absolute strings — never created/read, only fed to the digest as
+        # the profile axis (kept off /tmp so the S108 hardcoded-temp lint doesn't flag
+        # what is not actually a temp path — CodeRabbit).
+        env_a = {**self._env(), "HERMES_HOME": "/nonexistent/cadre-profile-a"}
+        env_b = {**self._env(), "HERMES_HOME": "/nonexistent/cadre-profile-b"}
+        with patch.dict(os.environ, env_a):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t", "--preview"])
+        buf = io.StringIO()
+        with patch.dict(os.environ, env_b):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"])
+        self.assertEqual(code, 1)
+        self.assertIn("--preview", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_one_shot_reuse_second_run_refused(self):
+        """AE3: --preview mints once; the first run consumes it and proceeds; a
+        second run on the SAME approval path is refused (token already consumed)."""
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    first_code = self.run_mod.main(run_argv)
+                second_buf = io.StringIO()
+                with contextlib.redirect_stdout(second_buf):
+                    second_code = self.run_mod.main(run_argv)
+        self.assertEqual(first_code, 0)
+        self.assertEqual(second_code, 1)
+        self.assertIn("--preview", second_buf.getvalue())
+
+    def test_match_proceeds_and_token_consumed(self):
+        """A matching preview -> run proceeds (exit 0), and the token file no
+        longer exists afterward — one-shot, even on the happy path."""
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.token_path))
+
+    def test_ae6_colluding_preview_then_run_proceeds(self):
+        """AE6 — documented residual (Option-A scope; NOT a bug): --preview
+        immediately followed by a run presenting the fresh matching token, with NO
+        human step in between, PROCEEDS (exit 0). The binding proves the run
+        matches what was previewed; it deliberately does NOT prove a human looked
+        at the preview — that would be presence-detection, which is out of scope
+        for this deployment (see SECURITY.md / the Part-2 plan's Option-A threat
+        model: defend the honest-but-fallible agent + a tampered library; a fully
+        colluding agent is a documented residual, not a bug). A future change
+        must NOT "fix" this into presence-detection.
+        """
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0, "AE6: colluding preview-then-run proceeds by design")
+
+
+class TestSkillPrivilegedApproval(unittest.TestCase):
+    """U5 — a distinct --approve-privileged act. A fleet with
+    allow_privileged_tools: true is NOT approved by a plain --preview; only the
+    deliberate --approve-privileged act mints the privileged-flavored token the
+    run gate requires for it. A non-privileged fleet accepts either flavor (no
+    lock-out) — mirrors the mint/gate pair in TestSkillPreviewMintsApprovalToken
+    (U3) / TestSkillApprovalGate (U4).
+
+    Every test isolates the token file via CADRE_APPROVAL_PATH so none of them
+    ever touch the real ~/.cadre/approval.
+    """
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.token_path = str(self.tmp / "approval")
+        self.priv_fleet = self.tmp / "priv.yaml"
+        with open(self.priv_fleet, "w") as f:
+            yaml.safe_dump(
+                {
+                    "name": "priv",
+                    "convergence": "collect",
+                    "specialists": [
+                        {"role": "a", "provider": "p", "model": "m", "focus": "f"}
+                    ],
+                    "allow_privileged_tools": True,
+                },
+                f,
+            )
+
+    def _env(self):
+        return {"CADRE_APPROVAL_PATH": self.token_path}
+
+    def test_plain_preview_of_privileged_fleet_mints_nothing_and_instructs(self):
+        """A plain --preview of a privileged fleet mints no token and tells the
+        operator how to approve it instead of silently doing nothing."""
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--preview", "--task", "t"]
+                    )
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.token_path))
+        self.assertIn("--approve-privileged", buf.getvalue())
+
+    def test_approve_privileged_rerenders_privileged_preview(self):
+        """--approve-privileged re-renders the SAME preview (the PRIVILEGED TOOLS
+        ENABLED warning + the fleet's specialists), not just a silent mint — so a
+        human approving a privileged fleet still sees the warning on THAT invocation.
+        Guards against a refactor that short-circuits it to mint-only."""
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--approve-privileged", "--task", "t"]
+                    )
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("PRIVILEGED TOOLS ENABLED", out)
+        self.assertIn("[a]", out)  # the fleet's specialist role, via render_fleet_preview
+
+    def test_approve_privileged_mints_privileged_token(self):
+        """--approve-privileged mints a token whose privileged flavor is True."""
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", MagicMock()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--approve-privileged", "--task", "t"]
+                    )
+        self.assertEqual(code, 0)
+        token = consume_approval(path=self.token_path)
+        self.assertIsNotNone(token)
+        self.assertTrue(token.privileged)
+
+    def test_privileged_fleet_run_with_normal_token_refused(self):
+        """AE4: a NORMAL-flavored token bound to the exact privileged-fleet
+        surface is still refused — the flavor check gates independently of the
+        digest match. Zero model calls."""
+        cfg = FleetConfig.load(str(self.priv_fleet))
+        resolve(cfg, default_pool_dir())
+        composed_task, _doc_paths, _truncated = compose("t", [])
+        digest = surface_digest(cfg, composed_task, resolved_hermes_home())
+        write_approval(digest, privileged=False, path=self.token_path)
+
+        fake_client_cls = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--approve-privileged", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_privileged_fleet_run_with_privileged_token_proceeds(self):
+        """--approve-privileged mint followed by a matching run proceeds."""
+        fake = FakeClient({"a": ("ok", "A OUTPUT")})
+        run_argv = ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--approve-privileged"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
+
+    def test_privileged_fleet_no_token_refusal_names_approve_privileged(self):
+        """Copilot: a privileged fleet run with NO token hits the digest/absent
+        refusal, whose message must point at --approve-privileged — a privileged
+        fleet's plain --preview mints nothing, so telling the operator to --preview
+        would loop them."""
+        fake_client_cls = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--approve-privileged", buf.getvalue())
+        fake_client_cls.assert_not_called()
+
+    def test_nonprivileged_fleet_accepts_privileged_token_no_lockout(self):
+        """A non-privileged fleet approved via --approve-privileged still runs —
+        the flavor check only fires for a fleet that is itself privileged."""
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "t", "--no-capture"]
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--approve-privileged"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
 
 
 class TestSkillPreviewFlagsAPIBilledSynthesizer(unittest.TestCase):
@@ -732,12 +1203,14 @@ class TestSkillArbitraryFleet(unittest.TestCase):
         """A real run with --fleet <example> and a FakeClient exits 0, writes manifest."""
         fake = FakeClient({"synthesizer": ("ok", "SYNTH FROM FLEET")})
         run_dir = self.tmp
-        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "what is the best approach?"]
+        env = {"CADRE_RUN_DIR": str(run_dir), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
             with patch.object(self.run_mod, "ModelClient", return_value=fake):
-                code = self.run_mod.main([
-                    "--fleet", _EXAMPLE_FLEET,
-                    "--task", "what is the best approach?",
-                ])
+                # Mint the preview-bound approval for this exact surface first.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0)
         self.assertTrue((run_dir / "manifest.json").exists())
 
@@ -969,10 +1442,15 @@ class TestSkillProgressStreamSplit(unittest.TestCase):
     def test_report_stdout_progress_stderr_and_full_folder(self):
         fake = FakeClient({"synthesizer": ("ok", "SKILL REPORT")})
         out_buf, err_buf = io.StringIO(), io.StringIO()
-        with patch.dict(os.environ, {"CADRE_RUN_DIR": str(self.tmp)}):
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--task", "what is best?"]
+        env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
             with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                # Mint the preview-bound approval for this exact surface first.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
                 with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--task", "what is best?"])
+                    code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0)
         # Report on stdout, breadcrumbs on stderr — cleanly separated.
         self.assertIn("SKILL REPORT", out_buf.getvalue())
@@ -1378,12 +1856,24 @@ class TestSkillDocFlag(unittest.TestCase):
         return str(p)
 
     def _run(self, argv, fake=None):
-        """Run skill main() with a prompt-capturing client; returns (code, fake, stdout)."""
+        """Run skill main() with a prompt-capturing client; returns (code, fake, stdout).
+
+        Mints a matching preview-bound approval first (same --fleet/--task/--doc
+        argv, same CADRE_APPROVAL_PATH) so the real run's gate (U4) sees a valid
+        token. Harmless for the callers whose argv never reaches the gate (no
+        --task/--doc, or an unreadable --doc): the mint call mints nothing / fails
+        the same way, before ever touching approval.
+        """
         fake = fake if fake is not None else _PromptCapturingClient()
         buf = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", return_value=fake):
-            with contextlib.redirect_stdout(buf):
-                code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET] + argv)
+        run_argv = ["--fleet", _EXAMPLE_FLEET] + argv
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(run_argv)
         return code, fake, buf.getvalue()
 
     def test_doc_content_reaches_prompt(self):
@@ -1474,12 +1964,18 @@ class TestSkillDocFlag(unittest.TestCase):
         no preview gate to disclose the partial-file truncation)."""
         from fleet_engine.file_input import MAX_FILE_BYTES
         big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
+        run_argv = ["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"]
         fake = _PromptCapturingClient()
         err = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", return_value=fake):
-            with contextlib.redirect_stderr(err):
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                # Mint the preview-bound approval for this exact surface first.
                 with contextlib.redirect_stdout(io.StringIO()):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"])
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stderr(err):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0)
         self.assertIn("[cadre] warn:", err.getvalue())
         self.assertIn("truncated", err.getvalue())

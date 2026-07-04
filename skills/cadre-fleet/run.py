@@ -12,12 +12,19 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+import time
 from pathlib import Path
 
 # Make the repo root importable when run from the skill directory.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from fleet_engine.approval import (  # noqa: E402
+    consume_approval,
+    default_approval_path,
+    surface_digest,
+    write_approval,
+)
 from fleet_engine.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
 from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
 from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
@@ -27,10 +34,19 @@ from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
 from fleet_engine.progress_runner import run_with_progress  # noqa: E402
 from fleet_engine.text_safety import sanitize as _sanitize  # noqa: E402  (GH #23)
 from fleet_engine.render import (  # noqa: E402
+    render_composed_task,
     render_file_inputs,
     render_fleet_preview,
     render_result,
 )
+
+
+def _surface_digest_for(cfg, composed_task):
+    """The surface digest that BOTH the preview-mint (U3) and the run-enforce
+    (U4) bind to — one call site so the two can never drift on which inputs
+    they hash (KTD1). Reads the resolved profile internally so both paths
+    bind the same HERMES_HOME."""
+    return surface_digest(cfg, composed_task, resolved_hermes_home())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
             "Render the parsed fleet config and exit without running. "
             "Shows synthesizer, allow_privileged_tools, each lane, and synthesis "
             "prompt — the human approves this output before any run."
+        ),
+    )
+    parser.add_argument(
+        "--approve-privileged",
+        action="store_true",
+        default=False,
+        help=(
+            "Mint a PRIVILEGED preview-bound approval for a fleet with "
+            "allow_privileged_tools: true. A plain --preview does not approve a "
+            "privileged fleet; this is the deliberate act that does."
         ),
     )
     parser.add_argument(
@@ -94,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     # prepare_run_dir, BEFORE run_fleet. Zero model calls, zero capture.
     # THIS SHORT-CIRCUIT IS LOAD-BEARING: the human approves the parsed fleet,
     # not the agent's paraphrase of it.
-    if args.preview:
+    if args.preview or args.approve_privileged:
         # Show the profile the run will use (env-sourced, not part of the fleet
         # config) so the human okays the fleet AND the profile it runs under — an
         # unset HERMES_HOME silently falls back to the default, which is how a run
@@ -112,6 +138,48 @@ def main(argv: list[str] | None = None) -> int:
         # stdout as part of the preview the human approves (no [cadre] stderr
         # infra on the preview path).
         print(render_preview_warnings(cfg))
+        # Render the composed task the run will feed the models, then mint an
+        # approval token bound to this exact surface. A task-less preview
+        # (composed_task is None) renders the fleet shape only and mints nothing
+        # — matching the run path's own None refusal.
+        if composed_task is not None:
+            print(render_composed_task(composed_task))
+            if cfg.allow_privileged_tools and not args.approve_privileged:
+                # A privileged fleet is NOT approved by a plain --preview — it
+                # needs the deliberate --approve-privileged act (F2/R5). Mint
+                # nothing; tell the operator how to approve it.
+                print(
+                    "\n⚠ This fleet enables privileged tools and is NOT approved by a "
+                    "plain --preview. Re-run with --approve-privileged to mint a "
+                    "privileged approval for this exact surface."
+                )
+            else:
+                # Mint the approval. Flavor = whether this was the privileged act.
+                # A non-privileged fleet under --approve-privileged still mints a
+                # privileged-flavored token; the run accepts either flavor for a
+                # non-privileged fleet (no lock-out).
+                digest = _surface_digest_for(cfg, composed_task)
+                try:
+                    write_approval(digest, privileged=args.approve_privileged)
+                except OSError as exc:
+                    # Never a traceback (the repo's clean-error contract): a symlinked
+                    # or otherwise-unwritable approval path fails closed HERE (no token
+                    # minted -> the subsequent run is refused) with a clear message
+                    # instead of crashing the preview. Sanitize the exception text (it
+                    # can carry a path with control bytes) like every other rendered string.
+                    print(
+                        f"\nCould not write the approval token at {_sanitize(default_approval_path())}: "
+                        f"{_sanitize(str(exc))}\n"
+                        "Ensure ~/.cadre (or CADRE_APPROVAL_PATH) is an owner-only, "
+                        "non-symlink path, then re-preview."
+                    )
+                    return 1
+                flavor = "privileged " if args.approve_privileged else ""
+                # Sanitize the path label: CADRE_APPROVAL_PATH is caller-controlled and
+                # flows onto the approval surface, so a control byte in it must not spoof
+                # this line (CodeRabbit — same trust-surface rule as every other print here).
+                print(f"\nPreview-bound {flavor}approval written: {_sanitize(default_approval_path())}")
+                print("This run is now approved to execute this exact previewed surface once.")
         return 0
 
     # Real run: need at least one of --task / --doc. composed_task is None only when
@@ -119,6 +187,40 @@ def main(argv: list[str] | None = None) -> int:
     if composed_task is None:
         print("provide --task and/or --doc (unless --preview)")
         return 2
+
+    # Preview-bound approval gate (#5 Part 2, R1/R4): a real run executes only
+    # when it presents a valid, unconsumed approval bound to THIS exact surface
+    # — the config, the composed task (--task + --doc bytes), and the resolved
+    # profile. consume_approval unlinks the token before reading, so one-shot
+    # holds even for a mismatch (a burned attempt forces a fresh --preview).
+    # Fail-closed: absent / mismatched / expired all refuse. The direct-human
+    # `python -m fleet_engine.cli` runner is intentionally NOT gated (a human
+    # invoking it IS the operator); this binding scopes to the agent handoff.
+    token = consume_approval()
+    expected_digest = _surface_digest_for(cfg, composed_task)
+    if token is None or token.digest != expected_digest or token.is_expired(time.time()):
+        # Point at the command that actually MINTS for this fleet: a privileged
+        # fleet's plain --preview mints nothing (U5), so telling its operator to
+        # "--preview first" would loop — send them to --approve-privileged instead
+        # (Copilot review).
+        mint_cmd = "--approve-privileged" if cfg.allow_privileged_tools else "--preview"
+        print(
+            f"No valid preview-bound approval for this run. Run `{mint_cmd}` first to "
+            "approve this exact fleet + task + docs + profile, then run again."
+        )
+        return 1
+
+    # Privileged fleets require a privileged-flavored approval (R5/AE4). The digest
+    # already binds allow_privileged_tools, so a tampered false->true is caught by
+    # mismatch above; this forces the deliberate --approve-privileged act on a
+    # legitimately-privileged fleet. A non-privileged fleet accepts either flavor
+    # (no lock-out), so this check only fires for a privileged fleet.
+    if cfg.allow_privileged_tools and not token.privileged:
+        print(
+            "This fleet enables privileged tools and requires a privileged approval. "
+            "Run `--approve-privileged` (not a plain `--preview`) to approve it."
+        )
+        return 1
 
     # No --preview here to disclose truncation (or it was skipped), so warn on the
     # [cadre] stream that an oversize --doc is being reviewed only partially — the

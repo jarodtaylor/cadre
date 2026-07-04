@@ -81,45 +81,85 @@ Show the human the **real parsed fleet**, not your paraphrase of it. The preview
 is rendered mechanically from the validated `FleetConfig` — the human's approval
 is of this output, not your summary.
 
+**Preview with the exact `--task`/`--doc` you intend to run — this is what mints
+approval.** The preview renders the composed task alongside the fleet config
+and, on that same invocation, writes a one-shot, owner-only **preview-bound
+approval** (a binding, not a proof of human presence — see below) that the run
+in step 3 must present. Its digest covers everything the preview showed: the
+parsed fleet, the composed task, the resolved personas, and the resolved
+`HERMES_HOME` profile. A `--preview` with no `--task`/`--doc` at all (e.g. while
+iterating on a composed fleet's YAML in step 1) still renders the fleet shape
+and validation warnings, but mints nothing — fine for syntax-checking, not
+sufficient before step 3.
+
 Resolve the venv python from the recorded config:
 
 ```bash
 PYBIN="${CADRE_HERMES_PYTHON:-$(grep -E '^CADRE_HERMES_PYTHON=' ~/.cadre/config | cut -d= -f2-)}"
 ```
 
-Run the preview:
+Run the preview with the task/docs you intend to run:
 
 ```bash
-"$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --preview
+"$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --preview --task "<the task>"
+# …or with --doc (repeatable; use the same flags step 3 will run with):
+"$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/doc-review.yaml --preview --doc plan.md --task "Review this PLAN"
 ```
 
 Relay the complete preview output to the human. It shows:
+- **Profile (`HERMES_HOME`)** — the resolved profile the run will use, printed
+  first. The approval binds this too, so preview and run must resolve the same
+  profile — don't change `HERMES_HOME` between them.
 - **Convergence** — either a **`Synthesizer:`** line (provider/model, with a cost
   warning if it looks API-billed) plus the **synthesis prompt** verbatim
   (unvalidated free text — the human must see exactly what the synthesizer
   receives), OR **`Convergence: collect (no synthesizer)`** for a collect fleet
   (no synthesizer, no prompt — the fleet returns raw attributed outputs)
-- **`allow_privileged_tools`** — prominently flagged when `true`
+- **`allow_privileged_tools`** — prominently flagged when `true`. A plain
+  `--preview` never approves a privileged fleet — see "Privileged fleets" below.
 - Each **specialist**: role, provider/model, toolset, and focus
 - A **fleet-validation summary** — advisory warnings for any model/toolset not on
   the host palette and any retrieval lane whose focus lacks a sourcing directive.
   It never blocks a run; relay it so the human sees it before approving.
-- **Files to read (`--doc`)** — when you pass `--doc PATH` (see step 3), the file
-  paths the run will read into the task (shown as you named them — no canonicalization).
-  The preview doubles as a **read-check**:
-  a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit 1, naming the path)
-  before any approval, so preview with the same `--doc` flags you intend to run with.
-  It also **flags any `--doc` that will be truncated** (over 256 KiB → reviewed only
-  partially) so you never approve a review of a silently partial file; on a
-  non-preview run that truncation is warned on stderr instead.
+- **Files to read (`--doc`)** — the file paths the run will read into the task
+  (shown as you named them — no canonicalization). The preview doubles as a
+  **read-check**: a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit
+  1, naming the path) before any approval. It also **flags any `--doc` that will
+  be truncated** (over 256 KiB → reviewed only partially) so you never approve a
+  review of a silently partial file; on a non-preview run that truncation is
+  warned on stderr instead.
+- **The composed task** — the exact `--task` + `--doc` text the run will feed
+  the models, so the human approves the real inputs, not the config in
+  isolation.
+- **The preview-bound approval** — a `Preview-bound approval written: <path>`
+  confirmation (default `~/.cadre/approval`), or, for a privileged fleet under a
+  plain `--preview`, a `⚠ … NOT approved by a plain --preview` notice instead —
+  see "Privileged fleets" below.
 
 Ask the human to okay it before running. Do not paraphrase the fleet in lieu of
-the preview — the preview is the operative control.
+the preview — the preview is the operative control. **Be precise about what the
+approval proves and doesn't:** it guarantees the run that follows executes this
+*exact* previewed surface — same fleet, same task/docs, same personas, same
+profile — so a swapped or drifted surface is refused. It does **not** replace
+the human's substantive review of *what* the fleet does (a rubber-stamped bad
+fleet still runs faithfully), and it does **not** prove a human was present for
+the okay — that stays the procedural step you perform by asking and waiting for
+a real response.
+
+**Privileged fleets (`allow_privileged_tools: true`, rare — agents are told not
+to compose these, but a curated one may exist).** A plain `--preview` renders
+the `⚠ PRIVILEGED TOOLS ENABLED` warning but mints no approval. Once the human
+has seen that warning and still wants to proceed, re-run the identical command
+with `--approve-privileged` in place of `--preview` — it re-renders the same
+preview and mints the privileged-flavored approval step 3's run requires. Never
+treat a plain preview as approval for a privileged fleet.
 
 ### 3. Signal and run (on the human's okay)
 
 Signal that a fleet is running — it can take several minutes (specialists run
-in parallel; for synthesize fleets, synthesis follows). Then run:
+in parallel; for synthesize fleets, synthesis follows). Then run with the exact
+same `--fleet`, `--task`/`--doc`, and `HERMES_HOME` you just previewed — that's
+what the approval is bound to:
 
 ```bash
 "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/<name>.yaml --task "<the task>"
@@ -127,12 +167,33 @@ in parallel; for synthesize fleets, synthesis follows). Then run:
 "$PYBIN" "${HERMES_SKILL_DIR}/run.py" --fleet ~/.cadre/fleets/doc-review.yaml --doc plan.md --task "Review this PLAN"
 ```
 
+The run refuses — fail-closed, non-zero exit, no model calls — unless it finds a
+preview-bound approval whose digest matches this exact invocation. That makes
+three things load-bearing:
+- **Preview immediately before you run.** Each *minting* preview overwrites the
+  previous token, so at most one approval is live at a time — don't preview, go
+  preview a *different* fleet in between, then come back to run the first. (A
+  preview that mints nothing — a privileged fleet's plain `--preview`, or a
+  task-less `--preview` — does not clear a prior token, so re-preview the exact
+  run you intend rather than relying on a no-mint preview to "reset" state.)
+- **One attempt per approval.** The approval is consumed the moment a run reads
+  it — even a *refused* run (wrong surface, or none found) burns whatever was
+  pending. A refusal is not a retry loop: re-run `--preview` (or
+  `--approve-privileged` for a privileged fleet) to mint a fresh approval, then
+  run again.
+- **Don't change `HERMES_HOME` in between.** The approval binds the resolved
+  profile path, so a different profile at run time is a surface change like any
+  other and is refused the same way. Use a stable, absolute `HERMES_HOME` — a
+  relative value resolves against the current directory, so running the preview
+  and the run from different directories is itself a surface change.
+
 Use `--doc PATH` (repeatable) to read a file's contents into the task — the
 "name the plan, no pasting" path, with the doc-review fleet as the primary
-consumer. Preview with the same `--doc` flags first (step 2) to read-check the
-files before the human approves. The runner prints the result — a synthesized
-report (synthesize fleets) or the attributed specialist blocks (collect fleets) —
-and a `Run folder:` pointer to the captured run under `~/.cadre/runs/`.
+consumer. Preview with the same `--task`/`--doc` flags first (step 2) — this
+read-checks the files before the human approves and is what mints the approval
+this run consumes. The runner prints the result — a synthesized report
+(synthesize fleets) or the attributed specialist blocks (collect fleets) — and a
+`Run folder:` pointer to the captured run under `~/.cadre/runs/`.
 
 Add `--no-capture` to suppress the run folder (not recommended — the manifest
 records the full result, provenance, and timings).

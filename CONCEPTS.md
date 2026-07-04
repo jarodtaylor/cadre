@@ -81,3 +81,8 @@ The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette
 
 ### Fleet preview
 The mechanically rendered view of a *parsed* fleet config — synthesizer (with a cost flag for API-billed models), `allow_privileged_tools`, the verbatim synthesis prompt, and every lane's role/provider/model/toolset — printed by the runner's `--preview` mode without making any model call. It is the operative control of the agent-run handoff: a human approves this rendered fleet, not the agent's paraphrase of it, so a tampered or privileged fleet cannot slip through unseen.
+
+### Preview-bound approval
+A one-shot, owner-only token, minted by a fleet preview and required by a real agent-handoff run, that binds the run to a digest of the exact previewed surface — the parsed fleet config, the composed task (including any file contents read into it), the resolved personas, and the profile path. A run whose surface differs from a fresh preview is refused.
+
+It is a *binding*, not a proof of human *presence*: the code enforces that what runs equals what was previewed, but because the agent mediates every channel to the human it cannot prove a human actually reviewed the preview — a colluding or fully prompt-injected agent that previews and immediately runs is a documented residual, not something the approval defends against. A fleet requesting privileged tools needs a distinct, deliberate approval act; unforgeability rests on the token directory's owner-only permissions, with no secret or signature.

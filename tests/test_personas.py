@@ -457,6 +457,50 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
+    def test_approval_does_not_import_engine_or_model_client(self):
+        """fleet_engine/approval.py must NOT import engine or model_client (KTD5).
+
+        approval.py type-hints its FleetConfig parameter under `TYPE_CHECKING`
+        only, so there is no runtime import of engine/model_client here — this
+        locks that by-construction guarantee against a careless future edit,
+        mirroring the bidirectional coverage the file_input/judge_grade pairs get.
+        """
+        import fleet_engine.approval as a_mod
+
+        imported = _static_imports(a_mod)
+        self.assertNotIn(
+            "fleet_engine.engine",
+            imported,
+            "approval.py must not import engine (KTD5 — engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "fleet_engine.model_client",
+            imported,
+            "approval.py must not import model_client (KTD5 — engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_approval(self):
+        """fleet_engine/engine.py and model_client.py must NOT import approval (KTD5).
+
+        Preview-bound approval / trust-boundary logic is caller-layer; a stray
+        import here would fold trust-surface concerns back into the pure engine core.
+        """
+        import fleet_engine.engine as e_mod
+        import fleet_engine.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "fleet_engine.approval",
+            imported_engine,
+            "engine.py must not import approval (KTD5 — engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "fleet_engine.approval",
+            imported_mc,
+            "model_client.py must not import approval (KTD5 — engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).
