@@ -515,6 +515,7 @@ class ProgressRenderer:
         self._failed: int = 0
         self._skipped: int = 0   # chain lanes that never ran (sequential only)
         self._stage: int = 0     # count of LaneStarted events seen (used to format "stage k/N")
+        self._queued_launch: bool = False  # True when the current fan-out was announced queued (sequential); splits the heartbeat into running vs queued (#40)
 
         # Heartbeat timer state — set by start_heartbeat, consumed by stop.
         self._stop_event: threading.Event = threading.Event()
@@ -645,6 +646,9 @@ class ProgressRenderer:
             self._failed = 0
             self._skipped = 0
             self._stage = 0
+            # Sequential announces its roster queued=True; parallel/iterative launch
+            # concurrently (queued=False). Drives the heartbeat's active-count meaning (#40).
+            self._queued_launch = event.queued
         elif isinstance(event, LaneStarted):
             # Increment AFTER _format so the "stage k/N" display uses the prior count.
             self._stage += 1
@@ -751,6 +755,31 @@ class ProgressRenderer:
         # Unknown event type — skip silently rather than crashing.
         return None
 
+    def _heartbeat_line(self, elapsed_s: int) -> str:
+        """Format one heartbeat line for the current tally.
+
+        Reads the mutable tally, so the caller must hold ``self._lock`` (the
+        heartbeat loop does; single-threaded tests may call it directly).
+
+        On the sequential path (a queued-launch fan-out) exactly one lane runs at
+        a time, so ``active`` reports the truly-RUNNING count — started minus
+        finished, always 0 or 1 — and a ``queued=`` field names the not-yet-started
+        lanes. Reusing the parallel ``active = total - done - failed - skipped``
+        there would count queued lanes and read as if the chain ran concurrently
+        (#40). The parallel/iterative path is unchanged: every lane is launched at
+        once, so ``active`` is the whole not-yet-finished set and there is no
+        queued field.
+        """
+        mm, ss = divmod(elapsed_s, 60)
+        head = f"[cadre] heartbeat {mm:02d}:{ss:02d}"
+        tail = f" done={self._done} failed={self._failed} skipped={self._skipped}"
+        if self._queued_launch:
+            running = self._stage - self._done - self._failed   # 0 or 1 (serial chain)
+            queued = self._total - self._stage - self._skipped  # announced, not yet started
+            return f"{head} active={running}/{self._total} queued={queued}{tail}"
+        active = self._total - self._done - self._failed - self._skipped
+        return f"{head} active={active}/{self._total}{tail}"
+
     def _heartbeat_loop(self) -> None:
         """Body of the daemon heartbeat thread.
 
@@ -764,14 +793,4 @@ class ProgressRenderer:
         while not self._stop_event.wait(self._interval_s):
             with self._lock:
                 elapsed_s = int(time.monotonic() - self._heartbeat_start)
-                mm = elapsed_s // 60
-                ss = elapsed_s % 60
-                active = self._total - self._done - self._failed - self._skipped
-                line = (
-                    f"[cadre] heartbeat {mm:02d}:{ss:02d}"
-                    f" active={active}/{self._total}"
-                    f" done={self._done}"
-                    f" failed={self._failed}"
-                    f" skipped={self._skipped}"
-                )
-                self._write(line)
+                self._write(self._heartbeat_line(elapsed_s))

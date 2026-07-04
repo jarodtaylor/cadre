@@ -417,6 +417,31 @@ class TestFullyFailedRun(unittest.TestCase):
         # Should note that the synthesizer failed, not "N of M specialists failed"
         self.assertIn("synthesizer failed", content)
 
+    def test_synthesis_md_prefers_prefix_matched_synthesizer_note(self):
+        """A specialist note merely CONTAINING 'synthesizer failed' must not be
+        mistaken for the real 'synthesizer failed: <err>' note (#33 — prefix, not
+        substring). notes hold specialist failures first, the synth note last."""
+        specialists = [_lane("scout", toolset=["web"])]
+        r = _result(
+            specialists=specialists,
+            synthesis=None,
+            ok=False,
+            synth_ok=False,
+            notes=[
+                # Specialist failure note that happens to contain the phrase as a substring.
+                "scout failed: model echoed 'synthesizer failed' verbatim",
+                # The real synthesizer note, in the known 'synthesizer failed: <err>' format.
+                "synthesizer failed: rate limited",
+            ],
+        )
+        save_run(_cfg(specialists=[
+            {"role": "scout", "provider": "openrouter", "model": "m", "toolset": ["web"],
+             "focus": "web research"},
+        ]), r, self.run_dir)
+        content = (self.run_dir / "synthesis.md").read_text(encoding="utf-8")
+        self.assertIn("rate limited", content)      # the REAL synth error is reported
+        self.assertNotIn("verbatim", content)       # the specialist note was NOT mis-picked
+
     def test_manifest_synth_ok_is_none_when_not_attempted(self):
         specialists = [_lane("web", ok=False, error="down", toolset=["web"])]
         r = _result(specialists=specialists, synthesis=None, ok=False, synth_ok=None)

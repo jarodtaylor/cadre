@@ -1367,6 +1367,61 @@ class TestProgressRendererHeartbeat(unittest.TestCase):
         hb_lines = [ln for ln in _lines(stream) if "[cadre] heartbeat" in ln]
         self.assertEqual(len(hb_lines), 0)
 
+
+class TestSequentialHeartbeat(unittest.TestCase):
+    """On the sequential path (queued launch) the heartbeat splits the tally into
+    the truly-running lane (0 or 1) plus a queued= field, instead of the parallel
+    active-counts-everyone tally that reads as if the chain ran concurrently (#40).
+    Formats ``_heartbeat_line`` directly — deterministic, no timer."""
+
+    def test_sequential_heartbeat_splits_running_and_queued(self):
+        r, _ = _make_renderer()
+        r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        r.emit(LaneStarted(role="scout"))
+        r.emit(LaneDone(result=make_lane(role="scout", ok=True, elapsed_s=1.0)))
+        r.emit(LaneStarted(role="analyst"))   # analyst running; writer still queued
+        line = r._heartbeat_line(60)
+        self.assertIn("active=1/3", line)     # exactly one lane runs
+        self.assertIn("queued=1", line)       # writer not yet started
+        self.assertIn("done=1", line)
+        self.assertIn("failed=0", line)
+        self.assertIn("skipped=0", line)
+
+    def test_sequential_heartbeat_between_stages_shows_zero_running(self):
+        r, _ = _make_renderer()
+        r.emit(LaneLaunched(roles=["a", "b"], queued=True))
+        r.emit(LaneStarted(role="a"))
+        r.emit(LaneDone(result=make_lane(role="a", ok=True, elapsed_s=1.0)))
+        # 'a' finished, 'b' not started yet — nothing is running.
+        line = r._heartbeat_line(30)
+        self.assertIn("active=0/2", line)
+        self.assertIn("queued=1", line)
+        self.assertIn("done=1", line)
+
+    def test_sequential_heartbeat_excludes_skipped_from_queued(self):
+        r, _ = _make_renderer()
+        r.emit(LaneLaunched(roles=["scout", "analyst", "writer"], queued=True))
+        r.emit(LaneStarted(role="scout"))
+        r.emit(LaneDone(result=make_lane(role="scout", ok=False, elapsed_s=1.0)))
+        # Chain broke: downstream lanes skipped (never started).
+        r.emit(LaneDone(result=make_lane(role="analyst", skipped=True, ok=False)))
+        r.emit(LaneDone(result=make_lane(role="writer", skipped=True, ok=False)))
+        line = r._heartbeat_line(90)
+        self.assertIn("active=0/3", line)     # nothing running
+        self.assertIn("queued=0", line)       # skipped lanes are NOT queued
+        self.assertIn("failed=1", line)
+        self.assertIn("skipped=2", line)
+
+    def test_parallel_heartbeat_has_no_queued_field(self):
+        """The parallel path is unchanged: active = not-yet-finished, and NO queued= field."""
+        r, _ = _make_renderer()
+        r.emit(LaneLaunched(roles=["web", "social", "scan"]))   # queued defaults False
+        r.emit(LaneDone(result=make_lane(role="web", ok=True, elapsed_s=1.0)))
+        line = r._heartbeat_line(15)
+        self.assertIn("active=2/3", line)     # two still running (parallel)
+        self.assertNotIn("queued=", line)
+        self.assertIn("done=1", line)
+
     def test_no_heartbeat_after_stop(self):
         """After ``stop_heartbeat``, no further heartbeat lines appear."""
         r, stream = _make_renderer(interval_s=_HB_INTERVAL)
