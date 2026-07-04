@@ -156,6 +156,13 @@ def _estimate_tokens(text: str) -> int:
     lane receives (a safety cap sized to the model's real unit) — it does not bill,
     so a real per-provider tokenizer would only add dependency weight and couple the
     engine to providers for no gain on a cap (see the plan / #39).
+
+    It UNDER-COUNTS for high-token-density content (CJK, code, delimiter-heavy or
+    short-word text), where the real ratio approaches 1 char/token — so the actual
+    token count of a passed-through block can exceed the nominal token budget by up to
+    ``CHARS_PER_TOKEN``x. The HARD, enforced bound is therefore the char-equivalent
+    (``CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN``), which the preview discloses next to
+    the rough token figure; the token number is an estimate, not a guaranteed ceiling.
     """
     return len(text) // CHARS_PER_TOKEN
 

@@ -2566,9 +2566,9 @@ class TestRenderFleetPreviewSequential(unittest.TestCase):
 
     def test_inter_stage_cap_shown(self):
         self.assertIn("Inter-stage output cap", self.rendered)
-        # Disclosed as a token budget estimate, not chars (#39).
-        self.assertIn("4,000", self.rendered)
-        self.assertIn("tokens (estimate)", self.rendered)
+        # Honest disclosure: a rough token estimate PLUS the real enforced char cap (#39).
+        self.assertIn("~4,000 tokens (rough estimate", self.rendered)
+        self.assertIn("16,000-char cap", self.rendered)
 
     def test_sequential_block_after_specialists(self):
         """Topology block must appear after the Specialists section."""
@@ -2665,8 +2665,8 @@ class TestRenderFleetPreviewIterative(unittest.TestCase):
 
     def test_inter_round_cap_shown(self):
         self.assertIn("Inter-round output cap", self.rendered)
-        self.assertIn("4,000", self.rendered)
-        self.assertIn("tokens (estimate)", self.rendered)
+        self.assertIn("~4,000 tokens (rough estimate", self.rendered)
+        self.assertIn("16,000-char cap", self.rendered)
 
     def test_iterative_block_after_specialists(self):
         """Topology block must appear after the Specialists section."""

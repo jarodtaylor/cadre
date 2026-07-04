@@ -1418,6 +1418,21 @@ class TestSequentialTopology(unittest.TestCase):
         from fleet_engine.engine import _estimate_tokens
         self.assertEqual(_estimate_tokens("x" * 43), 10)
 
+    def test_cap_bound_is_char_based_not_token_density_aware(self):
+        """The cap is a CHAR bound (density-blind): dense content (CJK/code, where the
+        ~4 chars/token estimate under-counts) is bounded by CHARS, not real tokens — a
+        documented limitation of the provider-neutral heuristic (#39, Codex fold)."""
+        from fleet_engine.engine import _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+        char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
+        # Over the CHAR bound -> truncated + flagged, regardless of the (higher) real token count.
+        dense_over = "中" * (char_budget + 100)
+        capped, truncated = _cap_stage_text(dense_over)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(capped), char_budget)
+        # Under the CHAR bound -> passes whole, even though its real token count is high.
+        dense_under = "中" * (char_budget // 2)
+        self.assertEqual(_cap_stage_text(dense_under), (dense_under, False))
+
     # ------------------------------------------------------------------
     # Status precedence: broken sequential+collect chain is NOT SUCCESS
     # ------------------------------------------------------------------
