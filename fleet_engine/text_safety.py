@@ -79,8 +79,8 @@ def sanitize(text: object, *, multiline: bool = False) -> str:
 # renders at column 0 and forges a trusted harness row (report-grammar mimicry, GH
 # #45). A NON-space glyph is required: markdown ignores up to three leading spaces
 # before ``#``/``---``, so a space indent would still let a body header forge on the
-# ``.md`` surfaces; U+2502 (│) is markdown-inert and opens no trusted grammar token.
-BODY_GUTTER = "│ "  # │ + space
+# ``.md`` surfaces; U+2502 is markdown-inert and opens no trusted grammar token.
+BODY_GUTTER = "│ "  # U+2502 (box-drawing vertical) + a space
 
 
 def frame_body(text: object, *, gutter: str = BODY_GUTTER) -> str:
