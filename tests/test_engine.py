@@ -1320,10 +1320,11 @@ class TestSequentialTopology(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_per_stage_truncation_flag(self):
-        """Oversize stage output is capped; threading_truncated=True; marker in prompt."""
-        from fleet_engine.engine import CHAIN_STAGE_CAP
+        """Oversize single-unit stage output is hard-cut; threading_truncated=True; marker in prompt."""
+        from fleet_engine.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 
-        long_text = "X" * (CHAIN_STAGE_CAP + 100)
+        char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
+        long_text = "X" * (char_budget + 100)   # one oversize unit (no blank lines) -> hard-cut
 
         class VariantClient:
             def __init__(self):
@@ -1346,16 +1347,91 @@ class TestSequentialTopology(unittest.TestCase):
         # Analyst's prompt must contain the truncation marker, not the full text.
         analyst_prompt = next(p for (r, p) in client.calls if r == "analyst")
         self.assertIn("[… stage output truncated …]", analyst_prompt)
-        self.assertNotIn("X" * (CHAIN_STAGE_CAP + 1), analyst_prompt)
-        # The injected block (content + truncation marker) stays within the cap — the
-        # marker's room is reserved, not appended past it (Copilot finding).
-        self.assertLessEqual(analyst_prompt.count("X"), CHAIN_STAGE_CAP)
+        self.assertNotIn("X" * (char_budget + 1), analyst_prompt)
+        # The injected block (content + truncation marker) stays within the char-equivalent
+        # budget — the marker's room is reserved, not appended past it.
+        self.assertLessEqual(analyst_prompt.count("X"), char_budget)
 
     def test_no_truncation_when_output_within_cap(self):
         """Short stage output does not set threading_truncated."""
         client = FakeClient()  # default outputs are short ("scout-output" etc.)
         result = run_fleet(_chain_config(), "task", client)
         self.assertFalse(result.threading_truncated)
+
+    # ------------------------------------------------------------------
+    # Whole-unit truncation of _cap_stage_text (#39, U2)
+    # ------------------------------------------------------------------
+
+    def test_cap_keeps_whole_units_and_drops_overflow(self):
+        """Over-budget multi-unit text packs WHOLE units; the overflowing unit is dropped
+        entirely (no mid-unit cut); marker present; truncated True (R4)."""
+        from fleet_engine.engine import (
+            _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN, _CHAIN_TRUNC_MARKER)
+
+        unit_a, unit_b, unit_c = "A" * 7000, "B" * 7000, "C" * 7000
+        text = "\n\n".join([unit_a, unit_b, unit_c])   # 21004 chars > 16000-char budget
+        capped, truncated = _cap_stage_text(text)
+
+        self.assertTrue(truncated)
+        self.assertIn(unit_a, capped)          # first unit whole
+        self.assertIn(unit_b, capped)          # second unit whole
+        self.assertNotIn("C", capped)          # overflowing unit dropped entirely — no partial
+        self.assertTrue(capped.endswith(_CHAIN_TRUNC_MARKER))
+        self.assertLessEqual(len(capped), CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN)
+
+    def test_cap_hard_cuts_single_oversize_unit(self):
+        """A single unit larger than the whole budget is hard-cut to fit, with the marker;
+        the block stays within the char-equivalent budget (R5)."""
+        from fleet_engine.engine import (
+            _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN, _CHAIN_TRUNC_MARKER)
+
+        char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
+        text = "X" * (char_budget + 5000)       # one unit, no blank lines
+        capped, truncated = _cap_stage_text(text)
+
+        self.assertTrue(truncated)
+        self.assertTrue(capped.endswith(_CHAIN_TRUNC_MARKER))
+        self.assertEqual(len(capped), char_budget)     # marker room reserved: block == budget
+        self.assertEqual(capped.count("X"), char_budget - len(_CHAIN_TRUNC_MARKER))
+
+    def test_cap_passes_through_within_budget(self):
+        """Text within the token budget is returned whole, no marker, not truncated."""
+        from fleet_engine.engine import _cap_stage_text
+
+        text = "finding one\n\nfinding two\n\nfinding three"
+        self.assertEqual(_cap_stage_text(text), (text, False))
+
+    def test_cap_threads_8kb_multifinding_input_whole(self):
+        """R2/R3: an ~8 KB, 10-unit input (the #17 dogfood shape) now threads WHOLE — the
+        old 4,000-CHAR cap truncated it to ~4 findings; the 4,000-TOKEN budget does not."""
+        from fleet_engine.engine import _cap_stage_text
+
+        text = "\n\n".join(f"Finding {i}: " + "z" * 780 for i in range(10))   # ~8 KB
+        capped, truncated = _cap_stage_text(text)
+        self.assertFalse(truncated)
+        self.assertEqual(capped, text)
+        self.assertIn("Finding 9", capped)     # the 10th finding survives (was cut at 4k chars)
+
+    def test_estimate_tokens_floors_chars_over_ratio(self):
+        # 43 chars / 4 = 10.75 -> 10 (floor); a hardcoded expected pins FLOOR
+        # semantics (round/ceil would give 11) and catches a ratio/operator drift.
+        from fleet_engine.engine import _estimate_tokens
+        self.assertEqual(_estimate_tokens("x" * 43), 10)
+
+    def test_cap_bound_is_char_based_not_token_density_aware(self):
+        """The cap is a CHAR bound (density-blind): dense content (CJK/code, where the
+        ~4 chars/token estimate under-counts) is bounded by CHARS, not real tokens — a
+        documented limitation of the provider-neutral heuristic (#39, Codex fold)."""
+        from fleet_engine.engine import _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+        char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
+        # Over the CHAR bound -> truncated + flagged, regardless of the (higher) real token count.
+        dense_over = "中" * (char_budget + 100)
+        capped, truncated = _cap_stage_text(dense_over)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(capped), char_budget)
+        # Under the CHAR bound -> passes whole, even though its real token count is high.
+        dense_under = "中" * (char_budget // 2)
+        self.assertEqual(_cap_stage_text(dense_under), (dense_under, False))
 
     # ------------------------------------------------------------------
     # Status precedence: broken sequential+collect chain is NOT SUCCESS
@@ -2124,10 +2200,10 @@ class TestIterativeTopology(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_threading_truncated_when_inter_round_output_oversize(self):
-        """threading_truncated=True when a round's output exceeds CHAIN_STAGE_CAP."""
-        from fleet_engine.engine import CHAIN_STAGE_CAP
+        """threading_truncated=True when a round's output exceeds the token budget."""
+        from fleet_engine.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 
-        long_text = "X" * (CHAIN_STAGE_CAP + 100)
+        long_text = "X" * (CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN + 100)
 
         class BigOutputClient:
             def __init__(self):

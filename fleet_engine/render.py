@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 from fleet_engine.config import FleetConfig
 from fleet_engine.text_safety import sanitize
-from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_CAP
+from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 from fleet_engine.judge_grade import parse_grades
 from fleet_engine.progress import (
     Completion,
@@ -186,7 +186,7 @@ def render_fleet_preview(
             out.append(f"\nTopology: sequential — {stages} stage(s){tail}, max wall-clock {ceiling_str}")
         else:
             out.append(f"\nTopology: sequential — {stages} stage(s){tail}, no per-stage timeout")
-        out.append(f"  Inter-stage output cap: {CHAIN_STAGE_CAP:,} chars")
+        out.append(f"  Inter-stage output cap: ~{CHAIN_STAGE_TOKEN_CAP:,} tokens (rough estimate; {CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN:,}-char cap)")
         # Cross-stage trust disclosure: a non-first chain lane that carries tools receives
         # the prior stages' UNTRUSTED model output threaded into its prompt, THEN runs its
         # tools — so a prompt injection in an upstream stage can steer this lane's tool use
@@ -230,7 +230,7 @@ def render_fleet_preview(
                 f"\nTopology: iterative — {rounds} round(s), {lanes} lane(s),"
                 f" {calls} paid call(s), no per-round timeout"
             )
-        out.append(f"  Inter-round output cap: {CHAIN_STAGE_CAP:,} chars")
+        out.append(f"  Inter-round output cap: ~{CHAIN_STAGE_TOKEN_CAP:,} tokens (rough estimate; {CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN:,}-char cap)")
         # Cross-round trust: ALL lanes from round 2+ consume prior-round outputs — unlike
         # sequential, even lane 0 receives upstream model output in later rounds.
         # role labels are fleet-controlled → sanitized.
@@ -411,7 +411,7 @@ def render_result(result: FleetResult) -> str:
     if result.threading_truncated:
         # Our own trusted text — not sanitized. A sequential chain (inter-stage) or an
         # iterative round (inter-round) produced threaded output that exceeded
-        # CHAIN_STAGE_CAP chars; the downstream lane received partial upstream context.
+        # CHAIN_STAGE_TOKEN_CAP tokens; the downstream lane received partial upstream context.
         unit = "inter-round" if result.topology == "iterative" else "inter-stage"
         out.append(f"\nnote: {unit} output was capped — some context may have been truncated")
     out.append("\n--- provenance ---")

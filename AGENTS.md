@@ -116,7 +116,7 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 - **Sequential/chain seams:** `_run_chain` is engine-internal and stays pure (events
   only — it emits `LaneStarted`/`LaneDone`, never I/O); it threads each prior successful
   lane’s attributed output into the next lane’s prompt, capped **per stage**
-  (`_CHAIN_DELIM` / `_CHAIN_STAGE_CAP`) so no single stage is dropped; it breaks on the
+  (`_CHAIN_DELIM` / `CHAIN_STAGE_TOKEN_CAP`) so no single stage is dropped; it breaks on the
   first failure, marking downstream lanes **skipped** (excluded from `failures`, the
   failure notes, and the failure tally — recorded as a distinct manifest state); it sets
   `terminal_produced` (a deliverable present vs scaffolding only) and
