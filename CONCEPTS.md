@@ -71,6 +71,18 @@ Persisting a fleet run's artifacts to disk so the run is auditable after the fac
 ### Run manifest
 The structured, machine-readable record of one run's health: per specialist, its outcome (success or failure, elapsed time, the toolset it was asked for, whether it timed out, and the file holding its output), plus run-level facts (the synthesizer model, whether synthesis succeeded, the active Hermes profile). It is the seam a later auditing or agent-handoff layer reads; the markdown files are for reading by hand.
 
+## Report trust surfaces
+
+### Combined surface
+A rendered or captured surface where model output is aggregated beside rows the harness prints itself — the terminal result view and a collect/judge run's combined report — as opposed to an *isolated surface*: a single-author deliverable (a per-lane specialist file, or a synthesize-mode report) that carries no trusted grammar for a model to mimic. Anti-mimicry framing applies to combined surfaces only.
+
+An isolated file is safe only while it stands alone: concatenating a whole run folder, or ingesting several per-lane files into one context, re-creates a combined surface — so a consumer of many files at once must take attribution from the run manifest, not from any in-file header.
+
+### Report-grammar mimicry
+A trust-safety threat in which a model's own output impersonates the harness's trusted report grammar — the status rows and role delimiters Cadre prints itself — so a reader mistakes fabricated structure for harness-emitted structure. Defended structurally on combined surfaces by framing every model-body line so that only harness-printed rows render at column 0.
+
+The framing protects a reader that relies on visual column-0 position; a consumer that judges the report by substring match is unprotected, because the forged token still exists inside the framed body line. That is why the agent read-back takes structural provenance from the forgery-immune run manifest rather than the rendered report.
+
 ## Agent-run handoff
 
 ### Fleet library
