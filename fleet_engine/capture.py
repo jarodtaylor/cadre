@@ -491,9 +491,10 @@ def _synthesis_md(result: FleetResult) -> str:
             # fleet could embed newlines in role/provider/model to forge a fake
             # "--- role ---" delimiter and misattribute output, so the identity
             # fields are _sanitize'd here exactly as the terminal renderer does.
-            # lane.text (model output) is also _sanitize'd (#5 U2 — a persisted
-            # record read/re-rendered later must be as un-spoofable as the terminal;
-            # multiline=True keeps the body's newlines). The two attributed-block
+            # lane.text (model output) is gutter-framed via frame_body (#5 U2, #45 — a
+            # persisted record read/re-rendered later must be as un-spoofable as the
+            # terminal; sanitize+gutter keeps the body's newlines while blocking a
+            # flush-left forged row). The two attributed-block
             # renderers stay separate (terminal vs disk) but share this invariant.
             blocks = [
                 f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{frame_body(lane.text or '')}"
@@ -533,11 +534,11 @@ def _synthesis_md(result: FleetResult) -> str:
             return f"No judge grade — {frame_body(judge_note)}."
         # SUCCESS, or a sequential chain that broke mid-run but the judge still succeeded
         # over the survivors (DEGRADED with result.judge set — fell through above).
-        # #5 U2: the judge text is model output and is now _sanitize'd (multiline=True)
-        # — a persisted record that a human or agent reads back is a trust surface,
-        # so it must be as un-spoofable as the terminal render (which already
-        # sanitizes judge text). Identity fields on the delimiter and lane.text are
-        # sanitized for the same reason.
+        # #5 U2 / #45: the judge text is model output, now gutter-framed via frame_body
+        # (sanitize + gutter every line) — a persisted record a human or agent reads
+        # back is a trust surface, so it must be as un-spoofable as the terminal render
+        # (which also frame_bodys judge text). Identity fields on the delimiter stay
+        # _sanitize'd, and lane.text below is framed, for the same reason.
         successes = result.successes
         blocks = [
             f"--- {_sanitize(lane.role)} ({_sanitize(lane.provider)}/{_sanitize(lane.model)}) ---\n{frame_body(lane.text or '')}"

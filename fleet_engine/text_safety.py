@@ -83,18 +83,21 @@ def sanitize(text: object, *, multiline: bool = False) -> str:
 BODY_GUTTER = "│ "  # U+2502 (box-drawing vertical) + a space
 
 
-def frame_body(text: object, *, gutter: str = BODY_GUTTER) -> str:
+def frame_body(text: object) -> str:
     """Sanitize a model-output body and gutter every line so none renders at column 0.
 
     The one chokepoint for framing untrusted multiline model output on a combined
     surface (the terminal render; collect/judge ``synthesis.md``). It ``sanitize``s
-    the body (multiline) then prefixes ``gutter`` to EVERY line — including the first,
-    which renders immediately after a ``--- role ---`` delimiter, and blank lines — so
-    the invariant "only trusted harness rows render at column 0" holds and is uniformly
-    checkable (GH #45). Deliberately NOT ``text.replace(chr(10), chr(10) + gutter)``:
-    that idiom skips the first line, leaving the delimiter-adjacent line flush-left and
-    forgeable. Sanitizing internally makes one call per sink safe by construction —
-    callers pass raw model text, not a pre-sanitized value.
+    the body (multiline) then prefixes ``BODY_GUTTER`` to EVERY line — including the
+    first, which renders immediately after a ``--- role ---`` delimiter, and blank
+    lines — so the invariant "only trusted harness rows render at column 0" holds and
+    is uniformly checkable (GH #45). Deliberately NOT
+    ``text.replace(chr(10), chr(10) + BODY_GUTTER)``: that idiom skips the first line,
+    leaving the delimiter-adjacent line flush-left and forgeable. Sanitizing internally
+    makes one call per sink safe by construction — callers pass raw model text, not a
+    pre-sanitized value. The gutter is fixed (``BODY_GUTTER``), not a parameter: it is
+    the one security-chosen glyph, and letting a caller pick a different prefix would be
+    a footgun (a grammar-opening gutter would re-enable the forgery).
     """
     body = sanitize(text, multiline=True)
-    return "\n".join(gutter + line for line in body.split("\n"))
+    return "\n".join(BODY_GUTTER + line for line in body.split("\n"))

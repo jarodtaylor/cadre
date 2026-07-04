@@ -24,7 +24,7 @@ from fleet_engine.render import render_result
 from fleet_engine.text_safety import BODY_GUTTER
 from tests.test_render import make_lane, make_result
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[1]
 
 # Trusted-row openers a model body might try to forge. Each is distinct from any real
 # harness row (real rows use the lane role / fleet name), so a line that starts with
