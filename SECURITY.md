@@ -48,10 +48,12 @@ not a claim that Cadre is "injection-proof."
   *contents* — a profile whose creds/tools change at the same path between preview
   and run is operator-controlled host config, outside the tampered-library threat
   model, so it is deliberately not digested.) Unforgeability rests on the token
-  file's owner-only `~/.cadre` permissions (no MAC/secret) — appropriate for the
-  single-operator posture; if you relocate the token with `CADRE_APPROVAL_PATH`,
-  it must stay in an owner-only directory (the digest is not a secret, so a
-  group/world-writable location would let a co-resident user forge an approval).
+  file's owner-only permissions (no MAC/secret) — appropriate for the
+  single-operator posture. Because the digest is not a secret, a group/world-writable
+  token *directory* would let a co-resident user replant a forged token, so both the
+  mint and the consume **fail closed**: they refuse if the token's parent (default
+  `~/.cadre`, or a `CADRE_APPROVAL_PATH` override) is not owner-owned or is
+  group/other-writable — the same ownership/permission check the persona pool uses.
 - **Install seeding.** Starter fleets/personas are written owner-only (`0o600`) with
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything
@@ -100,8 +102,19 @@ not a claim that Cadre is "injection-proof."
   colluding agent that runs `--preview` and immediately runs with the fresh
   matching token — no human in the loop — proceeds. Defending that would require
   routing approval outside the agent's process, which this single-operator
-  deployment does not do. The direct-human dev CLI (`python -m fleet_engine.cli`)
-  is intentionally **not** gated — a human invoking it directly *is* the operator.
+  deployment does not do.
+- **An agent holding a `terminal` toolset can bypass the gate entirely — the
+  terminal-abuse residual.** The approval gate lives in the agent-handoff runner
+  (`skills/cadre-fleet/run.py`). The direct-human dev CLI (`python -m
+  fleet_engine.cli`) is intentionally **not** gated — a human invoking it directly
+  *is* the operator. But that also means an agent with a `terminal` tool can skip
+  the gate by invoking that CLI, or a one-line `python -c` that calls the engine
+  directly, or by minting a token in a directory it controls. This is not a hole
+  the gate can close: once an agent can run arbitrary shell as the operator, no
+  in-process approval check can stop it — gating the CLI too would shut one path
+  of unboundedly many and give false assurance. The binding defends an
+  honest-but-fallible agent and a tampered fleet library from a run-time surface
+  swap; it does **not** defend against an agent weaponizing its own terminal.
 
 ## Posture
 

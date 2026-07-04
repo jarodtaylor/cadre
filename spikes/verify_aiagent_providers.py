@@ -283,13 +283,26 @@ def _has_tool_call_evidence(messages: object) -> bool:
     fire evidence, including a bare tool-call *request* without yet seeing its
     result.
 
-    That's deliberately not tightened to require a tool *result*: AGENTS.md
-    verified-fact #1 records that Hermes runs a per-tool ``check_fn`` before a
-    toolset ever reaches the model, so a model generally cannot even emit a call
-    for a toolset it wasn't given — a bare request is already meaningful evidence,
-    not a hallucinated intent. If a live dogfood ever shows a recorded-but-
-    still-ungrounded toolset, tighten this to require a tool-result (role="tool")
-    specifically.
+    That's deliberately not tightened to require a *successful* tool result yet:
+    AGENTS.md verified-fact #1 records that Hermes runs a per-tool ``check_fn``
+    before a toolset ever reaches the model, so a model generally cannot even emit
+    a call for a toolset it wasn't given — a bare request is already meaningful
+    evidence that the toolset is *provisioned*, not a hallucinated intent.
+
+    KNOWN GAP (Codex adversarial review, F3), resolved at the host dogfood, NOT
+    here: a *provisioned-but-erroring* tool — the model emits the call, but the
+    execution fails (e.g. web tool present, search backend down) — would still be
+    recorded as ``FIRED LIVE`` while a lane using it runs ungrounded, the exact
+    failure this probe exists to prevent. Blind-tightening now is unsafe: the real
+    ``messages`` per-tool-result shape (whether a ``role="tool"`` result and its
+    error-payload format even appear) is unobservable off-host, and over-tightening
+    would over-omit *everything* (an empty palette — a worse failure). So the
+    ``silas`` dogfood MUST dump the raw ``result['messages']`` for one proven and
+    one unproven probe, confirm whether tool *results* + error payloads are present
+    and their shape, THEN tighten this to require a successful (non-error)
+    ``role="tool"`` result. The pending scaffolding test
+    (``TestHasToolCallEvidence.test_errored_result_should_be_unproven``, skipped)
+    pins the desired end state.
     """
     if not isinstance(messages, list):
         return False

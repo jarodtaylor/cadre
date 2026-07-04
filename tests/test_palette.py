@@ -759,6 +759,25 @@ class TestHasToolCallEvidence(unittest.TestCase):
         messages = ["not a dict", {"role": "tool", "content": "result"}]
         self.assertTrue(_spike._has_tool_call_evidence(messages))
 
+    @unittest.skip(
+        "F3 (Codex adversarial review): dogfood-gated. Today a tool-call REQUEST "
+        "counts as evidence even if execution errored, so a provisioned-but-erroring "
+        "tool is recorded FIRED LIVE while its lane runs ungrounded. The silas dogfood "
+        "must observe the real messages tool-result + error-payload shape, then tighten "
+        "_has_tool_call_evidence to require a SUCCESSFUL (non-error) result — at which "
+        "point this test un-skips and passes. Pins the intended end state in code."
+    )
+    def test_errored_result_should_be_unproven(self):
+        # An assistant tool-call REQUEST followed by an ERROR tool result: the tool
+        # was provisioned (call emitted) but execution failed, so the lane would run
+        # ungrounded. The desired end state is UNPROVEN. (Fails today by design — the
+        # skip marks it as the dogfood-gated tightening, not a regression.)
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "tool_call_id": "1", "content": "", "is_error": True},
+        ]
+        self.assertFalse(_spike._has_tool_call_evidence(messages))
+
 
 class TestProbeToolset(unittest.TestCase):
     """_probe_toolset (U7): live per-toolset fire evidence via run_conversation(),

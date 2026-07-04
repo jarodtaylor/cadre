@@ -87,6 +87,33 @@ def default_approval_path() -> str:
     return os.environ.get("CADRE_APPROVAL_PATH") or DEFAULT_APPROVAL_PATH
 
 
+def _parent_is_safe(parent: str) -> bool:
+    """True iff ``parent`` is owned by the current user and not group/other-writable.
+
+    The token carries no MAC/secret (the digest is a hash of inputs the agent
+    already holds), so the ONLY thing standing between an attacker and a forged
+    approval is that the token file cannot be replaced by another user — which is
+    guaranteed only when its *directory* is owner-owned and not group/other-
+    writable. A group/world-writable parent lets a co-resident user unlink and
+    replant the token even though the leaf is 0o600 + O_NOFOLLOW (Codex adversarial
+    review). Mirrors the persona-pool ownership/permission check in
+    ``personas.resolve`` (``fleet_engine/personas.py``) — the same repo posture for
+    a trust surface whose integrity rests on filesystem permissions, not crypto.
+    Non-POSIX (no ``getuid``) skips the ownership half but still enforces the mode
+    bits, exactly as the persona-pool check does.
+    """
+    try:
+        st = os.stat(parent)
+    except OSError:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and st.st_uid != getuid():
+        return False
+    if st.st_mode & 0o022:  # group- or other-writable
+        return False
+    return True
+
+
 @dataclasses.dataclass
 class ApprovalToken:
     """A minted, not-yet-consumed approval. TTL is off by default (R3)."""
@@ -146,9 +173,21 @@ def write_approval(
     }
     blob = json.dumps(payload)
 
+    parent = os.path.dirname(resolved) or "."
     old_umask = os.umask(0o077)
     try:
         Path(resolved).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Refuse to mint into a group/other-writable (or foreign-owned) directory.
+        # mkdir(exist_ok=True) creates a fresh dir 0o700 but will NOT tighten a
+        # PRE-EXISTING loose one — and a loose parent lets another user replant the
+        # token (no MAC to stop them). Check AFTER mkdir so a just-created dir passes
+        # by construction and only a pre-existing loose dir is refused (Codex).
+        if not _parent_is_safe(parent):
+            raise PermissionError(
+                f"approval directory {parent!r} is unsafe — it must be owned by you "
+                "and not group/other-writable (the token has no MAC, so its integrity "
+                "rests on the directory's permissions). Fix it, then re-preview."
+            )
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(resolved, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -175,6 +214,15 @@ def consume_approval(path: str | None = None) -> ApprovalToken | None:
     ``token.is_expired(time.time())``.
     """
     resolved = os.path.expanduser(path or default_approval_path())
+
+    # Refuse to HONOR a token from a group/other-writable (or foreign-owned)
+    # directory — that is the actual exploit path: a co-resident user replants the
+    # token in a loose dir and the run consumes it. Check BEFORE the read; fail
+    # closed (return None → the run gate refuses), mirroring write_approval's mint
+    # refusal and the persona-pool posture (Codex adversarial review).
+    parent = os.path.dirname(resolved) or "."
+    if not _parent_is_safe(parent):
+        return None
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:

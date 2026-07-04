@@ -333,5 +333,56 @@ class TestApprovalTokenExpiry(unittest.TestCase):
         self.assertEqual(token.minted_at, 500.0)
 
 
+class TestApprovalTokenParentDirPermissions(unittest.TestCase):
+    """F2 (Codex adversarial review): the token has no MAC, so its integrity rests
+    on the parent directory being owner-owned and not group/other-writable. A loose
+    parent lets a co-resident replant the token even though the leaf is 0o600 +
+    O_NOFOLLOW. write_approval REFUSES to mint into a loose dir (raises); consume
+    REFUSES to honor a token from one (returns None — the actual exploit path).
+    Mirrors the persona-pool ownership/permission check in personas.resolve."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _dir(self, name, mode):
+        # chmod AFTER mkdir — chmod is umask-independent, unlike mkdir's mode arg.
+        d = os.path.join(self.root, name)
+        os.mkdir(d)
+        os.chmod(d, mode)
+        return d
+
+    def test_group_writable_parent_write_refuses(self):
+        d = self._dir("g", 0o770)
+        with self.assertRaises(PermissionError):
+            write_approval("d", privileged=False, path=os.path.join(d, "approval"))
+
+    def test_other_writable_parent_write_refuses(self):
+        d = self._dir("o", 0o707)
+        with self.assertRaises(PermissionError):
+            write_approval("d", privileged=False, path=os.path.join(d, "approval"))
+
+    def test_loose_parent_consume_refuses(self):
+        # Mint while the dir is safe, then loosen it: consume must refuse to honor
+        # the token (fail-closed) even though the 0o600 leaf is untouched.
+        d = self._dir("c", 0o700)
+        tok = os.path.join(d, "approval")
+        write_approval("digest-x", privileged=False, path=tok)
+        os.chmod(d, 0o777)
+        self.assertIsNone(consume_approval(path=tok))
+
+    def test_safe_parent_round_trips(self):
+        # A 0o700 owner-owned parent works normally — no false refusal.
+        d = self._dir("s", 0o700)
+        tok = os.path.join(d, "approval")
+        write_approval("digest-y", privileged=False, path=tok)
+        token = consume_approval(path=tok)
+        self.assertIsNotNone(token)
+        self.assertEqual(token.digest, "digest-y")
+
+
 if __name__ == "__main__":
     unittest.main()
