@@ -248,11 +248,21 @@ def consume_approval(path: str | None = None) -> ApprovalToken | None:
         privileged = data["privileged"]
         if not isinstance(digest, str) or not isinstance(privileged, bool):
             raise ValueError("approval token: digest/privileged have the wrong type")
+        # Type-check the TTL fields too: a token with a wrong-typed minted_at/ttl_seconds
+        # (e.g. "ttl_seconds": "60") would otherwise round-trip and crash later in
+        # ApprovalToken.is_expired (`now > str + int`), a traceback instead of a
+        # fail-closed refusal (CodeRabbit). bool is an int subclass, so exclude it.
+        minted_at = data.get("minted_at")
+        ttl_seconds = data.get("ttl_seconds")
+        if minted_at is not None and (isinstance(minted_at, bool) or not isinstance(minted_at, (int, float))):
+            raise ValueError("approval token: minted_at has the wrong type")
+        if ttl_seconds is not None and (isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int)):
+            raise ValueError("approval token: ttl_seconds has the wrong type")
         return ApprovalToken(
             digest=digest,
             privileged=privileged,
-            minted_at=data.get("minted_at"),
-            ttl_seconds=data.get("ttl_seconds"),
+            minted_at=minted_at,
+            ttl_seconds=ttl_seconds,
         )
     except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
         return None

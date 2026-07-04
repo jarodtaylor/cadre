@@ -835,8 +835,11 @@ class TestSkillApprovalGate(unittest.TestCase):
         surface_digest, never run.py's HERMES_HOME env wiring. Absolute paths so the
         binding is cwd-independent."""
         fake_client_cls = MagicMock()
-        env_a = {**self._env(), "HERMES_HOME": "/tmp/cadre-profile-a"}
-        env_b = {**self._env(), "HERMES_HOME": "/tmp/cadre-profile-b"}
+        # Two distinct absolute strings — never created/read, only fed to the digest as
+        # the profile axis (kept off /tmp so the S108 hardcoded-temp lint doesn't flag
+        # what is not actually a temp path — CodeRabbit).
+        env_a = {**self._env(), "HERMES_HOME": "/nonexistent/cadre-profile-a"}
+        env_b = {**self._env(), "HERMES_HOME": "/nonexistent/cadre-profile-b"}
         with patch.dict(os.environ, env_a):
             with patch.object(self.run_mod, "ModelClient", fake_client_cls):
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -1015,6 +1018,23 @@ class TestSkillPrivilegedApproval(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0)
+
+    def test_privileged_fleet_no_token_refusal_names_approve_privileged(self):
+        """Copilot: a privileged fleet run with NO token hits the digest/absent
+        refusal, whose message must point at --approve-privileged — a privileged
+        fleet's plain --preview mints nothing, so telling the operator to --preview
+        would loop them."""
+        fake_client_cls = MagicMock()
+        buf = io.StringIO()
+        with patch.dict(os.environ, self._env()):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(
+                        ["--fleet", str(self.priv_fleet), "--task", "t", "--no-capture"]
+                    )
+        self.assertEqual(code, 1)
+        self.assertIn("--approve-privileged", buf.getvalue())
+        fake_client_cls.assert_not_called()
 
     def test_nonprivileged_fleet_accepts_privileged_token_no_lockout(self):
         """A non-privileged fleet approved via --approve-privileged still runs —

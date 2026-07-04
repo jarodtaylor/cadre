@@ -168,14 +168,17 @@ def main(argv: list[str] | None = None) -> int:
                     # instead of crashing the preview. Sanitize the exception text (it
                     # can carry a path with control bytes) like every other rendered string.
                     print(
-                        f"\nCould not write the approval token at {default_approval_path()}: "
+                        f"\nCould not write the approval token at {_sanitize(default_approval_path())}: "
                         f"{_sanitize(str(exc))}\n"
                         "Ensure ~/.cadre (or CADRE_APPROVAL_PATH) is an owner-only, "
                         "non-symlink path, then re-preview."
                     )
                     return 1
                 flavor = "privileged " if args.approve_privileged else ""
-                print(f"\nPreview-bound {flavor}approval written: {default_approval_path()}")
+                # Sanitize the path label: CADRE_APPROVAL_PATH is caller-controlled and
+                # flows onto the approval surface, so a control byte in it must not spoof
+                # this line (CodeRabbit — same trust-surface rule as every other print here).
+                print(f"\nPreview-bound {flavor}approval written: {_sanitize(default_approval_path())}")
                 print("This run is now approved to execute this exact previewed surface once.")
         return 0
 
@@ -196,8 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     token = consume_approval()
     expected_digest = _surface_digest_for(cfg, composed_task)
     if token is None or token.digest != expected_digest or token.is_expired(time.time()):
+        # Point at the command that actually MINTS for this fleet: a privileged
+        # fleet's plain --preview mints nothing (U5), so telling its operator to
+        # "--preview first" would loop — send them to --approve-privileged instead
+        # (Copilot review).
+        mint_cmd = "--approve-privileged" if cfg.allow_privileged_tools else "--preview"
         print(
-            "No valid preview-bound approval for this run. Run `--preview` first to "
+            f"No valid preview-bound approval for this run. Run `{mint_cmd}` first to "
             "approve this exact fleet + task + docs + profile, then run again."
         )
         return 1

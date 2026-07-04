@@ -294,6 +294,19 @@ class TestApprovalTokenMalformedContent(unittest.TestCase):
             json.dump({"digest": 12345, "privileged": "yes"}, f)
         self.assertIsNone(consume_approval(path=self.path))
 
+    def test_wrong_typed_ttl_returns_none_not_crash(self):
+        """A well-formed digest/privileged but a wrong-typed ttl_seconds ("60") must
+        fail closed at consume — not round-trip and crash later in is_expired
+        (`now > str + int`). CodeRabbit."""
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"digest": "d", "privileged": False, "ttl_seconds": "60"}, f)
+        self.assertIsNone(consume_approval(path=self.path))
+
+    def test_wrong_typed_minted_at_returns_none(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"digest": "d", "privileged": False, "minted_at": "soon"}, f)
+        self.assertIsNone(consume_approval(path=self.path))
+
 
 class TestApprovalTokenExpiry(unittest.TestCase):
     def setUp(self):
@@ -371,7 +384,7 @@ class TestApprovalTokenParentDirPermissions(unittest.TestCase):
         d = self._dir("c", 0o700)
         tok = os.path.join(d, "approval")
         write_approval("digest-x", privileged=False, path=tok)
-        os.chmod(d, 0o777)
+        os.chmod(d, 0o777)  # noqa: S103 — intentional: a world-writable dir is the exploit we test
         self.assertIsNone(consume_approval(path=tok))
 
     def test_safe_parent_round_trips(self):

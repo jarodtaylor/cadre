@@ -298,7 +298,7 @@ def render_composed_task(task: str) -> str:
     a --doc's content could otherwise smuggle a terminal escape onto the
     approval surface.
     """
-    body = sanitize(task, multiline=True)
+    body = _sanitize(task, multiline=True)
     indented = body.replace(chr(10), chr(10) + "  ")
     return f"\nComposed task (--task + --doc):\n  {indented}"
 
