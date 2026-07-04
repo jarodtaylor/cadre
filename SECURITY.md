@@ -58,17 +58,6 @@ not a claim that Cadre is "injection-proof."
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything
   privileged or unrecognized requires an explicit `allow_privileged_tools: true`.
-- **Palette toolsets are proven to fire, not merely declared.** The verify step
-  live-probes each declared toolset with a forced tool-call prompt via
-  `run_conversation()` (never `chat()` — only the full conversation history can
-  show a tool actually fired) and records only the ones observed firing in
-  `~/.cadre/palette.yaml`; an unprovisioned declared toolset is omitted and
-  warned by name at verify time instead of being silently included. Honest
-  caveat: a provisioned tool a model simply *declines* to call on this one
-  forced probe is indistinguishable from an unprovisioned one, so it is
-  conservatively omitted too (fail-closed, false-negative-safe) — the failure
-  mode this closes is a toolset running silently ungrounded, not a toolset
-  missing from the palette.
 
 ## What is NOT defended (bounded, documented residuals)
 
@@ -82,6 +71,16 @@ not a claim that Cadre is "injection-proof."
   exfiltration path** — a read-only web call can carry data in its query string.
   `--preview` discloses such cross-stage tool exposure; this pass does not eliminate
   it.
+- **Palette toolsets are declared, not live-verified.** The verify step records the
+  toolsets a profile declares, safe-filtered, but does not confirm each one actually
+  fires — so a lane reading a declared-but-unprovisioned toolset (e.g. `web`) can
+  answer from training knowledge with no error. A live per-toolset probe was
+  attempted, but a naive signal (scanning the model's messages for a tool call)
+  proved unreliable: natively-integrated tools — a provider's built-in web search,
+  say — ground the answer without emitting a detectable tool-call entry, so the probe
+  false-negatives them and would drop *working* toolsets from the palette. Finding a
+  grounding signal that survives native integration is tracked as a follow-up
+  ([#48](https://github.com/jarodtaylor/cadre/issues/48)).
 - **Model-only cross-lane markers.** The delimiters that frame one lane's output as
   another lane's *prompt* (sequential/iterative threading, the `--doc` file boundary,
   the specialist→synthesizer fan-in) are read only by a downstream model. Forging one

@@ -181,22 +181,18 @@ class TestWritePalettePermissions(unittest.TestCase):
 
 
 class TestWritePaletteToolsetFiltering(unittest.TestCase):
-    """write_palette silently drops any non-safe toolset name from its 2nd arg —
-    now the PROVEN-toolsets list (U7/U8) — even one reported as proven by the
-    live probe. SAFE_TOOLSETS is a separate, pre-existing privilege gate that
-    applies regardless of probe outcome."""
+    """write_palette silently drops any non-safe toolset name."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def test_non_safe_toolsets_excluded(self):
-        """terminal, browser → silently excluded even if reported as proven;
-        safe names remain."""
+        """terminal, browser → silently excluded; safe names remain."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        mixed_proven = ["web", "terminal", "search", "browser", "x_search"]
+        mixed_toolsets = ["web", "terminal", "search", "browser", "x_search"]
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, mixed_proven, out)
+        _spike.write_palette(records, mixed_toolsets, out)
 
         data = yaml.safe_load(out.read_text())
         toolsets = data["toolsets"]
@@ -207,20 +203,19 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         self.assertIn("x_search", toolsets)
 
     def test_safe_toolset_order_preserved(self):
-        """Safe toolsets appear in the same order they were proven/passed in."""
+        """Safe toolsets appear in the same order they were declared."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         # safe names in a specific order, with non-safe interspersed
-        proven = ["vision", "web", "terminal", "search"]
+        toolsets = ["vision", "web", "terminal", "search"]
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, proven, out)
+        _spike.write_palette(records, toolsets, out)
 
         data = yaml.safe_load(out.read_text())
         # non-safe "terminal" dropped; safe names in original order
         self.assertEqual(data["toolsets"], ["vision", "web", "search"])
 
     def test_all_non_safe_toolsets_yields_empty_list(self):
-        """If every 'proven' toolset is non-safe, the palette toolsets list is
-        empty — SAFE_TOOLSETS holds regardless of proof."""
+        """If all declared toolsets are non-safe, the palette toolsets list is empty."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
         _spike.write_palette(records, ["terminal", "browser", "file"], out)
@@ -229,7 +224,7 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         self.assertEqual(data["toolsets"], [])
 
     def test_empty_toolsets_writes_empty_list(self):
-        """An empty proven-toolsets input produces an empty list in the palette."""
+        """An empty toolsets input produces an empty list in the palette."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
         _spike.write_palette(records, [], out)
@@ -378,23 +373,20 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
 
 
 class TestWritePaletteHonestyHeader(unittest.TestCase):
-    """The generated palette carries a point-of-use note. Originally (Codex
-    adversarial review, finding 3) that toolsets were only DECLARED, not
-    tool-probed; U7/U8 (issue #5 Finding 3) closed that gap, so the header now
-    asserts each recorded toolset FIRED LIVE — and still stays valid YAML."""
+    """The generated palette carries a point-of-use note that toolsets are declared,
+    not tool-probed (Codex adversarial review, finding 3) — and stays valid YAML."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
 
-    def test_header_asserts_toolsets_probed_live(self):
+    def test_header_warns_toolsets_not_probed(self):
         records = make_records(ok_pairs=SAFE_PAIRS)
         out = self.tmp / "palette.yaml"
         _spike.write_palette(records, ["web"], out)
         text = out.read_text()
-        self.assertIn("FIRED LIVE", text)
+        self.assertIn("NOT tool-probed", text)
         self.assertIn("ungrounded", text)
-        self.assertNotIn("NOT tool-probed", text)
 
     def test_header_does_not_break_yaml_parse(self):
         records = make_records(ok_pairs=SAFE_PAIRS)
@@ -403,95 +395,6 @@ class TestWritePaletteHonestyHeader(unittest.TestCase):
         data = yaml.safe_load(out.read_text())  # comments are ignored by the loader
         self.assertEqual(len(data["models"]), 2)
         self.assertEqual(data["toolsets"], ["web"])
-
-
-class TestWritePaletteProvenToolsetsAndWarnings(unittest.TestCase):
-    """write_palette (U7/U8, issue #5 Finding 3) records only PROVEN toolsets,
-    and — when declared_toolsets is given — warns by name on every
-    declared-and-safe toolset that didn't make it in. A declared toolset that's
-    not safe (e.g. terminal) is dropped silently, as always — that's the
-    separate, pre-existing privilege gate, not a probe outcome."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp)
-
-    def test_all_proven_all_recorded_no_warnings(self):
-        """Every declared toolset was proven → all recorded, nothing warned."""
-        import contextlib as ctx
-        import io as _io
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        out = self.tmp / "palette.yaml"
-        printed = _io.StringIO()
-        with ctx.redirect_stdout(printed):
-            _spike.write_palette(
-                records, ["web", "search"], out, declared_toolsets=["web", "search"],
-            )
-
-        data = yaml.safe_load(out.read_text())
-        self.assertEqual(data["toolsets"], ["web", "search"])
-        self.assertEqual(printed.getvalue(), "")
-
-    def test_mixed_proven_and_unproven_only_proven_recorded_and_warned(self):
-        """web proven; search/x_search declared-but-unproven (both SAFE, so the
-        warning path — not the SAFE_TOOLSETS drop — is what's under test) →
-        only web is recorded, and both omitted ones are named in a warning."""
-        import contextlib as ctx
-        import io as _io
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        out = self.tmp / "palette.yaml"
-        printed = _io.StringIO()
-        with ctx.redirect_stdout(printed):
-            _spike.write_palette(
-                records,
-                ["web"],
-                out,
-                declared_toolsets=["web", "search", "x_search"],
-            )
-
-        data = yaml.safe_load(out.read_text())
-        self.assertEqual(data["toolsets"], ["web"])
-        warned = printed.getvalue()
-        self.assertIn("search", warned)
-        self.assertIn("x_search", warned)
-
-    def test_zero_proven_yields_empty_toolsets_list_not_an_error(self):
-        """No toolset proved live (but a model did) → empty toolsets list,
-        write_palette does not raise."""
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, [], out, declared_toolsets=["web", "search"])
-
-        data = yaml.safe_load(out.read_text())
-        self.assertEqual(data["toolsets"], [])
-
-    def test_unsafe_toolset_never_recorded_even_if_reported_proven(self):
-        """terminal reported as 'proven' is still dropped — SAFE_TOOLSETS holds
-        regardless of probe outcome (the privilege gate is a separate concern
-        from live-probing)."""
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["terminal", "web"], out)
-
-        data = yaml.safe_load(out.read_text())
-        self.assertEqual(data["toolsets"], ["web"])
-
-    def test_no_declared_toolsets_means_no_warnings(self):
-        """declared_toolsets omitted (default None) → no warnings, even though
-        'search' never made it into the proven list — nothing to compare
-        against, so warning is opt-in on declared_toolsets being given."""
-        import contextlib as ctx
-        import io as _io
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        out = self.tmp / "palette.yaml"
-        printed = _io.StringIO()
-        with ctx.redirect_stdout(printed):
-            _spike.write_palette(records, ["web"], out)
-
-        self.assertEqual(printed.getvalue(), "")
 
 
 # ---------------------------------------------------------------------------
@@ -706,274 +609,6 @@ class TestVerifyOutputSuppression(unittest.TestCase):
 
         self.assertFalse(records[0].ok)
         self.assertIn("not supported", records[0].detail.lower())
-
-
-# ---------------------------------------------------------------------------
-# New tests (U7, issue #5 Finding 3): _has_tool_call_evidence, _probe_toolset,
-# probe_toolsets — live per-toolset verification, unit-tested with fakes.
-# ---------------------------------------------------------------------------
-
-
-class TestHasToolCallEvidence(unittest.TestCase):
-    """_has_tool_call_evidence scans defensively for several known tool-call
-    shapes, because the vendored Hermes guide does not pin one exact
-    per-message schema for run_conversation()'s messages history."""
-
-    def test_openai_style_tool_role_message(self):
-        messages = [
-            {"role": "assistant", "content": ""},
-            {"role": "tool", "content": "result"},
-        ]
-        self.assertTrue(_spike._has_tool_call_evidence(messages))
-
-    def test_openai_style_tool_calls_field(self):
-        messages = [{"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]}]
-        self.assertTrue(_spike._has_tool_call_evidence(messages))
-
-    def test_legacy_function_call_field(self):
-        messages = [{"role": "assistant", "content": "", "function_call": {"name": "web_search"}}]
-        self.assertTrue(_spike._has_tool_call_evidence(messages))
-
-    def test_anthropic_style_content_block(self):
-        messages = [{"role": "assistant", "content": [{"type": "tool_use", "id": "1"}]}]
-        self.assertTrue(_spike._has_tool_call_evidence(messages))
-
-    def test_plain_text_only_is_no_evidence(self):
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "I think the answer is 42."},
-        ]
-        self.assertFalse(_spike._has_tool_call_evidence(messages))
-
-    def test_empty_tool_calls_list_is_no_evidence(self):
-        """An empty tool_calls list is falsy — must not count as a fire."""
-        messages = [{"role": "assistant", "content": "hi", "tool_calls": []}]
-        self.assertFalse(_spike._has_tool_call_evidence(messages))
-
-    def test_non_list_input_is_no_evidence_no_crash(self):
-        self.assertFalse(_spike._has_tool_call_evidence(None))
-        self.assertFalse(_spike._has_tool_call_evidence("not a list"))
-        self.assertFalse(_spike._has_tool_call_evidence({"role": "assistant"}))
-
-    def test_non_dict_message_entries_are_skipped_no_crash(self):
-        messages = ["not a dict", {"role": "tool", "content": "result"}]
-        self.assertTrue(_spike._has_tool_call_evidence(messages))
-
-    @unittest.skip(
-        "F3 (Codex adversarial review): dogfood-gated. Today a tool-call REQUEST "
-        "counts as evidence even if execution errored, so a provisioned-but-erroring "
-        "tool is recorded FIRED LIVE while its lane runs ungrounded. The silas dogfood "
-        "must observe the real messages tool-result + error-payload shape, then tighten "
-        "_has_tool_call_evidence to require a SUCCESSFUL (non-error) result — at which "
-        "point this test un-skips and passes. Pins the intended end state in code."
-    )
-    def test_errored_result_should_be_unproven(self):
-        # An assistant tool-call REQUEST followed by an ERROR tool result: the tool
-        # was provisioned (call emitted) but execution failed, so the lane would run
-        # ungrounded. The desired end state is UNPROVEN. (Fails today by design — the
-        # skip marks it as the dogfood-gated tightening, not a regression.)
-        messages = [
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
-            {"role": "tool", "tool_call_id": "1", "content": "", "is_error": True},
-        ]
-        self.assertFalse(_spike._has_tool_call_evidence(messages))
-
-
-class TestProbeToolset(unittest.TestCase):
-    """_probe_toolset (U7): live per-toolset fire evidence via run_conversation(),
-    never chat() — fail-closed on no-evidence or exception, with a small
-    same-model retry budget and _verify_one-style output suppression."""
-
-    @staticmethod
-    def _messages_with_tool_call():
-        return [
-            {"role": "system", "content": "You are a helpful agent."},
-            {"role": "user", "content": "probe prompt"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "1", "type": "function", "function": {"name": "web_search", "arguments": "{}"}}
-                ],
-            },
-            {"role": "tool", "tool_call_id": "1", "content": "search result: ..."},
-            {"role": "assistant", "content": "Today's date is ... (source: ...)"},
-        ]
-
-    @staticmethod
-    def _messages_without_tool_call():
-        return [
-            {"role": "system", "content": "You are a helpful agent."},
-            {"role": "user", "content": "probe prompt"},
-            {"role": "assistant", "content": "I believe today's date is approximately ..."},
-        ]
-
-    def test_tool_call_evidence_in_messages_proves_toolset(self):
-        import unittest.mock as mock
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = {
-                "final_response": "Today's date is ...",
-                "messages": self._messages_with_tool_call(),
-            }
-            result = _spike._probe_toolset("xai", "grok-4.3", "web")
-
-        self.assertTrue(result)
-
-    def test_no_tool_call_across_retry_budget_is_unproven(self):
-        import unittest.mock as mock
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = {
-                "final_response": "I believe today's date is approximately ...",
-                "messages": self._messages_without_tool_call(),
-            }
-            result = _spike._probe_toolset("xai", "grok-4.3", "web")
-
-        self.assertFalse(result)
-        # Retried up to the declared budget, not abandoned after one attempt.
-        self.assertEqual(
-            fake_agent.return_value.run_conversation.call_count,
-            _spike._MAX_PROBE_ATTEMPTS,
-        )
-
-    def test_run_conversation_exception_is_unproven_not_a_crash(self):
-        import unittest.mock as mock
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.side_effect = RuntimeError("boom")
-            result = _spike._probe_toolset("openrouter", "bad/model", "web")
-
-        self.assertFalse(result)  # no exception propagates out
-
-    def test_agent_construction_exception_is_unproven_not_a_crash(self):
-        import unittest.mock as mock
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.side_effect = RuntimeError("no auth")
-            result = _spike._probe_toolset("openrouter", "bad/model", "web")
-
-        self.assertFalse(result)
-
-    def test_does_not_use_chat(self):
-        """chat() returns only final text and can never show a tool fire — the
-        probe must call run_conversation(), not chat()."""
-        import unittest.mock as mock
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = {
-                "final_response": "ok",
-                "messages": self._messages_with_tool_call(),
-            }
-            _spike._probe_toolset("xai", "grok-4.3", "web")
-
-        fake_agent.return_value.chat.assert_not_called()
-
-    def test_probe_suppresses_provider_noise(self):
-        import contextlib as ctx
-        import io as _io
-        import unittest.mock as mock
-
-        def noisy_no_tool_call(*_a, **_k):
-            print("SCARY PROVIDER STACK DUMP")
-            return {
-                "final_response": "no tool used",
-                "messages": self._messages_without_tool_call(),
-            }
-
-        with mock.patch.object(_spike, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.side_effect = noisy_no_tool_call
-            out = _io.StringIO()
-            with ctx.redirect_stdout(out):
-                result = _spike._probe_toolset("xai", "grok-4.3", "web")
-
-        self.assertNotIn("SCARY PROVIDER STACK DUMP", out.getvalue())
-        self.assertFalse(result)
-
-
-class TestProbeToolsets(unittest.TestCase):
-    """probe_toolsets (U7): orchestrates _probe_toolset across declared toolsets
-    against a single representative verified candidate, filtering to
-    SAFE_TOOLSETS first so a privileged name is never even probed."""
-
-    def test_all_fire_returns_all_in_order(self):
-        import unittest.mock as mock
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        with mock.patch.object(_spike, "_probe_toolset", return_value=True) as fake_probe:
-            result = _spike.probe_toolsets(records, ["web", "search"])
-
-        self.assertEqual(result, ["web", "search"])
-        fake_probe.assert_any_call("xai", "grok-4.3", "web")
-        fake_probe.assert_any_call("xai", "grok-4.3", "search")
-
-    def test_none_fire_returns_empty(self):
-        import unittest.mock as mock
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        with mock.patch.object(_spike, "_probe_toolset", return_value=False):
-            result = _spike.probe_toolsets(records, ["web", "search"])
-
-        self.assertEqual(result, [])
-
-    def test_mixed_preserves_order_of_the_ones_that_fired(self):
-        import unittest.mock as mock
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-
-        def fake_probe(_provider, _model, toolset):
-            return toolset == "x_search"
-
-        with mock.patch.object(_spike, "_probe_toolset", side_effect=fake_probe):
-            result = _spike.probe_toolsets(records, ["web", "x_search", "search"])
-
-        self.assertEqual(result, ["x_search"])
-
-    def test_non_safe_toolsets_never_probed(self):
-        """terminal is filtered out before any probe call — no wasted live call
-        on a name write_palette would drop anyway."""
-        import unittest.mock as mock
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        with mock.patch.object(_spike, "_probe_toolset", return_value=True) as fake_probe:
-            result = _spike.probe_toolsets(records, ["terminal", "web"])
-
-        self.assertEqual(result, ["web"])
-        fake_probe.assert_called_once_with("xai", "grok-4.3", "web")
-
-    def test_no_ok_records_returns_empty_without_probing(self):
-        import unittest.mock as mock
-
-        records = make_records(fail_pairs=[FAIL_PAIR])
-        with mock.patch.object(_spike, "_probe_toolset") as fake_probe:
-            result = _spike.probe_toolsets(records, ["web"])
-
-        self.assertEqual(result, [])
-        fake_probe.assert_not_called()
-
-    def test_empty_toolsets_returns_empty_without_probing(self):
-        import unittest.mock as mock
-
-        records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        with mock.patch.object(_spike, "_probe_toolset") as fake_probe:
-            result = _spike.probe_toolsets(records, [])
-
-        self.assertEqual(result, [])
-        fake_probe.assert_not_called()
-
-    def test_uses_first_ok_record_as_representative_candidate(self):
-        """Multiple ok records: probes only against the first, per the
-        documented single-representative-candidate trade-off (not a full
-        toolset x candidate matrix — see probe_toolsets' docstring)."""
-        import unittest.mock as mock
-
-        records = make_records(
-            ok_pairs=[("xai", "grok-4.3"), ("openrouter", "google/gemini-3-flash")]
-        )
-        with mock.patch.object(_spike, "_probe_toolset", return_value=True) as fake_probe:
-            _spike.probe_toolsets(records, ["web"])
-
-        fake_probe.assert_called_once_with("xai", "grok-4.3", "web")
 
 
 if __name__ == "__main__":
