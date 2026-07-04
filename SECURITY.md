@@ -78,9 +78,20 @@ not a claim that Cadre is "injection-proof."
   attempted, but a naive signal (scanning the model's messages for a tool call)
   proved unreliable: natively-integrated tools — a provider's built-in web search,
   say — ground the answer without emitting a detectable tool-call entry, so the probe
-  false-negatives them and would drop *working* toolsets from the palette. Finding a
-  grounding signal that survives native integration is tracked as a follow-up
-  ([#48](https://github.com/jarodtaylor/cadre/issues/48)).
+  false-negatives them and would drop *working* toolsets from the palette. An
+  investigation ([#48](https://github.com/jarodtaylor/cadre/issues/48)) found that
+  **no mechanical tool-fire signal Hermes exposes** can distinguish native grounding
+  from answering from memory: `run_conversation` returns only a round-trip *counter*
+  (`api_calls`) and the message history, and a provider that grounds server-side
+  returns in a single round-trip with no tool-call entry — identical, by those
+  signals, to a memory answer (the raw provider usage that might flag a native tool
+  is normalized to token counts and dropped from the return value). Gating on
+  Hermes-*dispatched* tool calls would therefore keep false-negativing
+  natively-grounded toolsets and drop *working* tools. Grounding could in principle
+  be inferred from the answer *content* (does it carry un-memorizable live data?),
+  but that check is unreliable and re-introduces the very false-omit that broke the
+  probe — which is why the palette deliberately stays at declared-and-warned rather
+  than an omit-gate.
 - **Model-only cross-lane markers.** The delimiters that frame one lane's output as
   another lane's *prompt* (sequential/iterative threading, the `--doc` file boundary,
   the specialist→synthesizer fan-in) are read only by a downstream model. Forging one
