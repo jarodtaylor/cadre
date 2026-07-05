@@ -540,6 +540,84 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import install_skill (engine-purity constraint)",
         )
 
+    def test_provision_does_not_import_engine_or_model_client(self):
+        """cadre/provision.py must NOT import engine or model_client (U4).
+
+        provision.py scaffolds ~/.cadre, seeds starter data, writes config, and
+        subprocess-verifies importability — pure filesystem/trust-boundary
+        logic, same posture as install_skill.py/approval.py.
+        """
+        import cadre.provision as prov_mod
+
+        imported = _static_imports(prov_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "provision.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "provision.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_provision(self):
+        """cadre/engine.py and model_client.py must NOT import provision (U4)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.provision",
+            imported_engine,
+            "engine.py must not import provision (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.provision",
+            imported_mc,
+            "model_client.py must not import provision (engine-purity constraint)",
+        )
+
+    def test_verify_palette_does_not_import_engine_or_model_client(self):
+        """cadre/verify_palette.py must NOT import engine or model_client (U5).
+
+        verify_palette makes live host calls to confirm (provider, model)
+        candidates and writes ~/.cadre/palette.yaml — caller-layer, same
+        posture as provision.py/install_skill.py.
+        """
+        import cadre.verify_palette as vp_mod
+
+        imported = _static_imports(vp_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "verify_palette.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "verify_palette.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_verify_palette(self):
+        """cadre/engine.py and model_client.py must NOT import verify_palette (U5)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.verify_palette",
+            imported_engine,
+            "engine.py must not import verify_palette (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.verify_palette",
+            imported_mc,
+            "model_client.py must not import verify_palette (engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).

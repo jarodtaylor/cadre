@@ -143,6 +143,14 @@ def _install_symlink(entry: Path) -> tuple[int, str]:
     """Atomic symlink swap: ``entry`` -> ``skill_dir()`` (KTD6 default)."""
     src = skill_dir()
 
+    # os.symlink happily creates a link to a target that doesn't exist yet — a
+    # wheel missing cadre/data/skill/ (a mis-built or tampered install) would
+    # otherwise produce a DANGLING entry plus a false (0, "installed...")
+    # success. os.path.exists follows symlinks, so this correctly resolves
+    # skill_dir() (a real directory, not itself a link) before we ever touch entry.
+    if not os.path.exists(src):
+        return (1, f"packaged skill data is missing at {src} — reinstall cadre.")
+
     # Disclose BEFORE the swap. os.path.lexists uses lstat (does not follow),
     # so it catches a dangling symlink `.exists()` would miss.
     if os.path.lexists(entry):

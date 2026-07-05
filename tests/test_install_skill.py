@@ -280,6 +280,30 @@ class TestInstallSkillSymlink(unittest.TestCase):
         self.assertFalse(entry.is_symlink())
         self.assertEqual((entry / "SKILL.md").read_text(encoding="utf-8"), "stale copy")
 
+    def test_missing_skill_data_fails_cleanly_no_dangling_symlink(self):
+        """Fix E regression: os.symlink happily links to a target that does
+        not exist — a wheel missing cadre/data/skill/ (a mis-built or
+        tampered install) must fail closed instead of creating a DANGLING
+        cadre-fleet symlink plus a false (0, "installed...") success.
+
+        Patches ``cadre.install_skill.skill_dir`` — the name bound in
+        install_skill's OWN namespace by ``from cadre.resources import
+        skill_dir`` — since that is the reference ``_install_symlink``
+        actually calls; patching ``cadre.resources.skill_dir`` would not
+        affect this already-bound name.
+        """
+        missing_src = Path(self.tmp) / "nonexistent-skill-data"
+        with unittest.mock.patch("cadre.install_skill.skill_dir", return_value=missing_src):
+            code, msg = install_skill(self.skills_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("reinstall cadre", msg)
+        entry = self._entry()
+        self.assertFalse(
+            os.path.lexists(entry),
+            "no cadre-fleet symlink (dangling or otherwise) must be created",
+        )
+
 
 # ---------------------------------------------------------------------------
 # install_skill(copy=True) — the copy-plus-re-run fallback (KTD6)

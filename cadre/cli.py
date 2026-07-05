@@ -7,6 +7,9 @@ Usage:
     python -m cadre.cli validate cadre/data/fleets/research-swarm.example.yaml
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..."
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..." --no-capture
+    python -m cadre.cli setup
+    python -m cadre.cli verify-palette
+    HERMES_SKILLS_DIR=<dir> python -m cadre.cli install-skill
 """
 
 from __future__ import annotations
@@ -180,15 +183,25 @@ def setup_command(
             1,
             f"error: `import cadre` does not resolve under {recorded_python}\n"
             "Install cadre into that interpreter first, e.g.:\n"
-            f"  {recorded_python} -m pip install --force-reinstall --no-deps <cadre source>\n"
-            "then re-run `cadre setup`. Nothing was written.",
+            f'  {recorded_python} -m pip install --force-reinstall --no-deps '
+            '"git+https://github.com/jarodtaylor/cadre@<ref>"\n'
+            "then re-run `cadre setup`. Nothing was written. See docs/RUNBOOK.md.",
         )
 
-    home = provision.ensure_cadre_dirs()
-    provision.seed_starter_fleets(home)
-    provision.seed_personas(home)
-    provision.seed_palette_candidates(home)
-    provision.write_config(recorded_python)
+    try:
+        home = provision.ensure_cadre_dirs()
+        provision.seed_starter_fleets(home)
+        provision.seed_personas(home)
+        provision.seed_palette_candidates(home)
+        provision.write_config(recorded_python)
+    except OSError as exc:
+        # The pre-#11 scripts/resolve_venv.py wrapped this identical
+        # scaffold-then-seed-then-write sequence in the same guard (there:
+        # print-to-stderr-then-return-1; here: the (exit_code, message) tuple
+        # contract this function already uses elsewhere) — an mkdir/write
+        # failure (e.g. a read-only $HOME, a full disk) must degrade to a
+        # clean error, never a raw traceback.
+        return (1, f"error provisioning ~/.cadre: {exc}")
 
     return (
         0,

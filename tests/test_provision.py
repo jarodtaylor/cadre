@@ -11,6 +11,7 @@ All tests use tempfile paths. The real ~/.cadre is NEVER touched.
 
 import contextlib
 import io
+import os
 import shutil
 import stat
 import sys
@@ -449,6 +450,39 @@ class TestSeedPaletteCandidates(unittest.TestCase):
         provision.seed_palette_candidates(self.cadre_home)
         self.assertEqual(dest.read_text(encoding="utf-8"), "OPERATOR EDIT")
 
+    def test_missing_packaged_source_does_not_delete_preexisting_dest(self):
+        """Fix B regression (data-loss): a missing PACKAGED source (a mis-built
+        or tampered wheel) must never delete a pre-existing OPERATOR dest file
+        on a re-seed.
+
+        Before the fix, `_seed_files`'s except handler unconditionally
+        `os.unlink(dest)`'d on ANY (OSError, UnicodeDecodeError) — including
+        `src.read_text()` raising FileNotFoundError, which happens BEFORE
+        `os.open(dest, ...)` ever runs. So a pre-existing dest (e.g. a hand-
+        edited palette-candidates.yaml) that this call never created was
+        silently deleted anyway. The `created` guard fixes this: only a
+        failure AFTER os.open succeeded (this call's OWN partial write) may
+        unlink.
+        """
+        dest = self.cadre_home / "palette-candidates.yaml"
+        dest.write_text("OPERATOR EDIT — DO NOT DELETE", encoding="utf-8")
+
+        # A source directory that does not exist — src.read_text() raises
+        # FileNotFoundError before os.open(dest, ...) is ever reached.
+        missing_example = Path(self.tmp) / "nonexistent-source-dir" / "palette.example.yaml"
+
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(provision, "palette_example_path", return_value=missing_example):
+            with contextlib.redirect_stderr(stderr_buf):
+                provision.seed_palette_candidates(self.cadre_home)  # must not raise
+
+        self.assertEqual(
+            dest.read_text(encoding="utf-8"),
+            "OPERATOR EDIT — DO NOT DELETE",
+            "a missing packaged source must never delete a pre-existing operator dest",
+        )
+        self.assertIn("[cadre] warning: could not seed", stderr_buf.getvalue())
+
     def test_stdout_silence(self):
         """seed_palette_candidates writes NOTHING to stdout."""
         stdout_buf = io.StringIO()
@@ -506,11 +540,24 @@ class TestVerifyImportable(unittest.TestCase):
         stub.chmod(0o700)
         return str(stub)
 
-    def test_real_python_with_cadre_importable_returns_true(self):
-        """sys.executable IS the interpreter running this test (already imported
-        cadre.provision to get here), so `import cadre` trivially resolves when
-        re-invoked with the inherited cwd (repo root — how the suite is run)."""
-        self.assertTrue(provision.verify_importable(sys.executable))
+    def test_real_interpreter_without_cadre_installed_returns_false_even_from_repo_root(self):
+        """Fix A regression (closes the cwd fail-open): sys.executable IS the
+        interpreter running this test, and cwd is the repo root (how `unittest
+        discover -s tests` runs) — but this dev venv does NOT have cadre
+        pip-installed into its own site-packages (same premise
+        test_decoupling.py's real wheel-install proof depends on: `pip show
+        cadre` finds nothing in this venv). Before the fix, a bare `python -c
+        "import cadre"` resolved the in-tree checkout via cwd on sys.path[0]
+        regardless of whether python_path itself had cadre installed — a false
+        "importable". `-P` excludes cwd from sys.path, so this now correctly
+        returns False. PYTHONPATH is explicitly cleared so a dev's shell
+        environment can't accidentally paper over the cwd-exclusion this test
+        exists to prove (confirmed separately that `-P` does NOT strip an
+        explicit PYTHONPATH, only the automatic cwd/script-dir entries)."""
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(provision.verify_importable(sys.executable))
 
     def test_stub_exiting_nonzero_returns_false(self):
         stub = self._make_stub(1)
@@ -529,6 +576,19 @@ class TestVerifyImportable(unittest.TestCase):
             provision.verify_importable("/no/such/interpreter/anywhere")
         except Exception as exc:  # noqa: BLE001
             self.fail(f"verify_importable raised: {exc!r}")
+
+    def test_timeout_returns_false(self):
+        """KTD11 hang-prevention: a slow-to-exit interpreter is bounded by
+        `timeout` — exercises the TimeoutExpired half of the except tuple, so
+        a hung/misbehaving recorded interpreter can't wedge `cadre setup`
+        indefinitely. Fast (~50ms): the stub sleeps 1s but the check times out
+        at 0.05s."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = Path(tmp) / "slow-python"
+        stub.write_text("#!/bin/sh\nsleep 1\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+        self.assertFalse(provision.verify_importable(str(stub), timeout=0.05))
 
 
 if __name__ == "__main__":

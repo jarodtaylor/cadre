@@ -108,6 +108,14 @@ def _seed_files(
             dest_name = dest_name_fn(name)
             src = src_dir / name
             dest = dest_dir / dest_name
+            # Only a failure AFTER we created dest ourselves should ever unlink it —
+            # set True right after os.open succeeds (below), never before. Guards
+            # against unlinking a pre-existing OPERATOR file (e.g. a hand-edited
+            # palette-candidates.yaml) when the failure is actually a missing/unreadable
+            # SOURCE (a mis-built or tampered wheel): read_text raising FileNotFoundError
+            # happens before os.open ever runs, so dest — if it already existed — was
+            # never ours to begin with.
+            created = False
             try:
                 content = src.read_text(encoding="utf-8")
                 # Atomic preserve-existing: O_EXCL fails if the destination already exists,
@@ -117,6 +125,10 @@ def _seed_files(
                 # reservation idiom.
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                 fd = os.open(str(dest), flags, 0o600)
+                # O_EXCL guarantees this open just created dest — anything that fails
+                # from here on (a write error, an unwritable fdopen) is a PARTIAL write
+                # of a file this call owns, so the cleanup below is safe.
+                created = True
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(content)
                 dest.chmod(0o600)
@@ -129,11 +141,14 @@ def _seed_files(
                 # too so the never-raises contract holds. ELOOP from O_NOFOLLOW on a symlink
                 # also lands here — warned and skipped, never followed.
                 # Best-effort remove a partially-written destination so the next install
-                # does not preserve a corrupt file (the write failed mid-stream).
-                try:
-                    os.unlink(dest)
-                except OSError:
-                    pass
+                # does not preserve a corrupt file (the write failed mid-stream) — but
+                # ONLY if THIS call created it (see `created` above); a source-read
+                # failure never reaches os.open, so a pre-existing dest is left alone.
+                if created:
+                    try:
+                        os.unlink(dest)
+                    except OSError:
+                        pass
                 print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
                 continue
     finally:
@@ -290,15 +305,20 @@ def verify_importable(python_path: str, *, timeout: float = _IMPORT_CHECK_TIMEOU
     importlib introspection): python_path may name a wholly different
     interpreter/venv than the one currently running ``cadre setup``.
 
-    The child inherits the caller's cwd (not forced to a neutral directory):
-    when cadre truly is pip-installed into python_path's site-packages, the
-    result is correct regardless of cwd; the one case this doesn't catch — an
-    unrelated interpreter "rescued" by a cadre checkout sitting in the caller's
-    cwd — only arises when an operator points --venv-python at a foreign venv
-    while running from inside a cadre repo clone, and is the same repo-root
-    convenience R9 already embraces for dev (running the test suite/CLI from
-    the repo root needs no install). Real target hosts (KTD2's load-bearing
-    pip-into-Hermes-venv deployment) have no repo clone present at all.
+    The subprocess runs with `-P` (Python 3.11+ — this project's floor is
+    `requires-python >=3.11`), which excludes the current working directory
+    (and the script/`-m` directory) from sys.path for a `-c` invocation — so
+    cwd is never on sys.path here, and the check validates `import cadre`
+    purely from python_path's OWN site-packages, independent of the caller's
+    cwd. This closes a real fail-open: without `-P`, running the check from
+    inside a cadre repo clone (e.g. install.sh does `cd $REPO_ROOT` before
+    invoking `cadre setup`) put the repo root on sys.path[0], so `import
+    cadre` resolved the in-tree checkout regardless of whether the RECORDED
+    interpreter had cadre installed at all — defeating the very fail-closed
+    gate this function exists to enforce. Real target hosts (KTD2's
+    load-bearing pip-into-Hermes-venv deployment) have no repo clone present
+    at all, so this changes nothing there; it only closes the false-positive
+    a repo-clone cwd could otherwise produce.
 
     Never raises: a missing/non-executable python_path, a crash, or a timeout
     all resolve to False (fail closed) — same posture as the seeding helpers.
@@ -314,7 +334,7 @@ def verify_importable(python_path: str, *, timeout: float = _IMPORT_CHECK_TIMEOU
     """
     try:
         result = subprocess.run(
-            [python_path, "-c", "import cadre"],
+            [python_path, "-P", "-c", "import cadre"],
             capture_output=True,
             timeout=timeout,
         )

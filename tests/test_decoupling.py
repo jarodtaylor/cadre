@@ -82,16 +82,29 @@ def _run_or_skip(
     network isn't available (offline dev), each setup step SKIPS loudly — the
     captured output folded into the reason — rather than red-failing the suite, so
     a missing prerequisite reads as a skip and only a genuine packaging regression
-    (caught by the test methods, not here) is a failure."""
+    (caught by the test methods, not here) is a failure.
+
+    Under CI (``os.environ.get("CI")``), that same graceful skip would silently
+    launder a real packaging regression: `unittest discover` exits 0 on an
+    all-skip class, so a broken wheel build/install in CI would show green, not
+    red — gate integrity requires CI to fail loudly instead. Offline dev (no CI
+    env) keeps the loud-but-graceful SkipTest.
+    """
     try:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
-        raise unittest.SkipTest(f"{launch_context}: {exc}") from None
+        reason = f"{launch_context}: {exc}"
+        if os.environ.get("CI"):
+            raise RuntimeError(reason) from exc
+        raise unittest.SkipTest(reason) from None
     if proc.returncode != 0:
-        raise unittest.SkipTest(
+        reason = (
             f"{exit_context} -- exit {proc.returncode}:\n"
             f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
         )
+        if os.environ.get("CI"):
+            raise RuntimeError(reason)
+        raise unittest.SkipTest(reason)
     return proc
 
 

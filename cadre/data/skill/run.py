@@ -109,8 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(
             f"Could not read fleet spec '{args.fleet}': {exc}\n"
-            "Pass a specific .yaml file (not a directory). Copy one from the repo's "
-            "fleets/ into ~/.cadre/fleets/, or compose one from ~/.cadre/palette.yaml."
+            "Pass a specific .yaml file (not a directory). List ~/.cadre/fleets/ for "
+            "a curated fleet (seeded by `cadre setup`), or compose one from "
+            "~/.cadre/palette.yaml."
         )
         return 1
 

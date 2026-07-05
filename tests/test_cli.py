@@ -2033,8 +2033,10 @@ def _make_stub_python(test_case, exit_code):
     A shell stub (not a real python) simulates the OUTCOME of "a recorded
     interpreter that can/can't import cadre" without depending on cwd/sys.path
     subtlety around what a real broken venv would resolve to on this machine —
-    see cadre.provision.verify_importable's own docstring for why the real
-    subprocess check inherits cwd rather than forcing a neutral one.
+    see cadre.provision.verify_importable's own docstring: the real subprocess
+    check runs with `-P` (cwd is never on sys.path there), so a shell stub's
+    exit code is a clean, direct stand-in for the check's True/False outcome
+    regardless of args passed to it.
     """
     tmp = tempfile.mkdtemp()
     test_case.addCleanup(shutil.rmtree, tmp)
@@ -2045,7 +2047,18 @@ def _make_stub_python(test_case, exit_code):
 
 
 class TestSetupCommandCleanHome(unittest.TestCase):
-    """cadre setup against a clean tmp $HOME seeds everything from package data."""
+    """cadre setup against a clean tmp $HOME seeds everything from package data.
+
+    These tests are about what happens AFTER the KTD11 gate passes (seeding,
+    config-writing) — not about the gate itself (that's
+    TestSetupCommandKTD11FailClosed, using deterministic stub pythons). Before
+    Fix A, `setup_command(None)` recorded sys.executable and the real gate
+    happened to pass for it via the cwd fail-open (this dev venv does not
+    actually have cadre pip-installed into its own site-packages). `-P` closes
+    that fail-open, so these tests now mock the gate directly rather than
+    depend on incidental cwd behavior — sys.executable is still what gets
+    RECORDED (untouched), only whether the gate accepts it is mocked.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -2053,6 +2066,9 @@ class TestSetupCommandCleanHome(unittest.TestCase):
         self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
 
     def test_seeds_fleets_personas_palette_and_config(self):
         code, out = setup_command(None)
@@ -2118,8 +2134,10 @@ class TestSetupCommandKTD11FailClosed(unittest.TestCase):
         self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
 
 
-class TestSetupCommandPythonPrecedence(unittest.TestCase):
-    """--venv-python arg > CADRE_HERMES_PYTHON env > sys.executable (KTD11)."""
+class TestSetupCommandOSErrorDegrade(unittest.TestCase):
+    """Fix C regression: an OSError from the scaffold/seed/write-config sequence
+    degrades to a clean (1, message) — never a raw traceback (the pre-#11
+    scripts/resolve_venv.py wrapped this identical sequence the same way)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -2127,6 +2145,50 @@ class TestSetupCommandPythonPrecedence(unittest.TestCase):
         self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+
+    def test_ensure_cadre_dirs_oserror_degrades_cleanly(self):
+        """An mkdir failure (e.g. a read-only $HOME, a full disk) inside
+        ensure_cadre_dirs() must not propagate past setup_command."""
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with patch("cadre.provision.ensure_cadre_dirs", side_effect=OSError("disk full")):
+                try:
+                    code, out = setup_command(None)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"setup_command raised instead of degrading cleanly: {exc!r}")
+        self.assertEqual(code, 1)
+        self.assertIn("disk full", out)
+
+    def test_write_config_oserror_degrades_cleanly(self):
+        """A write failure inside write_config() (the last step) must also
+        degrade cleanly, not just an early-sequence failure."""
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with patch("cadre.provision.write_config", side_effect=OSError("permission denied")):
+                try:
+                    code, out = setup_command(None)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"setup_command raised instead of degrading cleanly: {exc!r}")
+        self.assertEqual(code, 1)
+        self.assertIn("permission denied", out)
+
+
+class TestSetupCommandPythonPrecedence(unittest.TestCase):
+    """--venv-python arg > CADRE_HERMES_PYTHON env > sys.executable (KTD11).
+
+    These tests are about precedence (which path gets RECORDED), not the
+    KTD11 gate itself, so the gate is mocked to always pass — see
+    TestSetupCommandCleanHome's setUp docstring for why (Fix A / -P closes
+    the cwd fail-open these tests previously rode on for sys.executable).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
 
     def _config_value(self):
         config_path = Path(self.tmp) / ".cadre" / "config"
@@ -2177,7 +2239,11 @@ class TestSetupCommandExpanduser(unittest.TestCase):
 
 
 class TestSetupCommandSymlinkGuard(unittest.TestCase):
-    """cadre setup end-to-end: a pre-planted symlinked ~/.cadre/fleets is refused."""
+    """cadre setup end-to-end: a pre-planted symlinked ~/.cadre/fleets is refused.
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring) —
+    this test is about the symlink-seeding guard, not the gate.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -2185,6 +2251,9 @@ class TestSetupCommandSymlinkGuard(unittest.TestCase):
         self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
 
     def test_symlinked_fleets_dir_not_seeded_through(self):
         cadre_home = Path(self.tmp) / ".cadre"
@@ -2204,7 +2273,11 @@ class TestSetupCommandSymlinkGuard(unittest.TestCase):
 
 
 class TestSetupCommandIdempotent(unittest.TestCase):
-    """A second cadre setup run preserves operator edits; config stays grep|cut-parseable."""
+    """A second cadre setup run preserves operator edits; config stays grep|cut-parseable.
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring) —
+    idempotency across two setup_command(None) runs is what's under test here.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -2212,6 +2285,9 @@ class TestSetupCommandIdempotent(unittest.TestCase):
         self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
 
     def test_second_run_preserves_operator_edited_fleet(self):
         setup_command(None)
@@ -2246,9 +2322,15 @@ class TestSetupCommandCLIWiring(unittest.TestCase):
         self.addCleanup(self.home_patch.stop)
 
     def test_main_setup_subcommand_provisions_and_prints_result(self):
+        # This test is about argparse dispatch (no --venv-python -> records
+        # sys.executable), not the KTD11 gate — mocked for the same reason as
+        # TestSetupCommandCleanHome (see its setUp docstring). The sibling
+        # test below passes a real stub and deliberately does NOT mock this,
+        # so it still exercises the real gate end-to-end.
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            code = cli_main(["setup"])
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(["setup"])
         self.assertEqual(code, 0)
         self.assertTrue((Path(self.tmp) / ".cadre" / "config").exists())
         self.assertIn(str(Path(self.tmp) / ".cadre"), buf.getvalue())
