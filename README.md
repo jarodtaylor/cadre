@@ -76,7 +76,7 @@ The report stays alone on stdout (pipe it, capture it); the `[cadre]` progress b
 
 ## Run it on your Hermes host
 
-You need a host with `hermes-agent` installed and at least two providers authenticated (≥1 non-Anthropic). **No repo clone required** — `cadre` installs from git as a self-contained package. The five steps:
+You need a host with `hermes-agent` installed and at least one provider authenticated — Cadre's multi-model value shows with two or more across different vendors, but a single-provider fleet runs fine. **No repo clone required** — `cadre` installs from git as a self-contained package. The five steps:
 
 **1. Find the Python that runs Hermes.** Cadre installs into the *same* interpreter that runs `run_agent` (it's the only one that can import both). The path varies by install; the common root-Linux location:
 
@@ -130,7 +130,7 @@ Beyond the direct CLI, a Hermes agent can run Cadre conversationally through the
 HERMES_SKILLS_DIR=/path/to/hermes/skills "$PYBIN" -m cadre.cli install-skill
 ```
 
-The agent then composes fleets drawing only from the host-verified `~/.cadre/palette.yaml`, and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+The agent then composes fleets drawing only from the host-verified `~/.cadre/palette.yaml`, and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. A fleet that opts into privileged tools (`allow_privileged_tools: true`) is approved with `--approve-privileged` in place of the plain preview — the preview okay alone won't authorize privileged execution. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Develop / contribute
 
