@@ -34,7 +34,7 @@ candidates:
     model: anthropic/claude-opus-4.8   # valid but bills at API rates (synth candidate)
 
 # Safe toolsets to record as available for this profile. Must be a subset of
-# Cadre's SAFE_TOOLSETS (fleet_engine/config.py); the writer drops any non-safe
+# Cadre's SAFE_TOOLSETS (cadre/config.py); the writer drops any non-safe
 # name. DECLARED here, not per-tool verified — you must provision them in the
 # Hermes profile (see RUNBOOK) or lanes that use them run silently ungrounded.
 toolsets: [web, search, x_search, vision]

@@ -13,7 +13,6 @@ import io
 import threading
 import time
 import unittest
-from pathlib import Path
 
 from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from cadre.engine import FleetResult, FleetStatus
@@ -40,12 +39,11 @@ from cadre.render import (
     render_fleet_preview,
     render_result,
 )
+from cadre.resources import fleets_dir
 from cadre.text_safety import BODY_GUTTER
 
 # Path to the curated example fleet (used for some preview tests).
-_EXAMPLE_FLEET = (
-    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
-)
+_EXAMPLE_FLEET = fleets_dir() / "research-swarm.example.yaml"
 
 
 # ---------------------------------------------------------------------------

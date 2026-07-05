@@ -22,8 +22,9 @@ from cadre.config import FleetConfig
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
+from cadre.resources import fleets_dir
 
-EXAMPLE = "fleets/research-swarm.example.yaml"
+EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
 # A real run now streams [cadre] progress breadcrumbs to sys.stderr — the same
 # stream unittest uses for its own dots/summary. No test in this module asserts on
@@ -439,7 +440,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         """Run the skill's main() with a fake client, redirected to self.tmp."""
         fake = FakeClient(behavior or {"synthesizer": ("ok", "SKILL SYNTH")})
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "what is best?", "--fleet", fleet_path] + (extra_argv or [])
         env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
@@ -469,7 +470,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         blocker.write_text("I am a file")
         bad_dir = str(blocker / "subdir")
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "task", "--fleet", fleet_path]
 
@@ -499,7 +500,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         fake = FakeClient({"synthesizer": ("ok", "S")})
         stdout_buf = io.StringIO()
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "t", "--fleet", fleet_path]
         env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
@@ -521,7 +522,7 @@ class TestSkillEntryCapture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _EXAMPLE_FLEET = str(
-    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+    fleets_dir() / "research-swarm.example.yaml"
 )
 
 
@@ -792,7 +793,7 @@ class TestSkillApprovalGate(unittest.TestCase):
         """AE1: --preview fleet A (mint), then run a DIFFERENT valid fleet B on the
         same approval path -> refused (digest mismatch), zero model calls."""
         fleet_b = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "code-review.example.yaml"
+            fleets_dir() / "code-review.example.yaml"
         )
         fake_client_cls = MagicMock()
         with patch.dict(os.environ, self._env()):

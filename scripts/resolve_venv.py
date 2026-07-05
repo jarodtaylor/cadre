@@ -1,14 +1,22 @@
 """resolve_venv.py — Resolve the Hermes venv Python path, scaffold ~/.cadre, and record it.
 
-This script is the ONLY unit-tested piece of the U4 install. It is pure stdlib,
-importable on the dev machine (no hermes-agent, no cadre import needed).
+This script is the ONLY unit-tested piece of the U4 install. resolve_venv()
+itself is pure stdlib, no cadre import needed; the two seed_* functions below
+source starter data from the installed/repo ``cadre`` package (package data
+under ``cadre/data/``, via ``cadre.resources``), so this module inserts the
+repo root onto sys.path when run standalone — mirroring
+``spikes/verify_aiagent_providers.py`` — so ``import cadre`` resolves whether
+this file is executed as a script (how install.sh invokes it,
+``python3 scripts/resolve_venv.py``, which puts scripts/ on sys.path[0], NOT
+the repo root) or loaded by the test suite (already on sys.path via
+``python -m unittest`` from the repo root).
 
 Five exported functions:
   resolve_venv(override, *, probe_paths, env)  — pure resolver, no I/O
   ensure_cadre_dirs(home)                       — owner-only dir scaffolding
   write_config(python_path, config_path)        — owner-only config writer
-  seed_starter_fleets(repo_root, cadre_home)    — idempotent fleet seeding, never raises
-  seed_personas(repo_root, cadre_home)          — idempotent persona seeding, never raises
+  seed_starter_fleets(cadre_home)               — idempotent fleet seeding, never raises
+  seed_personas(cadre_home)                     — idempotent persona seeding, never raises
 
 main(argv) — argparse entry; prints ONLY the resolved python path to stdout;
              all diagnostics go to stderr. Designed for:
@@ -23,6 +31,19 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
+
+# When run as a standalone script (`python3 scripts/resolve_venv.py` — how
+# install.sh invokes it), Python puts scripts/ on sys.path[0], NOT the repo
+# root, so the `cadre.resources` import below (needed to source starter data)
+# would fail with ModuleNotFoundError. Insert the repo root so it resolves
+# whether run as a script or imported. Mirrors skills/cadre-fleet/run.py and
+# spikes/verify_aiagent_providers.py. (Dev tests never hit this: they run via
+# `python -m unittest` from the repo root, which is already on sys.path.)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from cadre.resources import fleets_dir, personas_dir  # noqa: E402
 
 # Known Hermes venv python paths, probed in order when no override is given.
 # Root-Linux install first (VPS); user-local install second.
@@ -134,11 +155,13 @@ def _seed_files(
         os.umask(old_umask)
 
 
-def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
-    """Copy starter fleets from <repo_root>/fleets/ to <cadre_home>/fleets/ at install time.
+def seed_starter_fleets(cadre_home: Path) -> None:
+    """Copy starter fleets from the installed cadre package to <cadre_home>/fleets/.
 
-    Each source file has a ``.example`` infix that is stripped on copy
-    (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
+    Source data lives at ``cadre/data/fleets/`` (package data, resolved via
+    ``cadre.resources.fleets_dir()`` — the same helper in dev/repo-root and
+    installed/wheel contexts). Each source file has a ``.example`` infix that
+    is stripped on copy (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
 
     Idempotent: existing destination files are NOT overwritten (operator edits preserved).
     Owner-only: the fleets dir is created 0o700 and each file written 0o600 under umask 0o077.
@@ -146,22 +169,22 @@ def seed_starter_fleets(repo_root: Path, cadre_home: Path) -> None:
     Never writes to stdout: all messages go to sys.stderr.
 
     Args:
-        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
         cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
     """
     _seed_files(
-        src_dir=repo_root / "fleets",
+        src_dir=fleets_dir(),
         dest_dir=cadre_home / "fleets",
         names=_STARTER_FLEETS,
         dest_name_fn=lambda name: name.replace(".example.yaml", ".yaml"),
     )
 
 
-def seed_personas(repo_root: Path, cadre_home: Path) -> None:
-    """Copy persona files from <repo_root>/personas/ to <cadre_home>/personas/ at install time.
+def seed_personas(cadre_home: Path) -> None:
+    """Copy persona files from the installed cadre package to <cadre_home>/personas/.
 
-    Personas have no ``.example`` infix — names copy unchanged
-    (e.g. ``coherence-reviewer.md`` → ``coherence-reviewer.md``).
+    Source data lives at ``cadre/data/personas/`` (package data, resolved via
+    ``cadre.resources.personas_dir()``). Personas have no ``.example`` infix —
+    names copy unchanged (e.g. ``coherence-reviewer.md`` → ``coherence-reviewer.md``).
 
     Idempotent: existing destination files are NOT overwritten (operator edits preserved).
     Owner-only: the personas dir is created 0o700 and each file written 0o600 under umask 0o077.
@@ -169,11 +192,10 @@ def seed_personas(repo_root: Path, cadre_home: Path) -> None:
     Never writes to stdout: all messages go to sys.stderr.
 
     Args:
-        repo_root: Root of the Cadre repository (``scripts/`` is one level below it).
         cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
     """
     _seed_files(
-        src_dir=repo_root / "personas",
+        src_dir=personas_dir(),
         dest_dir=cadre_home / "personas",
         names=_STARTER_PERSONAS,
         dest_name_fn=lambda name: name,
@@ -347,8 +369,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         home = ensure_cadre_dirs()
         print(f"scaffolded {home}", file=sys.stderr)
-        seed_starter_fleets(Path(__file__).resolve().parents[1], home)
-        seed_personas(Path(__file__).resolve().parents[1], home)
+        seed_starter_fleets(home)
+        seed_personas(home)
         write_config(python_path)
         print(f"wrote ~/.cadre/config: CADRE_HERMES_PYTHON={python_path}", file=sys.stderr)
     except OSError as exc:

@@ -32,6 +32,7 @@ from cadre.model_client import AgentResult
 from cadre.personas import resolve
 from cadre.progress_runner import run_with_progress
 from cadre.render import render_result
+from cadre.resources import fleets_dir
 from tests.test_engine import RoundAwareFakeClient, _derive_status, _iterative_config
 
 
@@ -1027,7 +1028,7 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
         self.assertEqual(len(client.calls), 0, "no model calls should be made (fail-fast)")
 
 
-EXAMPLE = "fleets/research-swarm.example.yaml"
+EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
 
 # ---------------------------------------------------------------------------

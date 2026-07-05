@@ -30,7 +30,13 @@ cadre = "cadre.cli:main"
 # Flat layout (KTD1): the `cadre` package lives at the repo root, not under
 # src/. The test suite imports it from the working directory with no install
 # — a src-layout would break that — so the wheel target points at it directly.
+#
+# `packages` is hatchling's wheel-target equivalent of `only-include` (docs:
+# "similar to only-include but collapses the shipped path to only the final
+# component") — it selects the WHOLE `cadre/` tree, any file extension, VCS-
+# tracked files only. No separate package-data key is needed for cadre/data/**
+# (starter fleets, personas, palette example — U3; the Hermes skill lands
+# later, U6, under the same mechanism): verified by building the wheel and
+# inspecting it with `unzip -l` — every cadre/data/** file appears (KTD9's
+# "hatchling may omit non-.py data by default" risk did not materialize here).
 packages = ["cadre"]
-
-# Package-data inclusion for cadre/data/** (starter fleets, personas, palette
-# example, and the Hermes skill) lands in U3, once that directory exists.
