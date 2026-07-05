@@ -2172,7 +2172,7 @@ class TestSetupCommandNewlineRejection(unittest.TestCase):
 
     def test_nul_byte_rejected(self):
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command("/nonexistent/py\x00suffix")
+            code, _ = setup_command("/nonexistent/py\x00suffix")
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
 
@@ -2180,7 +2180,7 @@ class TestSetupCommandNewlineRejection(unittest.TestCase):
         """The check applies regardless of which precedence branch (arg vs
         CADRE_HERMES_PYTHON env) produced recorded_python."""
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": "/nonexistent/py\nsuffix"})
+            code, _ = setup_command(None, env={"CADRE_HERMES_PYTHON": "/nonexistent/py\nsuffix"})
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
 
