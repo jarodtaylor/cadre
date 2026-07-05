@@ -19,9 +19,9 @@ Two complementary checks, owned by neither render nor capture alone:
 import unittest
 from pathlib import Path
 
-from fleet_engine.capture import _synthesis_md
-from fleet_engine.render import render_result
-from fleet_engine.text_safety import BODY_GUTTER
+from cadre.capture import _synthesis_md
+from cadre.render import render_result
+from cadre.text_safety import BODY_GUTTER
 from tests.test_render import make_lane, make_result
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -50,8 +50,8 @@ class TestReportGrammarFramingStructuralGuard(unittest.TestCase):
     it — loudly (a failing assert), never a silent wrong-pass. Re-derive the expected
     literals if the routing or the source formatting changes."""
 
-    _RENDER = (_REPO / "fleet_engine" / "render.py").read_text()
-    _CAPTURE = (_REPO / "fleet_engine" / "capture.py").read_text()
+    _RENDER = (_REPO / "cadre" / "render.py").read_text()
+    _CAPTURE = (_REPO / "cadre" / "capture.py").read_text()
 
     def test_render_result_body_sinks_are_framed(self):
         for framed in (

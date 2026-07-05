@@ -15,15 +15,16 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
-from fleet_engine.approval import consume_approval, surface_digest, write_approval
-from fleet_engine.capture import _slugify, resolve_run_dir, resolved_hermes_home
-from fleet_engine.cli import main as cli_main, run_command, validate_command
-from fleet_engine.config import FleetConfig
-from fleet_engine.file_input import compose
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import default_pool_dir, resolve
+from cadre.approval import consume_approval, surface_digest, write_approval
+from cadre.capture import _slugify, resolve_run_dir, resolved_hermes_home
+from cadre.cli import main as cli_main, run_command, setup_command, validate_command
+from cadre.config import FleetConfig
+from cadre.file_input import compose
+from cadre.model_client import AgentResult
+from cadre.personas import default_pool_dir, resolve
+from cadre.resources import fleets_dir, skill_dir
 
-EXAMPLE = "fleets/research-swarm.example.yaml"
+EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
 # A real run now streams [cadre] progress breadcrumbs to sys.stderr — the same
 # stream unittest uses for its own dots/summary. No test in this module asserts on
@@ -254,7 +255,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "writerun"
         client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
 
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
         # The run itself succeeded — exit code 0, synthesis visible
@@ -266,7 +267,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "writerun2"
         client = FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
 
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
         self.assertEqual(code, 1)  # run failed → non-zero even if save_run also failed
@@ -277,7 +278,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "passed-in"
         sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
         client = FakeClient({"synthesizer": ("ok", "S")})
-        with patch("fleet_engine.cli.save_run", return_value=sentinel):
+        with patch("cadre.cli.save_run", return_value=sentinel):
             _, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
         self.assertIn(f"Run folder: {sentinel}", out)
         self.assertNotIn(f"Run folder: {run_dir}", out)
@@ -308,7 +309,7 @@ class TestRunCaptureUmaskParentDirs(unittest.TestCase):
     def test_default_path_parent_dirs_are_0o700(self):
         """When CADRE_RUN_DIR is unset, the auto-created default root is 0o700."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp / "cadre" / "runs")):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp / "cadre" / "runs")):
             with patch.dict(os.environ, env_without, clear=True):
                 client = FakeClient({"synthesizer": ("ok", "SYNTH")})
                 run_command(EXAMPLE, "find tools", client=client)
@@ -414,12 +415,12 @@ class TestSlugify(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Skill entry (skills/cadre-fleet/run.py) capture tests
+# Skill entry (cadre/data/skill/run.py) capture tests
 # ---------------------------------------------------------------------------
 
 def _load_skill_module():
-    """Import skills/cadre-fleet/run.py as a module without running it."""
-    skill_path = Path(__file__).resolve().parents[1] / "skills" / "cadre-fleet" / "run.py"
+    """Import cadre/data/skill/run.py as a module without running it."""
+    skill_path = skill_dir() / "run.py"
     spec = importlib.util.spec_from_file_location("cadre_fleet_run", skill_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["cadre_fleet_run"] = mod
@@ -428,7 +429,7 @@ def _load_skill_module():
 
 
 class TestSkillEntryCapture(unittest.TestCase):
-    """skills/cadre-fleet/run.py captures identically to run_command."""
+    """cadre/data/skill/run.py captures identically to run_command."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -439,7 +440,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         """Run the skill's main() with a fake client, redirected to self.tmp."""
         fake = FakeClient(behavior or {"synthesizer": ("ok", "SKILL SYNTH")})
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "what is best?", "--fleet", fleet_path] + (extra_argv or [])
         env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
@@ -469,7 +470,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         blocker.write_text("I am a file")
         bad_dir = str(blocker / "subdir")
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "task", "--fleet", fleet_path]
 
@@ -499,7 +500,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         fake = FakeClient({"synthesizer": ("ok", "S")})
         stdout_buf = io.StringIO()
         fleet_path = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+            fleets_dir() / "research-swarm.example.yaml"
         )
         run_argv = ["--task", "t", "--fleet", fleet_path]
         env = {"CADRE_RUN_DIR": str(self.tmp), "CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
@@ -521,7 +522,7 @@ class TestSkillEntryCapture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _EXAMPLE_FLEET = str(
-    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
+    fleets_dir() / "research-swarm.example.yaml"
 )
 
 
@@ -792,7 +793,7 @@ class TestSkillApprovalGate(unittest.TestCase):
         """AE1: --preview fleet A (mint), then run a DIFFERENT valid fleet B on the
         same approval path -> refused (digest mismatch), zero model calls."""
         fleet_b = str(
-            Path(__file__).resolve().parents[1] / "fleets" / "code-review.example.yaml"
+            fleets_dir() / "code-review.example.yaml"
         )
         fake_client_cls = MagicMock()
         with patch.dict(os.environ, self._env()):
@@ -1135,7 +1136,7 @@ class TestSkillTaskRequiredForRealRun(unittest.TestCase):
 
 
 class TestSkillFleetErrorPaths(unittest.TestCase):
-    """Error-path tests for skills/cadre-fleet/run.py main(): nonexistent file,
+    """Error-path tests for cadre/data/skill/run.py main(): nonexistent file,
     invalid YAML, and directory path all return 1 cleanly."""
 
     def setUp(self):
@@ -1348,7 +1349,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         # print() must not raise out of run_command and cost the (already computed)
         # report.
         client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, output = run_command(
                 EXAMPLE, "task", client=client,
                 run_dir=self.tmp / "r2", progress_stream=_BrokenStream(),
@@ -1362,7 +1363,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         # second line.
         prog = io.StringIO()
         client = FakeClient({"synthesizer": ("ok", "S")})
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full\n[cadre] forged")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full\n[cadre] forged")):
             run_command(EXAMPLE, "task", client=client, run_dir=self.tmp / "r3", progress_stream=prog)
         text = prog.getvalue()
         self.assertIn("[cadre] warn: failed to save run artifacts:", text)
@@ -1380,7 +1381,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def test_save_lane_failure_warns_and_run_succeeds(self):
-        from fleet_engine.capture import save_lane as real_save_lane
+        from cadre.capture import save_lane as real_save_lane
 
         def flaky(lane, filename, run_dir):
             if lane.role == "web":
@@ -1390,7 +1391,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
         prog = io.StringIO()
         run_dir = self.tmp / "r"
         client = FakeClient({"synthesizer": ("ok", "SYNTH")})
-        with patch("fleet_engine.progress_runner.save_lane", flaky):
+        with patch("cadre.progress_runner.save_lane", flaky):
             code, output = run_command(
                 EXAMPLE, "task", client=client, run_dir=run_dir, progress_stream=prog,
             )
@@ -1739,7 +1740,7 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
 
 
 class TestCLIDocFlag(unittest.TestCase):
-    """fleet_engine/cli.py `run --doc`: read named files into the task (#26).
+    """cadre/cli.py `run --doc`: read named files into the task (#26).
 
     Drives cli.main() so the argparse wiring (--doc; --task now optional) and the
     at-least-one guard are exercised end-to-end. A prompt-capturing client (via a
@@ -1758,7 +1759,7 @@ class TestCLIDocFlag(unittest.TestCase):
     def _run(self, argv, fake=None):
         fake = fake if fake is not None else _PromptCapturingClient()
         buf = io.StringIO()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with contextlib.redirect_stdout(buf):
                 code = cli_main(argv)
         return code, fake, buf.getvalue()
@@ -1804,11 +1805,11 @@ class TestCLIDocFlag(unittest.TestCase):
     def test_oversize_doc_run_warns_on_stderr(self):
         """A non-preview run with an oversize --doc warns the operator on stderr that
         the review runs over a partial file (cli has no preview to disclose it)."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
         fake = _PromptCapturingClient()
         err = io.StringIO()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with contextlib.redirect_stderr(err):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = cli_main(["run", EXAMPLE, "--doc", big, "--no-capture"])
@@ -1822,7 +1823,7 @@ class TestCLIDocFlag(unittest.TestCase):
         doc = self._doc("plan.md", "CAPTURED_DOC_BODY")
         run_dir = self.tmp / "run"
         fake = _PromptCapturingClient()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = cli_main(["run", EXAMPLE, "--task", "review", "--doc", doc])
@@ -1839,7 +1840,7 @@ class TestCLIDocFlag(unittest.TestCase):
 
 
 class TestSkillDocFlag(unittest.TestCase):
-    """skills/cadre-fleet/run.py --doc: read named files into the task (#26).
+    """cadre/data/skill/run.py --doc: read named files into the task (#26).
 
     Covers AE1/AE2/AE4/AE6 + R2/R3/R5/R7 at the skill entry. A prompt-capturing
     client proves the composed file content actually reaches the specialist prompt.
@@ -1962,7 +1963,7 @@ class TestSkillDocFlag(unittest.TestCase):
     def test_oversize_doc_run_warns_on_stderr(self):
         """A non-preview skill run with an oversize --doc warns on stderr (run path has
         no preview gate to disclose the partial-file truncation)."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
         run_argv = ["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"]
         fake = _PromptCapturingClient()
@@ -1984,7 +1985,7 @@ class TestSkillDocFlag(unittest.TestCase):
         """The preview discloses that an oversize --doc will be reviewed only partially.
         The in-block truncation note is model-facing; the human-approval surface must
         surface it too (cross-model review finding), still with zero model calls."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self.tmp / "huge.md"
         big.write_text("x" * (MAX_FILE_BYTES + 4096), encoding="utf-8")
         fake_client_cls = MagicMock()
@@ -2017,6 +2018,574 @@ class TestSkillDocFlag(unittest.TestCase):
         self.assertIn(str(binf), buf.getvalue())
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# U4: `cadre setup` — provisions ~/.cadre from the installed package, KTD11
+# fail-closed on a recorded Python that can't `import cadre`.
+# (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md)
+# ---------------------------------------------------------------------------
+
+
+def _make_stub_python(test_case, exit_code):
+    """Write a tiny always-<exit_code> executable; return its path.
+
+    A shell stub (not a real python) simulates the OUTCOME of "a recorded
+    interpreter that can/can't import cadre" without depending on cwd/sys.path
+    subtlety around what a real broken venv would resolve to on this machine —
+    see cadre.provision.verify_importable's own docstring: the real subprocess
+    check runs with `-P` (cwd is never on sys.path there), so a shell stub's
+    exit code is a clean, direct stand-in for the check's True/False outcome
+    regardless of args passed to it.
+    """
+    tmp = tempfile.mkdtemp()
+    test_case.addCleanup(shutil.rmtree, tmp)
+    stub = Path(tmp) / "fake-python"
+    stub.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+    stub.chmod(0o700)
+    return str(stub)
+
+
+class TestSetupCommandCleanHome(unittest.TestCase):
+    """cadre setup against a clean tmp $HOME seeds everything from package data.
+
+    These tests are about what happens AFTER the KTD11 gate passes (seeding,
+    config-writing) — not about the gate itself (that's
+    TestSetupCommandKTD11FailClosed, using deterministic stub pythons). Before
+    Fix A, `setup_command(None)` recorded sys.executable and the real gate
+    happened to pass for it via the cwd fail-open (this dev venv does not
+    actually have cadre pip-installed into its own site-packages). `-P` closes
+    that fail-open, so these tests now mock the gate directly rather than
+    depend on incidental cwd behavior — sys.executable is still what gets
+    RECORDED (untouched), only whether the gate accepts it is mocked.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_seeds_fleets_personas_palette_and_config(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        cadre_home = Path(self.tmp) / ".cadre"
+        fleets = list((cadre_home / "fleets").glob("*.yaml"))
+        personas = list((cadre_home / "personas").glob("*.md"))
+        self.assertEqual(len(fleets), 7, f"expected 7 starter fleets, got {[f.name for f in fleets]}")
+        self.assertEqual(len(personas), 5, f"expected 5 personas, got {[p.name for p in personas]}")
+        self.assertTrue((cadre_home / "palette-candidates.yaml").exists())
+        self.assertTrue((cadre_home / "config").exists())
+
+    def test_config_line_is_exact_and_records_sys_executable(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
+
+    def test_returns_zero_and_confirms_home_in_message(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0)
+        self.assertIn(str(Path(self.tmp) / ".cadre"), out)
+
+
+class TestSetupCommandKTD11FailClosed(unittest.TestCase):
+    """A recorded Python that cannot `import cadre` fails setup closed — nothing written."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_non_importing_python_exits_nonzero(self):
+        stub = _make_stub_python(self, 1)
+        code, out = setup_command(stub)
+        self.assertNotEqual(code, 0)
+        self.assertIn(stub, out)
+
+    def test_non_importing_python_writes_no_config(self):
+        stub = _make_stub_python(self, 1)
+        setup_command(stub)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertFalse(config_path.exists())
+
+    def test_non_importing_python_seeds_nothing_not_even_the_home_dir(self):
+        """The import-check runs BEFORE ensure_cadre_dirs — fail-fast with nothing
+        partial (KTD11): not a single directory gets created."""
+        stub = _make_stub_python(self, 1)
+        setup_command(stub)
+        cadre_home = Path(self.tmp) / ".cadre"
+        self.assertFalse(cadre_home.exists())
+
+    def test_importing_python_succeeds(self):
+        """The mirror case: a stub that DOES exit 0 (simulating a python that can
+        import cadre) is accepted and recorded verbatim."""
+        stub = _make_stub_python(self, 0)
+        code, out = setup_command(stub)
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+
+class TestSetupCommandNewlineRejection(unittest.TestCase):
+    """C4: a recorded_python containing a newline/CR/NUL is rejected BEFORE
+    verify_importable ever runs. Closes a real config-contract break: the
+    skill's `grep -E '^CADRE_HERMES_PYTHON=' | cut -d= -f2-` reader only sees
+    the FIRST line of the value, so a smuggled trailing line after a newline
+    could pass verify_importable's real execve-based check (the full string)
+    yet have the skill later run a different, unverified path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_newline_rejected_before_verify_importable_runs(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command("/nonexistent/py\nsuffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("newline", out.lower())
+
+    def test_newline_writes_no_config(self):
+        with patch("cadre.provision.verify_importable"):
+            setup_command("/nonexistent/py\nsuffix")
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertFalse(config_path.exists())
+
+    def test_carriage_return_rejected(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command("/nonexistent/py\rsuffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("control character", out.lower())
+
+    def test_nul_byte_rejected(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, _ = setup_command("/nonexistent/py\x00suffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+
+    def test_newline_via_env_var_also_rejected(self):
+        """The check applies regardless of which precedence branch (arg vs
+        CADRE_HERMES_PYTHON env) produced recorded_python."""
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, _ = setup_command(None, env={"CADRE_HERMES_PYTHON": "/nonexistent/py\nsuffix"})
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+
+
+class TestSetupCommandBareNameResolution(unittest.TestCase):
+    """C3: a bare/relative --venv-python is PATH-unstable (verify-time PATH
+    here vs skill-run-time PATH later can resolve two different binaries) —
+    setup_command resolves it to an absolute path via shutil.which before
+    verifying and recording, so the value verified is the value later run."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_bare_name_resolved_verified_and_recorded_as_absolute_path(self):
+        with patch("shutil.which", return_value="/abs/path/to/python") as mock_which:
+            with patch("cadre.provision.verify_importable", return_value=True) as mock_verify:
+                code, out = setup_command("python")
+        mock_which.assert_called_once_with("python")
+        mock_verify.assert_called_once_with("/abs/path/to/python")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(
+            config_path.read_text(encoding="utf-8"),
+            "CADRE_HERMES_PYTHON=/abs/path/to/python\n",
+        )
+
+    def test_unresolvable_bare_name_left_unchanged(self):
+        """shutil.which returning None (not found on PATH) leaves the bare
+        name as-is: verify_importable then fails closed on it in real usage
+        (mocked True here, since this test is about what gets RECORDED)."""
+        with patch("shutil.which", return_value=None):
+            code, out = setup_command("totally-bogus-not-on-path")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(
+            config_path.read_text(encoding="utf-8"),
+            "CADRE_HERMES_PYTHON=totally-bogus-not-on-path\n",
+        )
+
+    def test_relative_path_with_slash_recorded_as_absolute(self):
+        """Codex confirm: shutil.which returns a relative path WITH a directory
+        component (e.g. '.venv/bin/python') unchanged, so it must be abspath'd
+        against the current cwd before recording — otherwise the skill later
+        runs a cwd-relative interpreter that differs from the verified one."""
+        rel = os.path.join(".venv", "bin", "python")
+        with patch("shutil.which", return_value=rel):
+            code, out = setup_command(rel)
+        self.assertEqual(code, 0, out)
+        recorded = (Path(self.tmp) / ".cadre" / "config").read_text(encoding="utf-8")
+        self.assertEqual(recorded, f"CADRE_HERMES_PYTHON={os.path.abspath(rel)}\n")
+        self.assertTrue(os.path.isabs(recorded.split("=", 1)[1].strip()))
+
+    def test_absolute_path_not_passed_through_which(self):
+        """An already-absolute path (e.g. sys.executable) is untouched — no
+        shutil.which call at all."""
+        with patch("shutil.which") as mock_which:
+            code, out = setup_command(sys.executable)
+        mock_which.assert_not_called()
+        self.assertEqual(code, 0, out)
+
+
+class TestSetupCommandHomeSafetyGuard(unittest.TestCase):
+    """C5a: a pre-planted symlinked or group/other-writable ~/.cadre is
+    refused BEFORE any write — the provisioning steps below would otherwise
+    write fleets/config/palette THROUGH a tampered control directory (no MAC
+    protects ~/.cadre's contents; its integrity rests on this)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_symlinked_cadre_home_refused(self):
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir(mode=0o700)
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.symlink_to(elsewhere, target_is_directory=True)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("symlink", out.lower())
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing written through the symlinked home")
+        self.assertTrue(cadre_home.is_symlink(), "the symlink itself must be untouched, not replaced")
+
+    def test_group_writable_cadre_home_refused(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o770)
+        os.chmod(cadre_home, 0o770)  # chmod after mkdir — mkdir's mode arg is umask-affected
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("writable", out.lower())
+        self.assertFalse((cadre_home / "config").exists())
+
+    def test_other_writable_cadre_home_refused(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o707)
+        os.chmod(cadre_home, 0o707)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("writable", out.lower())
+
+    def test_preexisting_0o700_cadre_home_accepted(self):
+        """A normal owner-only ~/.cadre (e.g. from a prior successful setup
+        run) must NOT be refused — only a symlink or a loose mode is unsafe."""
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700)
+        os.chmod(cadre_home, 0o700)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+
+    def test_no_preexisting_cadre_home_accepted(self):
+        """The common case: ~/.cadre does not exist yet — nothing to refuse."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+
+
+class TestSetupCommandOSErrorDegrade(unittest.TestCase):
+    """Fix C regression: an OSError from the scaffold/seed/write-config sequence
+    degrades to a clean (1, message) — never a raw traceback (the pre-#11
+    scripts/resolve_venv.py wrapped this identical sequence the same way)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_ensure_cadre_dirs_oserror_degrades_cleanly(self):
+        """An mkdir failure (e.g. a read-only $HOME, a full disk) inside
+        ensure_cadre_dirs() must not propagate past setup_command."""
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with patch("cadre.provision.ensure_cadre_dirs", side_effect=OSError("disk full")):
+                try:
+                    code, out = setup_command(None)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"setup_command raised instead of degrading cleanly: {exc!r}")
+        self.assertEqual(code, 1)
+        self.assertIn("disk full", out)
+
+    def test_write_config_oserror_degrades_cleanly(self):
+        """A write failure inside write_config() (the last step) must also
+        degrade cleanly, not just an early-sequence failure."""
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with patch("cadre.provision.write_config", side_effect=OSError("permission denied")):
+                try:
+                    code, out = setup_command(None)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"setup_command raised instead of degrading cleanly: {exc!r}")
+        self.assertEqual(code, 1)
+        self.assertIn("permission denied", out)
+
+
+class TestSetupCommandPythonPrecedence(unittest.TestCase):
+    """--venv-python arg > CADRE_HERMES_PYTHON env > sys.executable (KTD11).
+
+    These tests are about precedence (which path gets RECORDED), not the
+    KTD11 gate itself, so the gate is mocked to always pass — see
+    TestSetupCommandCleanHome's setUp docstring for why (Fix A / -P closes
+    the cwd fail-open these tests previously rode on for sys.executable).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def _config_value(self):
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
+        return line.split("=", 1)[1]
+
+    def test_records_sys_executable_by_default(self):
+        code, out = setup_command(None, env={})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+    def test_arg_beats_env(self):
+        code, out = setup_command(sys.executable, env={"CADRE_HERMES_PYTHON": "/should/not/be/used"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+    def test_env_used_when_no_arg(self):
+        code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": sys.executable})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+
+class TestSetupCommandExpanduser(unittest.TestCase):
+    """A literal ~-relative --venv-python is expanduser'd before use (not an absolute tmp path)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_tilde_venv_python_is_expanduser_before_verify_and_record(self):
+        """A stub placed under the (patched) $HOME, referenced via '~/bin/...', both
+        verifies correctly (expanduser happens before the subprocess check) and is
+        recorded as the expanded absolute path (not the literal '~/...' string)."""
+        stub_dir = Path(self.tmp) / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "fake-python"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+
+        code, out = setup_command("~/bin/fake-python")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+
+class TestSetupCommandSymlinkGuard(unittest.TestCase):
+    """cadre setup end-to-end: a pre-planted symlinked ~/.cadre/fleets is refused.
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring) —
+    this test is about the symlink-seeding guard, not the gate.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_symlinked_fleets_dir_not_seeded_through(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700, parents=True)
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir(mode=0o700)
+        (cadre_home / "fleets").symlink_to(elsewhere, target_is_directory=True)
+
+        code, out = setup_command(None)
+
+        # Seeding degrades (warn-and-skip), never crashes — setup still succeeds
+        # overall (config gets written; the other seeds proceed normally).
+        self.assertEqual(code, 0, out)
+        # Nothing was written through the attacker's symlink target.
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertTrue((cadre_home / "fleets").is_symlink())
+
+
+class TestSetupCommandIdempotent(unittest.TestCase):
+    """A second cadre setup run preserves operator edits; config stays grep|cut-parseable.
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring) —
+    idempotency across two setup_command(None) runs is what's under test here.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_second_run_preserves_operator_edited_fleet(self):
+        setup_command(None)
+        cadre_home = Path(self.tmp) / ".cadre"
+        edited = cadre_home / "fleets" / "research-swarm.yaml"
+        edited.write_text("OPERATOR EDIT", encoding="utf-8")
+
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(edited.read_text(encoding="utf-8"), "OPERATOR EDIT")
+
+    def test_second_run_config_line_still_grep_cut_parses(self):
+        setup_command(None)
+        setup_command(None)  # second run
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        # Mirror the C2 shell contract: grep -E '^CADRE_HERMES_PYTHON=' | cut -d= -f2-
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
+        value = line.split("=", 1)[1]
+        self.assertEqual(value, sys.executable)
+        self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
+
+
+class TestSetupCommandCLIWiring(unittest.TestCase):
+    """`cadre setup` is reachable through cli.main()'s argparse dispatch."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_main_setup_subcommand_provisions_and_prints_result(self):
+        # This test is about argparse dispatch (no --venv-python -> records
+        # sys.executable), not the KTD11 gate — mocked for the same reason as
+        # TestSetupCommandCleanHome (see its setUp docstring). The sibling
+        # test below passes a real stub and deliberately does NOT mock this,
+        # so it still exercises the real gate end-to-end.
+        buf = io.StringIO()
+        with patch("cadre.provision.verify_importable", return_value=True):
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(["setup"])
+        self.assertEqual(code, 0)
+        self.assertTrue((Path(self.tmp) / ".cadre" / "config").exists())
+        self.assertIn(str(Path(self.tmp) / ".cadre"), buf.getvalue())
+
+    def test_main_setup_venv_python_flag_is_wired(self):
+        stub = _make_stub_python(self, 0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(["setup", "--venv-python", stub])
+        self.assertEqual(code, 0)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+
+# ---------------------------------------------------------------------------
+# U5: `cadre verify-palette` — a thin dispatch onto cadre.verify_palette.main(),
+# which owns its own live-progress printing and exit code (unlike validate/setup's
+# (code, out) shape). The dispatch test patches main() so it never triggers a real
+# host verification pass; verify_palette's own logic is covered by test_palette.py.
+# (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyPaletteCommandCLIWiring(unittest.TestCase):
+    """`cadre verify-palette` is reachable through cli.main()'s argparse dispatch
+    and propagates cadre.verify_palette.main()'s exit code verbatim."""
+
+    def test_main_verify_palette_subcommand_calls_verify_palette_main(self):
+        with patch("cadre.verify_palette.main", return_value=0) as fake_main:
+            code = cli_main(["verify-palette"])
+        fake_main.assert_called_once_with()
+        self.assertEqual(code, 0)
+
+    def test_main_verify_palette_propagates_nonzero_exit(self):
+        with patch("cadre.verify_palette.main", return_value=1):
+            code = cli_main(["verify-palette"])
+        self.assertEqual(code, 1)
+
+
+# ---------------------------------------------------------------------------
+# U6: `cadre install-skill` — a thin dispatch onto cadre.install_skill.
+# install_skill()'s own behavior (guards, atomic swap, copy fallback) is
+# covered by tests/test_install_skill.py; this only proves the argparse wiring
+# and exit-code propagation (R11).
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSkillCommandCLIWiring(unittest.TestCase):
+    """`cadre install-skill` is reachable through cli.main()'s argparse dispatch
+    and propagates install_skill()'s exit code verbatim."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.skills_dir = str(Path(self.tmp) / "skills")
+
+    def test_main_install_skill_subcommand_creates_symlink(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(["install-skill", "--skills-dir", self.skills_dir])
+        self.assertEqual(code, 0)
+        entry = Path(self.skills_dir) / "cadre-fleet"
+        self.assertTrue(entry.is_symlink())
+        self.assertIn("installed cadre-fleet skill", buf.getvalue())
+
+    def test_main_install_skill_propagates_nonzero_exit(self):
+        with patch("cadre.cli.install_skill", return_value=(1, "boom")) as fake:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(["install-skill", "--skills-dir", self.skills_dir])
+        fake.assert_called_once_with(self.skills_dir)
+        self.assertEqual(code, 1)
+        self.assertIn("boom", buf.getvalue())
 
 
 if __name__ == "__main__":

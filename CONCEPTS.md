@@ -26,7 +26,7 @@ A focus that does not explicitly require live retrieval and citation will let th
 A rich, editable markdown specialist definition — the lens's full role, reasoning scaffolding, and grounding controls — referenced by name from a fleet as an alternative to an inline one-line *Focus*. A specialist carries exactly one instruction source: a persona or a focus. A persona carries no provider/model/toolset binding, so the same lens can be reused across fleets and models.
 
 ### Persona pool
-The shared, flat directory of persona files (`personas/` in the repo; `~/.cadre/personas` on a host) that a `persona:` reference resolves against. A caller-layer resolver reads the named file, confined to the pool, and populates the specialist's instruction before the run — the engine never sees a path or a persona name.
+The shared, flat directory of persona files (`cadre/data/personas/` in the repo — shipped as package data; `~/.cadre/personas` on a host) that a `persona:` reference resolves against. A caller-layer resolver reads the named file, confined to the pool, and populates the specialist's instruction before the run — the engine never sees a path or a persona name.
 
 ### Synthesizer
 The single strong-model step that combines the specialists' successful outputs into one grounded result. It runs after the specialists, over only the survivors, and is expected to attribute claims to the specialist that surfaced them and preserve citations.
@@ -86,7 +86,7 @@ The framing protects a reader that relies on visual column-0 position; a consume
 ## Agent-run handoff
 
 ### Fleet library
-The host-local directory of runnable fleets a Hermes agent selects from — `~/.cadre/fleets/<name>.yaml`, created owner-only (`0o700`) at install. Distinct from the repo's `fleets/`, which holds examples only; copy one into the library to make it runnable. Selected by name: the agent lists the directory and passes the chosen file's path to the runner. There is no registry, fuzzy-matching, or CLI subcommand — a flat directory of named YAML files is the whole convention.
+The host-local directory of runnable fleets a Hermes agent selects from — `~/.cadre/fleets/<name>.yaml`, created owner-only (`0o700`) and auto-seeded with the starter fleets by `cadre setup`. Distinct from `cadre/data/fleets/`, the package data the starters ship as (examples only, `.example.yaml`-suffixed); `cadre setup` seeds the library from there with no copying needed. Selected by name: the agent lists the directory and passes the chosen file's path to the runner. There is no registry, fuzzy-matching, or CLI subcommand — a flat directory of named YAML files is the whole convention.
 
 ### Verified palette
 The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette.yaml`, written by the install's verify step. It records the `(provider, model)` pairs that actually resolved and responded on this host (**models verified by a live call**) plus the profile's safe toolsets (**declared and filtered to the safe set, not per-tool verified** — an unprovisioned tool still appears, so its lane can run silently ungrounded — as can a lane whose Focus doesn't demand retrieval). Composing only from the palette prevents two silent failure modes: a guessed model string (a dead lane) and an unverified provider. It carries a `generated_at` stamp because verified strings drift.

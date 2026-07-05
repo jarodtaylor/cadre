@@ -1,7 +1,7 @@
 """Caller-layer parser: turns the judge's raw text into per-lane structure.
 
 Caller-layer only: imported by ``render.py`` and ``capture.py``. NEVER imports
-``fleet_engine.engine`` — it operates on plain text and ``(role, model)``
+``cadre.engine`` — it operates on plain text and ``(role, model)``
 tuples. The import-isolation contract mirrors ``file_input.py``
 (``docs/solutions/architecture-patterns/side-effects-at-the-edge-pure-engine-core.md``).
 

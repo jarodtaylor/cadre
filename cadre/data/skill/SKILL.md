@@ -70,7 +70,8 @@ cat ~/.cadre/palette.yaml
 
 Write your composed fleet to `~/.cadre/fleets/<name>.yaml`. Model the YAML
 structure (`name`, `synthesis`, `specialists` with role/provider/model/toolset/
-focus) on `fleets/research-swarm.example.yaml`. Use only `(provider, model)`
+focus) on an existing file in `~/.cadre/fleets/`, e.g. `research-swarm.yaml`.
+Use only `(provider, model)`
 pairs and toolsets listed in the palette. Do not set `allow_privileged_tools:
 true` on composed fleets (see Safety below). The `--preview` step re-parses the
 file and reports every config error, so iterate against it until it renders clean.
@@ -276,9 +277,10 @@ Key: `CADRE_HERMES_PYTHON`. The ambient env var `$CADRE_HERMES_PYTHON` takes
 precedence (override). The `grep ... | cut` form is used deliberately — **not**
 `source ~/.cadre/config` (which would execute arbitrary shell in the file).
 
-This file is written by the Cadre install (`scripts/install.sh`); the skill only
-reads it. If `~/.cadre/config` is absent and `CADRE_HERMES_PYTHON` is not set,
-the invocation fails with a clear "no such file" error — run the install first.
+This file is written by `cadre setup` (run directly, or via `scripts/install.sh`,
+which wraps it); the skill only reads it. If `~/.cadre/config` is absent and
+`CADRE_HERMES_PYTHON` is not set, the invocation fails with a clear "no such
+file" error — run `cadre setup` first.
 
 ## Safety
 

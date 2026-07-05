@@ -1,10 +1,20 @@
-#!/usr/bin/env python
-"""U1 verification spike — confirm AIAgent provider/model resolution + failure mode,
-then write the confirmed pairs to ~/.cadre/palette.yaml.
+"""cadre/verify_palette.py — verify AIAgent provider/model resolution against
+this host, then write the confirmed pairs to ~/.cadre/palette.yaml.
 
-RUNS ON THE HERMES HOST with the Hermes venv Python:
+Caller-layer module (KTD4). Moved unchanged from the retired host-verify
+spike during the U5 packaging pass
+(docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md): an installed-package
+module imports ``cadre.config`` natively, so the spike's repo-relative
+``sys.path`` bootstrap is gone, and ``SAFE_TOOLSETS`` is now a top-level import
+instead of a lazy one (only ``_agent``'s ``run_agent`` import stays lazy — that
+dependency is host-only). Invoked via the installed console command:
 
-    ~/.hermes/hermes-agent/venv/bin/python spikes/verify_aiagent_providers.py
+    cadre verify-palette
+
+RUNS ON THE HERMES HOST with the Hermes venv Python (the interpreter cadre was
+pip-installed into — the load-bearing KTD2 install target):
+
+    ~/.hermes/hermes-agent/venv/bin/python -m cadre.cli verify-palette
 
 ---
 
@@ -22,8 +32,10 @@ RUNS ON THE HERMES HOST with the Hermes venv Python:
 
 ## One-time host workflow
 
-1. Edit CANDIDATES (or ~/.cadre/palette-candidates.yaml) with your real strings.
-2. Run this spike via the Hermes venv — verifies + writes ~/.cadre/palette.yaml.
+1. `cadre setup` seeds ~/.cadre/palette-candidates.yaml from the installed
+   package (or edit PROVIDERS in this file) with your real strings.
+2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
+   ~/.cadre/palette.yaml.
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -41,22 +53,14 @@ import contextlib
 import io
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-# When run as a standalone script (`python spikes/verify_aiagent_providers.py` —
-# how install.sh invokes it), Python puts spikes/ on sys.path[0], NOT the repo
-# root, so write_palette's lazy `from fleet_engine.config import ...` fails with
-# ModuleNotFoundError. Insert the repo root so it resolves whether run as a script
-# or imported. Mirrors skills/cadre-fleet/run.py. (Dev tests never hit this: they
-# run via `python -m unittest` from the repo root, which is already on sys.path.)
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from cadre.approval import _parent_is_safe
+from cadre.config import SAFE_TOOLSETS
 
 # Default candidates file path (operator edits once after install seeds it).
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
@@ -216,7 +220,7 @@ def write_palette(
     """Write the verified palette to ``path`` as owner-only YAML (0o600).
 
     Filters ``records`` to only ``ok=True`` pairs. Intersects ``toolsets`` with
-    ``fleet_engine.config.SAFE_TOOLSETS``, preserving input order (list
+    ``cadre.config.SAFE_TOOLSETS``, preserving input order (list
     comprehension, not set intersection — order is locked by the downstream
     schema). Raises ValueError (before any filesystem side-effects) if there are
     zero ok records.
@@ -238,11 +242,10 @@ def write_palette(
 
     Raises:
         ValueError: If there are no ``ok=True`` records (nothing to write).
+        OSError: If ``path``'s parent directory is a symlink, is not owned by
+            the current user, or is group/other-writable (``_parent_is_safe``);
+            or if ``path`` itself is a symlink (``O_NOFOLLOW``).
     """
-    # Import here to keep the lazy-import discipline consistent with _agent,
-    # and so this module stays importable on the dev box without fleet_engine.
-    from fleet_engine.config import SAFE_TOOLSETS  # noqa: PLC0415
-
     # Validate BEFORE any side effects — zero ok records → don't write anything.
     ok_records = [r for r in records if r.ok]
     if not ok_records:
@@ -282,9 +285,27 @@ def write_palette(
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
+        # Refuse to write into a group/other-writable (or foreign-owned) parent
+        # (CodeRabbit, Major/Security) — mirrors approval.write_approval /
+        # install_skill.install_skill's same guard. mkdir(exist_ok=True) tightens a
+        # freshly-created dir to 0o700 but will NOT downgrade a pre-existing loose
+        # one, and O_NOFOLLOW below only stops a symlink AT palette.yaml — it does
+        # not protect against a loose parent a co-resident user could replant
+        # through. Check AFTER mkdir so a just-created dir passes by construction
+        # and only a pre-existing loose dir is refused.
+        if not _parent_is_safe(str(path.parent)):
+            raise OSError(
+                f"{path.parent} is unsafe — it must be owned by you and not "
+                "group/other-writable. Fix it, then re-run."
+            )
+
         # Write owner-only at creation — never the momentary 0o644 a write-then-chmod
-        # leaves under a default umask (mirrors capture._write exactly).
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # leaves under a default umask (mirrors capture._write exactly). O_NOFOLLOW
+        # (not part of capture._write's base idiom) refuses to follow a symlink
+        # planted at path — matching provision.write_config / _seed_files / the
+        # approval-token writer's same guard.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         path.chmod(0o600)
@@ -334,9 +355,10 @@ def main() -> int:
     if not candidates:
         print(
             "No candidates found. Either:\n"
-            "  • Edit PROVIDERS in this file, or\n"
-            f"  • Populate {candidates_path} with a 'candidates' list\n"
-            "  (Run the install script to seed it from fleets/palette.example.yaml)"
+            f"  • Populate {candidates_path} with a 'candidates' list — run "
+            "`cadre setup` to seed it from the installed package, or\n"
+            "  • Edit PROVIDERS in this file (a dev/source-checkout shortcut; "
+            "not durable across a package reinstall/upgrade)"
         )
         return 1
 
@@ -350,7 +372,11 @@ def main() -> int:
     n_ok = sum(1 for r in records if r.ok)
     try:
         write_palette(records, declared_toolsets, palette_path)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # ValueError: zero verified providers (nothing to write). OSError: a
+        # write failure — including O_NOFOLLOW's ELOOP when ~/.cadre/palette.yaml
+        # is a planted symlink (the correct fail-closed behavior). Degrade to a
+        # clean message + nonzero exit, never a raw traceback.
         print(f"\n✗ {exc}")
         return 1
 

@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/approval.py.
+"""Tests for cadre/approval.py.
 
 U1 — surface_digest: a pure function binding the full previewed run surface
 (the whole resolved FleetConfig, the composed task, and the resolved profile
@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fleet_engine.approval import (
+from cadre.approval import (
     DEFAULT_APPROVAL_PATH,
     ApprovalToken,
     consume_approval,
@@ -27,7 +27,7 @@ from fleet_engine.approval import (
     surface_digest,
     write_approval,
 )
-from fleet_engine.config import FleetConfig
+from cadre.config import FleetConfig
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ class TestApprovalTokenExpiry(unittest.TestCase):
         produces this pairing — it always sets minted_at whenever ttl_seconds
         is given). is_expired treats a missing mint time as maximally stale
         (epoch 0) rather than raising, so a malformed token reads as expired —
-        fail-closed — instead of crashing the caller (skills/cadre-fleet/run.py)
+        fail-closed — instead of crashing the caller (cadre/data/skill/run.py)
         with an uncaught TypeError on `None + ttl_seconds`."""
         token = ApprovalToken(digest="d", privileged=False, ttl_seconds=60)
         self.assertTrue(token.is_expired(1000.0))

@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Union
 
-from fleet_engine.model_client import AgentResult
+from cadre.model_client import AgentResult
 
 # ---------------------------------------------------------------------------
 # Engine-emitted events — only run_fleet constructs these.

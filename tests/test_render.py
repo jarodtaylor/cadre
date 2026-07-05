@@ -1,4 +1,4 @@
-"""Direct unit tests for fleet_engine/render.py render_result and render_fleet_preview.
+"""Direct unit tests for cadre/render.py render_result and render_fleet_preview.
 
 Constructs FleetResult / AgentResult / FleetConfig objects directly (no model
 calls, no CLI layer) to cover the three degraded shapes added in U5, the happy
@@ -13,14 +13,13 @@ import io
 import threading
 import time
 import unittest
-from pathlib import Path
 
-from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
-from fleet_engine.engine import FleetResult, FleetStatus
+from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
+from cadre.engine import FleetResult, FleetStatus
 from tests.test_engine import _derive_status
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import resolve
-from fleet_engine.progress import (
+from cadre.model_client import AgentResult
+from cadre.personas import resolve
+from cadre.progress import (
     Completion,
     JudgeDone,
     JudgeStarted,
@@ -33,19 +32,18 @@ from fleet_engine.progress import (
     SynthStarted,
     Validated,
 )
-from fleet_engine.render import (
+from cadre.render import (
     ProgressRenderer,
     render_composed_task,
     render_file_inputs,
     render_fleet_preview,
     render_result,
 )
-from fleet_engine.text_safety import BODY_GUTTER
+from cadre.resources import fleets_dir
+from cadre.text_safety import BODY_GUTTER
 
 # Path to the curated example fleet (used for some preview tests).
-_EXAMPLE_FLEET = (
-    Path(__file__).resolve().parents[1] / "fleets" / "research-swarm.example.yaml"
-)
+_EXAMPLE_FLEET = fleets_dir() / "research-swarm.example.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +690,7 @@ class TestRenderFleetPreviewPersonaLane(unittest.TestCase):
 
     def setUp(self):
         import tempfile, os, shutil
-        from fleet_engine.config import SpecialistSpec
+        from cadre.config import SpecialistSpec
         self._tmp = tempfile.mkdtemp()
         self.pool = os.path.realpath(self._tmp)
         # Write a minimal persona file.
@@ -798,7 +796,7 @@ class TestRenderFleetPreviewPersonaLane(unittest.TestCase):
         The resolver stores raw bytes; the render layer sanitizes (KTD6).
         """
         import os, tempfile, shutil
-        from fleet_engine.config import SpecialistSpec
+        from cadre.config import SpecialistSpec
         tmp = tempfile.mkdtemp()
         pool = os.path.realpath(tmp)
         try:
@@ -1097,7 +1095,7 @@ class TestSanitizeUnicodeExclusions(unittest.TestCase):
     """_sanitize drops Unicode line/paragraph separators and bidi format controls."""
 
     def setUp(self):
-        from fleet_engine.render import _sanitize
+        from cadre.render import _sanitize
         self._sanitize = _sanitize
 
     def test_line_separator_stripped_single_line(self):
@@ -1154,7 +1152,7 @@ class TestRenderResultTabInSynthesis(unittest.TestCase):
     with a tab keeps the tab under multiline=True."""
 
     def setUp(self):
-        from fleet_engine.render import _sanitize
+        from cadre.render import _sanitize
         self._sanitize = _sanitize
 
     def test_tab_in_multiline_synthesis_prompt_preserved(self):
@@ -3039,7 +3037,7 @@ class TestProgressRendererRoundStarted(unittest.TestCase):
     def test_round_started_is_in_progress_event_union(self):
         """RoundStarted must be a member of the ProgressEvent Union."""
         import typing
-        from fleet_engine.progress import ProgressEvent
+        from cadre.progress import ProgressEvent
         union_args = typing.get_args(ProgressEvent)
         self.assertIn(RoundStarted, union_args)
 

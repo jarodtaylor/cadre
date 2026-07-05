@@ -1,41 +1,29 @@
-"""Tests for the pure write_palette function in spikes/verify_aiagent_providers.py (U1).
+"""Tests for cadre/verify_palette.py — moved from the now-retired host-verification
+spike during the U5 packaging pass (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md),
+which relocated write_palette/verify_candidates/_load_candidates (and the rest of the
+host-verification flow) into cadre.verify_palette (a normal package import, not the
+by-path load the spike needed — verify_palette.py lives inside the cadre package).
 
 All tests inject a tempfile.mkdtemp() path and never touch ~/.cadre.
-The spike module is loaded by path (importlib) because spikes/ is not a package.
 
 Test-first: these tests define the contract; the implementation must satisfy them.
 """
 
 from __future__ import annotations
 
-import importlib.util
+import contextlib
+import io
 import os
 import shutil
 import stat
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-
-# ---------------------------------------------------------------------------
-# Load spike module by path (spikes/ is not a package)
-# ---------------------------------------------------------------------------
-
-def _load_spike():
-    spike_path = Path(__file__).resolve().parents[1] / "spikes" / "verify_aiagent_providers.py"
-    spec = importlib.util.spec_from_file_location("verify_aiagent_providers", spike_path)
-    mod = importlib.util.module_from_spec(spec)
-    # Register in sys.modules BEFORE exec_module so @dataclass can resolve the
-    # module's __dict__ (cls.__module__ lookup via sys.modules requires it).
-    sys.modules["verify_aiagent_providers"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_spike = _load_spike()
+import cadre.verify_palette as verify_palette
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +36,7 @@ def make_records(*, ok_pairs=None, fail_pairs=None):
     ok_pairs: list of (provider, model) for ok=True records.
     fail_pairs: list of (provider, model) for ok=False records.
     """
-    VerifyRecord = _spike.VerifyRecord
+    VerifyRecord = verify_palette.VerifyRecord
     records = []
     for provider, model in (ok_pairs or []):
         records.append(VerifyRecord(provider=provider, model=model, ok=True))
@@ -83,7 +71,7 @@ class TestWritePaletteFiltersOkRecords(unittest.TestCase):
         """2 ok + 1 failed → palette models contains exactly the 2 ok pairs, in order."""
         records = make_records(ok_pairs=SAFE_PAIRS, fail_pairs=[FAIL_PAIR])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+        verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
 
         data = yaml.safe_load(out.read_text())
         models = data["models"]
@@ -99,7 +87,7 @@ class TestWritePaletteFiltersOkRecords(unittest.TestCase):
         ]
         records = make_records(ok_pairs=pairs)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
 
         data = yaml.safe_load(out.read_text())
         models = data["models"]
@@ -110,7 +98,7 @@ class TestWritePaletteFiltersOkRecords(unittest.TestCase):
         """All ok records appear when there are no failures."""
         records = make_records(ok_pairs=SAFE_PAIRS)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
 
         data = yaml.safe_load(out.read_text())
         self.assertEqual(len(data["models"]), 2)
@@ -128,14 +116,14 @@ class TestWritePaletteZeroOkRecords(unittest.TestCase):
         records = make_records(fail_pairs=[FAIL_PAIR])
         out = self.tmp / "palette.yaml"
         with self.assertRaises(ValueError):
-            _spike.write_palette(records, ["web"], out)
+            verify_palette.write_palette(records, ["web"], out)
 
     def test_zero_ok_error_message_mentions_providers(self):
         """The ValueError message must be informative."""
         records = make_records(fail_pairs=[FAIL_PAIR])
         out = self.tmp / "palette.yaml"
         with self.assertRaises(ValueError) as ctx:
-            _spike.write_palette(records, ["web"], out)
+            verify_palette.write_palette(records, ["web"], out)
         msg = str(ctx.exception).lower()
         self.assertIn("provider", msg)
 
@@ -144,7 +132,7 @@ class TestWritePaletteZeroOkRecords(unittest.TestCase):
         records = make_records(fail_pairs=[FAIL_PAIR])
         out = self.tmp / "palette.yaml"
         try:
-            _spike.write_palette(records, ["web"], out)
+            verify_palette.write_palette(records, ["web"], out)
         except ValueError:
             pass
         self.assertFalse(out.exists(), "no file should be written on zero ok records")
@@ -153,7 +141,7 @@ class TestWritePaletteZeroOkRecords(unittest.TestCase):
         """Completely empty record list also raises ValueError."""
         out = self.tmp / "palette.yaml"
         with self.assertRaises(ValueError):
-            _spike.write_palette([], ["web"], out)
+            verify_palette.write_palette([], ["web"], out)
 
 
 class TestWritePalettePermissions(unittest.TestCase):
@@ -166,7 +154,7 @@ class TestWritePalettePermissions(unittest.TestCase):
     def test_palette_file_is_0o600(self):
         records = make_records(ok_pairs=SAFE_PAIRS)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+        verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
 
         mode = stat.S_IMODE(out.stat().st_mode)
         self.assertEqual(mode, 0o600, f"expected 0o600, got 0o{mode:03o}")
@@ -176,8 +164,93 @@ class TestWritePalettePermissions(unittest.TestCase):
         nested = self.tmp / "subdir" / "deeper"
         out = nested / "palette.yaml"
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
         self.assertTrue(out.exists())
+
+
+class TestWritePaletteSymlinkGuard(unittest.TestCase):
+    """C5b: write_palette refuses to follow a symlink planted at the
+    destination (O_NOFOLLOW) — matches provision.write_config /
+    _seed_files / approval.write_approval's same guard."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_symlinked_destination_not_written_through(self):
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        out = self.tmp / "palette.yaml"
+        out.symlink_to(sentinel)
+
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        with self.assertRaises(OSError):
+            verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(out.is_symlink(), "the symlink itself must be untouched, not replaced")
+
+
+class TestWritePaletteParentSafety(unittest.TestCase):
+    """CR1 (CodeRabbit, Major/Security): write_palette refuses to write into a
+    group/other-writable (or foreign-owned) parent directory — mirrors
+    approval.write_approval / install_skill.install_skill's same guard
+    (approval._parent_is_safe). A loose/foreign-owned ~/.cadre (pre-existing,
+    or on a shared host) must not be silently trusted just because the leaf
+    write is O_NOFOLLOW-guarded."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_group_writable_parent_refused(self):
+        # Create the parent FIRST with the bad mode: write_palette's
+        # mkdir(exist_ok=True) tightens a freshly-CREATED dir to 0o700 but does
+        # NOT downgrade a pre-existing one, so the loose mode must predate the
+        # call for this test to actually exercise the guard.
+        d = self.tmp / "loose"
+        d.mkdir(mode=0o770)
+        os.chmod(d, 0o770)  # chmod after mkdir — mkdir's mode arg is umask-affected
+
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        out = d / "palette.yaml"
+        with self.assertRaises(OSError):
+            verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+        self.assertFalse(out.exists(), "no file should be written into an unsafe parent")
+
+
+class TestVerifyPaletteMainOSErrorDegrade(unittest.TestCase):
+    """verify_palette.main() degrades a write_palette OSError to a clean exit 1,
+    never a raw traceback — the main()-level consequence of C5b's O_NOFOLLOW,
+    which now raises OSError when ~/.cadre/palette.yaml is a planted symlink
+    (main previously caught only ValueError)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_symlinked_palette_path_degrades_to_exit_1_no_traceback(self):
+        candidates = self.tmp / "palette-candidates.yaml"
+        candidates.write_text(
+            "candidates:\n  - provider: xai\n    model: grok-4.3\ntoolsets: [web]\n",
+            encoding="utf-8",
+        )
+        # A symlink planted at the palette output -> write_palette's O_NOFOLLOW raises OSError.
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        palette = self.tmp / "palette.yaml"
+        palette.symlink_to(sentinel)
+
+        ok_records = make_records(ok_pairs=[("xai", "grok-4.3")])
+        with patch.object(verify_palette, "_DEFAULT_CANDIDATES_PATH", candidates), \
+             patch.object(verify_palette, "_DEFAULT_PALETTE_PATH", palette), \
+             patch.object(verify_palette, "verify_candidates", return_value=ok_records), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = verify_palette.main()  # must NOT raise
+
+        self.assertEqual(code, 1)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(palette.is_symlink())
 
 
 class TestWritePaletteToolsetFiltering(unittest.TestCase):
@@ -192,7 +265,7 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         mixed_toolsets = ["web", "terminal", "search", "browser", "x_search"]
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, mixed_toolsets, out)
+        verify_palette.write_palette(records, mixed_toolsets, out)
 
         data = yaml.safe_load(out.read_text())
         toolsets = data["toolsets"]
@@ -208,7 +281,7 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         # safe names in a specific order, with non-safe interspersed
         toolsets = ["vision", "web", "terminal", "search"]
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, toolsets, out)
+        verify_palette.write_palette(records, toolsets, out)
 
         data = yaml.safe_load(out.read_text())
         # non-safe "terminal" dropped; safe names in original order
@@ -218,7 +291,7 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         """If all declared toolsets are non-safe, the palette toolsets list is empty."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["terminal", "browser", "file"], out)
+        verify_palette.write_palette(records, ["terminal", "browser", "file"], out)
 
         data = yaml.safe_load(out.read_text())
         self.assertEqual(data["toolsets"], [])
@@ -227,7 +300,7 @@ class TestWritePaletteToolsetFiltering(unittest.TestCase):
         """An empty toolsets input produces an empty list in the palette."""
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, [], out)
+        verify_palette.write_palette(records, [], out)
 
         data = yaml.safe_load(out.read_text())
         self.assertEqual(data["toolsets"], [])
@@ -243,7 +316,7 @@ class TestWritePaletteGeneratedAt(unittest.TestCase):
     def test_generated_at_present(self):
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
 
         data = yaml.safe_load(out.read_text())
         self.assertIn("generated_at", data)
@@ -251,7 +324,7 @@ class TestWritePaletteGeneratedAt(unittest.TestCase):
     def test_generated_at_non_empty_string(self):
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
 
         data = yaml.safe_load(out.read_text())
         self.assertIsInstance(data["generated_at"], str)
@@ -269,7 +342,7 @@ class TestWritePaletteRoundTrip(unittest.TestCase):
         """The loaded YAML has the locked schema: generated_at, models (list of dicts), toolsets."""
         records = make_records(ok_pairs=SAFE_PAIRS, fail_pairs=[FAIL_PAIR])
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+        verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
 
         data = yaml.safe_load(out.read_text())
 
@@ -296,7 +369,7 @@ class TestWritePaletteRoundTrip(unittest.TestCase):
         toolsets = ["web", "search"]
         records = make_records(ok_pairs=ok_pairs)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, toolsets, out)
+        verify_palette.write_palette(records, toolsets, out)
 
         data = yaml.safe_load(out.read_text())
         self.assertEqual(
@@ -315,7 +388,7 @@ class TestVerifyRecord(unittest.TestCase):
     """VerifyRecord dataclass exists with the expected fields."""
 
     def test_verify_record_fields(self):
-        VerifyRecord = _spike.VerifyRecord
+        VerifyRecord = verify_palette.VerifyRecord
         r = VerifyRecord(provider="xai", model="grok-4.3", ok=True)
         self.assertEqual(r.provider, "xai")
         self.assertEqual(r.model, "grok-4.3")
@@ -323,7 +396,7 @@ class TestVerifyRecord(unittest.TestCase):
         self.assertEqual(r.detail, "")  # default
 
     def test_verify_record_fail(self):
-        VerifyRecord = _spike.VerifyRecord
+        VerifyRecord = verify_palette.VerifyRecord
         r = VerifyRecord(provider="openrouter", model="bad/model", ok=False, detail="timeout")
         self.assertFalse(r.ok)
         self.assertEqual(r.detail, "timeout")
@@ -338,25 +411,25 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
     """verify_candidates exists and accepts a list of (provider, model) tuples."""
 
     def test_function_exists(self):
-        self.assertTrue(callable(_spike.verify_candidates))
+        self.assertTrue(callable(verify_palette.verify_candidates))
 
     def test_signature_accepts_list_of_tuples(self):
         """verify_candidates(candidates) — can be called with an empty list (no live calls)."""
         import unittest.mock as mock
         # Patch _agent so no live AIAgent import is attempted
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.return_value = "ok"
-            result = _spike.verify_candidates([])
+            result = verify_palette.verify_candidates([])
         self.assertIsInstance(result, list)
 
     def test_returns_list_of_verify_records(self):
         """With one candidate, returns a list with one VerifyRecord."""
         import unittest.mock as mock
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.return_value = "ok"
-            result = _spike.verify_candidates([("xai", "grok-4.3")])
+            result = verify_palette.verify_candidates([("xai", "grok-4.3")])
         self.assertEqual(len(result), 1)
-        self.assertIsInstance(result[0], _spike.VerifyRecord)
+        self.assertIsInstance(result[0], verify_palette.VerifyRecord)
         self.assertEqual(result[0].provider, "xai")
         self.assertEqual(result[0].model, "grok-4.3")
         self.assertTrue(result[0].ok)
@@ -364,9 +437,9 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
     def test_failed_call_returns_ok_false_record(self):
         """An exception from _agent.chat() results in ok=False record."""
         import unittest.mock as mock
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.side_effect = RuntimeError("no auth")
-            result = _spike.verify_candidates([("openrouter", "bad/model")])
+            result = verify_palette.verify_candidates([("openrouter", "bad/model")])
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0].ok)
         self.assertIn("RuntimeError", result[0].detail)
@@ -383,7 +456,7 @@ class TestWritePaletteHonestyHeader(unittest.TestCase):
     def test_header_warns_toolsets_not_probed(self):
         records = make_records(ok_pairs=SAFE_PAIRS)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
         text = out.read_text()
         self.assertIn("NOT tool-probed", text)
         self.assertIn("ungrounded", text)
@@ -391,7 +464,7 @@ class TestWritePaletteHonestyHeader(unittest.TestCase):
     def test_header_does_not_break_yaml_parse(self):
         records = make_records(ok_pairs=SAFE_PAIRS)
         out = self.tmp / "palette.yaml"
-        _spike.write_palette(records, ["web"], out)
+        verify_palette.write_palette(records, ["web"], out)
         data = yaml.safe_load(out.read_text())  # comments are ignored by the loader
         self.assertEqual(len(data["models"]), 2)
         self.assertEqual(data["toolsets"], ["web"])
@@ -415,8 +488,8 @@ class TestLoadCandidates(unittest.TestCase):
     def test_file_absent_returns_providers_empty_toolsets(self):
         """If the seed file doesn't exist, returns (PROVIDERS, [])."""
         path = self._candidates_path("nonexistent.yaml")
-        candidates, toolsets = _spike._load_candidates(path)
-        self.assertEqual(candidates, _spike.PROVIDERS)
+        candidates, toolsets = verify_palette._load_candidates(path)
+        self.assertEqual(candidates, verify_palette.PROVIDERS)
         self.assertEqual(toolsets, [])
 
     def test_valid_yaml_parsed(self):
@@ -433,7 +506,7 @@ class TestLoadCandidates(unittest.TestCase):
             "  - search\n",
             encoding="utf-8",
         )
-        candidates, toolsets = _spike._load_candidates(path)
+        candidates, toolsets = verify_palette._load_candidates(path)
         self.assertEqual(candidates, [("xai", "grok-4.3"), ("openrouter", "google/gemini-3-flash")])
         self.assertEqual(toolsets, ["web", "search"])
 
@@ -441,8 +514,8 @@ class TestLoadCandidates(unittest.TestCase):
         """An empty file (yaml.safe_load → None) returns (PROVIDERS, [])."""
         path = self._candidates_path()
         path.write_text("", encoding="utf-8")
-        candidates, toolsets = _spike._load_candidates(path)
-        self.assertEqual(candidates, _spike.PROVIDERS)
+        candidates, toolsets = verify_palette._load_candidates(path)
+        self.assertEqual(candidates, verify_palette.PROVIDERS)
         self.assertEqual(toolsets, [])
 
     def test_non_mapping_root_returns_providers(self):
@@ -450,8 +523,8 @@ class TestLoadCandidates(unittest.TestCase):
         for content in ("- a\n- b\n", "justascalar\n"):
             path = self._candidates_path()
             path.write_text(content, encoding="utf-8")
-            candidates, toolsets = _spike._load_candidates(path)
-            self.assertEqual(candidates, _spike.PROVIDERS)
+            candidates, toolsets = verify_palette._load_candidates(path)
+            self.assertEqual(candidates, verify_palette.PROVIDERS)
             self.assertEqual(toolsets, [])
 
     def test_candidate_missing_model_is_skipped(self):
@@ -465,7 +538,7 @@ class TestLoadCandidates(unittest.TestCase):
             "toolsets: []\n",
             encoding="utf-8",
         )
-        candidates, toolsets = _spike._load_candidates(path)
+        candidates, toolsets = verify_palette._load_candidates(path)
         # The second entry (missing model) must be skipped — no KeyError
         self.assertEqual(candidates, [("xai", "grok-4.3")])
 
@@ -479,15 +552,15 @@ class TestLoadCandidates(unittest.TestCase):
             "toolsets: web\n",
             encoding="utf-8",
         )
-        candidates, toolsets = _spike._load_candidates(path)
+        candidates, toolsets = verify_palette._load_candidates(path)
         self.assertEqual(toolsets, [], "scalar toolsets must not be iterated char-by-char")
 
     def test_candidates_null_no_crash(self):
         """candidates: null → no crash; falls back to PROVIDERS."""
         path = self._candidates_path()
         path.write_text("candidates: null\ntoolsets: [web]\n", encoding="utf-8")
-        candidates, toolsets = _spike._load_candidates(path)
-        self.assertEqual(candidates, _spike.PROVIDERS)
+        candidates, toolsets = verify_palette._load_candidates(path)
+        self.assertEqual(candidates, verify_palette.PROVIDERS)
         self.assertEqual(toolsets, ["web"])
 
     def test_toolsets_null_no_crash(self):
@@ -500,7 +573,7 @@ class TestLoadCandidates(unittest.TestCase):
             "toolsets: null\n",
             encoding="utf-8",
         )
-        candidates, toolsets = _spike._load_candidates(path)
+        candidates, toolsets = verify_palette._load_candidates(path)
         self.assertEqual(toolsets, [])
 
 
@@ -516,53 +589,16 @@ class TestVerifyCandidatesBlankResponse(unittest.TestCase):
         """_agent.chat() returning '' → VerifyRecord(ok=False, detail='empty response')."""
         import unittest.mock as mock
 
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.return_value = ""
-            result = _spike.verify_candidates([("xai", "grok-4.3")])
+            result = verify_palette.verify_candidates([("xai", "grok-4.3")])
 
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0].ok)
         self.assertEqual(result[0].detail, "empty response")
 
 
-class TestStandaloneScriptImport(unittest.TestCase):
-    """Regression (live dogfood, 2026-06-20): run as a standalone script
-    (`python spikes/verify_aiagent_providers.py`, how install.sh invokes it),
-    spikes/ is on sys.path[0] but the repo root is NOT, so write_palette's
-    `from fleet_engine.config import SAFE_TOOLSETS` raised ModuleNotFoundError.
-    The module now inserts the repo root itself."""
-
-    def test_write_palette_imports_fleet_engine_without_repo_root_on_path(self):
-        import subprocess
-
-        repo_root = Path(__file__).resolve().parents[1]
-        spike = repo_root / "spikes" / "verify_aiagent_providers.py"
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        out = tmp / "palette.yaml"
-        driver = (
-            "import importlib.util, sys\n"
-            f"spec = importlib.util.spec_from_file_location('v', {str(spike)!r})\n"
-            "m = importlib.util.module_from_spec(spec); sys.modules['v'] = m\n"
-            "spec.loader.exec_module(m)\n"
-            "m.write_palette([m.VerifyRecord('xai', 'grok-4.3', True)], ['web'], "
-            f"{str(out)!r})\n"
-            "print('OK')\n"
-        )
-        # `-I` (isolated): does NOT prepend cwd/'' to sys.path and ignores
-        # PYTHONPATH, so fleet_engine is importable ONLY via the spike's own
-        # repo-root insertion — reproducing the standalone-script condition.
-        result = subprocess.run(
-            [sys.executable, "-I", "-c", driver],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, f"stderr:\n{result.stderr}")
-        self.assertTrue(out.exists(), "palette should have been written")
-
-
-class TestVerifyOutputSuppression(unittest.TestCase):
+class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
     """verify_candidates hides a candidate's raw provider output (the scary
     multi-line error AIAgent dumps for an unsupported model) and prints one calm
     status line instead (DX fix from the 2026-06-20 live dogfood)."""
@@ -578,11 +614,11 @@ class TestVerifyOutputSuppression(unittest.TestCase):
             print("❌ Non-retryable error — Aborting", file=_sys.stderr)
             return "ok"
 
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.side_effect = noisy_ok
             out = _io.StringIO()
             with ctx.redirect_stdout(out):
-                records = _spike.verify_candidates([("xai", "grok-4.3")])
+                records = verify_palette.verify_candidates([("xai", "grok-4.3")])
 
         printed = out.getvalue()
         self.assertNotIn("SCARY PROVIDER STACK DUMP", printed)  # noise captured, not dumped
@@ -602,10 +638,10 @@ class TestVerifyOutputSuppression(unittest.TestCase):
             print("   📝 Error: HTTP 400: The requested model is not supported.", file=_sys.stderr)
             return None
 
-        with mock.patch.object(_spike, "_agent") as fake_agent:
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.chat.side_effect = noisy_none
             with ctx.redirect_stdout(_io.StringIO()):
-                records = _spike.verify_candidates([("copilot", "claude-opus-4.5")])
+                records = verify_palette.verify_candidates([("copilot", "claude-opus-4.5")])
 
         self.assertFalse(records[0].ok)
         self.assertIn("not supported", records[0].detail.lower())

@@ -135,8 +135,8 @@ not a claim that Cadre is "injection-proof."
   deployment does not do.
 - **An agent holding a `terminal` toolset can bypass the gate entirely — the
   terminal-abuse residual.** The approval gate lives in the agent-handoff runner
-  (`skills/cadre-fleet/run.py`). The direct-human dev CLI (`python -m
-  fleet_engine.cli`) is intentionally **not** gated — a human invoking it directly
+  (`cadre/data/skill/run.py`). The direct-human dev CLI (`cadre`, i.e. `python -m
+  cadre.cli`) is intentionally **not** gated — a human invoking it directly
   *is* the operator. But that also means an agent with a `terminal` tool can skip
   the gate by invoking that CLI, or a one-line `python -c` that calls the engine
   directly, or by minting a token in a directory it controls. This is not a hole

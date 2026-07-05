@@ -1,6 +1,6 @@
 """Preview-bound approval — canonical surface digest (U1) + owner-only token store (U2).
 
-Caller-layer only: intended for ``skills/cadre-fleet/run.py`` (and ``render.py``
+Caller-layer only: intended for ``cadre/data/skill/run.py`` (and ``render.py``
 for surfacing the digest inputs). NEVER imported by ``engine.py`` or
 ``model_client.py`` — approval / trust-boundary logic is not the engine's
 concern (KTD5; ``tests/test_personas.py``'s ``TestEngineIsolation`` guards
@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from fleet_engine.config import FleetConfig
+    from cadre.config import FleetConfig
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def surface_digest(cfg: FleetConfig, composed_task: str, profile: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Default approval-token location — mirrors the CADRE_PERSONAS_DIR / CADRE_RUN_DIR
-# pattern (fleet_engine/personas.py, fleet_engine/capture.py). Override in tests via
+# pattern (cadre/personas.py, cadre/capture.py). Override in tests via
 # CADRE_APPROVAL_PATH to avoid touching the real ~/.cadre.
 DEFAULT_APPROVAL_PATH = "~/.cadre/approval"
 
@@ -97,7 +97,7 @@ def _parent_is_safe(parent: str) -> bool:
     writable. A group/world-writable parent lets a co-resident user unlink and
     replant the token even though the leaf is 0o600 + O_NOFOLLOW (Codex adversarial
     review). Mirrors the persona-pool ownership/permission check in
-    ``personas.resolve`` (``fleet_engine/personas.py``) — the same repo posture for
+    ``personas.resolve`` (``cadre/personas.py``) — the same repo posture for
     a trust surface whose integrity rests on filesystem permissions, not crypto.
     Non-POSIX (no ``getuid``) skips the ownership half but still enforces the mode
     bits, exactly as the persona-pool check does.

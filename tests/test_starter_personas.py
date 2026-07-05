@@ -8,18 +8,19 @@ Guards the invariants in R1/R11/R12 of the persona-files plan:
 - Each contains no dangling ce-orchestration strings.
 - Each contains no zero-width or BOM characters.
 
-Paths are resolved relative to the repo root (tests/../personas/), following
-the _REPO pattern established in test_starter_fleets.py.
+Paths are resolved via ``cadre.resources`` (package data under
+``cadre/data/personas/``), which works identically in dev (repo root, no
+install) and installed (wheel data).
 """
 
 from __future__ import annotations
 
 import re
 import unittest
-from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[1]
-_PERSONAS_DIR = _REPO / "personas"
+from cadre.resources import personas_dir
+
+_PERSONAS_DIR = personas_dir()
 
 # The five persona files that must exist in personas/ (R1/R11 — exact names).
 _EXPECTED_PERSONAS = {

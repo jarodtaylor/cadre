@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/judge_grade.py — the judge-grade parser.
+"""Tests for cadre/judge_grade.py — the judge-grade parser.
 
 Covers:
 - Happy path: all lanes graded, grade forms, multi-line rationale
@@ -11,7 +11,7 @@ Covers:
 
 import unittest
 
-from fleet_engine.judge_grade import ParsedGrades, parse_grades
+from cadre.judge_grade import ParsedGrades, parse_grades
 
 
 # ---------------------------------------------------------------------------
@@ -499,16 +499,16 @@ class TestDegradePaths(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Purity guard: judge_grade must never import fleet_engine.engine
+# Purity guard: judge_grade must never import cadre.engine
 # ---------------------------------------------------------------------------
 
 
 class TestJudgeGradePurity(unittest.TestCase):
-    """judge_grade.py is a caller-layer module: it must NOT import fleet_engine.engine."""
+    """judge_grade.py is a caller-layer module: it must NOT import cadre.engine."""
 
     def test_module_does_not_import_engine(self):
         import inspect
-        import fleet_engine.judge_grade as mod
+        import cadre.judge_grade as mod
 
         source = inspect.getsource(mod)
         # Check only actual import statements (not docstrings that say "never imports X").
@@ -517,11 +517,11 @@ class TestJudgeGradePurity(unittest.TestCase):
             for line in source.splitlines()
             if line.strip().startswith(("import ", "from "))
         ]
-        engine_imports = [l for l in import_lines if "fleet_engine.engine" in l]
+        engine_imports = [l for l in import_lines if "cadre.engine" in l]
         self.assertEqual(
             engine_imports,
             [],
-            "judge_grade.py must never import fleet_engine.engine — "
+            "judge_grade.py must never import cadre.engine — "
             f"found: {engine_imports}",
         )
 
@@ -538,14 +538,14 @@ class TestCouplingWithEngine(unittest.TestCase):
     If either side drifts — new marker syntax, renamed keyword, altered casing —
     these tests fail before it reaches a live run.
 
-    The test file is explicitly ALLOWED to import fleet_engine.engine
+    The test file is explicitly ALLOWED to import cadre.engine
     (the coupling test must reach the real prompt builder); judge_grade.py
     itself must not (see TestJudgeGradePurity).
     """
 
     def _judge_cfg(self):
-        from fleet_engine.config import FleetConfig
-        from fleet_engine.personas import resolve
+        from cadre.config import FleetConfig
+        from cadre.personas import resolve
 
         data = {
             "name": "t",
@@ -573,7 +573,7 @@ class TestCouplingWithEngine(unittest.TestCase):
         return cfg
 
     def _make_successes(self):
-        from fleet_engine.model_client import AgentResult
+        from cadre.model_client import AgentResult
 
         return [
             AgentResult(
@@ -588,7 +588,7 @@ class TestCouplingWithEngine(unittest.TestCase):
 
     def test_judge_prompt_contains_lane_marker_token(self):
         """_judge_prompt emits '=== LANE:' — the primary token parse_grades keys on."""
-        from fleet_engine.engine import _judge_prompt
+        from cadre.engine import _judge_prompt
 
         prompt = _judge_prompt(self._judge_cfg(), "test task", self._make_successes(), _NONCE)
         self.assertIn(
@@ -599,7 +599,7 @@ class TestCouplingWithEngine(unittest.TestCase):
 
     def test_judge_prompt_embeds_the_marker_nonce(self):
         """The emitted marker carries the per-run nonce (R5, #5)."""
-        from fleet_engine.engine import _judge_prompt
+        from cadre.engine import _judge_prompt
 
         prompt = _judge_prompt(self._judge_cfg(), "test task", self._make_successes(), _NONCE)
         self.assertIn(_NONCE, prompt, "the marker nonce must appear in the judge prompt")
@@ -609,7 +609,7 @@ class TestCouplingWithEngine(unittest.TestCase):
         what parse_grades (given the same nonce) recognizes, and a nonce-free marker
         is NOT recognized. Binds engine._judge_prompt to judge_grade.parse_grades so
         the format can never drift (docs/solutions coupling-test pattern)."""
-        from fleet_engine.engine import _judge_prompt
+        from cadre.engine import _judge_prompt
 
         successes = self._make_successes()
         lanes = [(r.role, r.model) for r in successes]
@@ -633,14 +633,14 @@ class TestCouplingWithEngine(unittest.TestCase):
 
     def test_judge_prompt_contains_grade_token(self):
         """_judge_prompt emits 'Grade:' — the field parse_grades extracts the grade from."""
-        from fleet_engine.engine import _judge_prompt
+        from cadre.engine import _judge_prompt
 
         prompt = _judge_prompt(self._judge_cfg(), "test task", self._make_successes(), _NONCE)
         self.assertIn("Grade:", prompt, "_judge_prompt must include the 'Grade:' label")
 
     def test_judge_prompt_contains_rationale_token(self):
         """_judge_prompt emits 'Rationale:' — the field parse_grades extracts rationale from."""
-        from fleet_engine.engine import _judge_prompt
+        from cadre.engine import _judge_prompt
 
         prompt = _judge_prompt(self._judge_cfg(), "test task", self._make_successes(), _NONCE)
         self.assertIn("Rationale:", prompt, "_judge_prompt must include the 'Rationale:' label")

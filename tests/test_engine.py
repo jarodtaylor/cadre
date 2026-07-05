@@ -8,11 +8,11 @@ import time
 import unittest
 from pathlib import Path
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import resolve
-from fleet_engine.progress import JudgeDone, JudgeStarted, LaneDone, LaneLaunched, RoundStarted
+from cadre.config import FleetConfig
+from cadre.engine import FleetResult, FleetStatus, run_fleet
+from cadre.model_client import AgentResult
+from cadre.personas import resolve
+from cadre.progress import JudgeDone, JudgeStarted, LaneDone, LaneLaunched, RoundStarted
 
 
 def _config(**overrides):
@@ -311,10 +311,10 @@ class TestSynthesizerTimeout(unittest.TestCase):
 # parent's subprocess timeout then fires and the test fails. argv[1] picks what hangs.
 _CLEAN_EXIT_CHILD = """
 import sys, threading
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import run_fleet
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import resolve
+from cadre.config import FleetConfig
+from cadre.engine import run_fleet
+from cadre.model_client import AgentResult
+from cadre.personas import resolve
 
 hang = sys.argv[1]
 never = threading.Event()
@@ -1321,7 +1321,7 @@ class TestSequentialTopology(unittest.TestCase):
 
     def test_per_stage_truncation_flag(self):
         """Oversize single-unit stage output is hard-cut; threading_truncated=True; marker in prompt."""
-        from fleet_engine.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+        from cadre.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 
         char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
         long_text = "X" * (char_budget + 100)   # one oversize unit (no blank lines) -> hard-cut
@@ -1365,7 +1365,7 @@ class TestSequentialTopology(unittest.TestCase):
     def test_cap_keeps_whole_units_and_drops_overflow(self):
         """Over-budget multi-unit text packs WHOLE units; the overflowing unit is dropped
         entirely (no mid-unit cut); marker present; truncated True (R4)."""
-        from fleet_engine.engine import (
+        from cadre.engine import (
             _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN, _CHAIN_TRUNC_MARKER)
 
         unit_a, unit_b, unit_c = "A" * 7000, "B" * 7000, "C" * 7000
@@ -1382,7 +1382,7 @@ class TestSequentialTopology(unittest.TestCase):
     def test_cap_hard_cuts_single_oversize_unit(self):
         """A single unit larger than the whole budget is hard-cut to fit, with the marker;
         the block stays within the char-equivalent budget (R5)."""
-        from fleet_engine.engine import (
+        from cadre.engine import (
             _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN, _CHAIN_TRUNC_MARKER)
 
         char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
@@ -1396,7 +1396,7 @@ class TestSequentialTopology(unittest.TestCase):
 
     def test_cap_passes_through_within_budget(self):
         """Text within the token budget is returned whole, no marker, not truncated."""
-        from fleet_engine.engine import _cap_stage_text
+        from cadre.engine import _cap_stage_text
 
         text = "finding one\n\nfinding two\n\nfinding three"
         self.assertEqual(_cap_stage_text(text), (text, False))
@@ -1404,7 +1404,7 @@ class TestSequentialTopology(unittest.TestCase):
     def test_cap_threads_8kb_multifinding_input_whole(self):
         """R2/R3: an ~8 KB, 10-unit input (the #17 dogfood shape) now threads WHOLE — the
         old 4,000-CHAR cap truncated it to ~4 findings; the 4,000-TOKEN budget does not."""
-        from fleet_engine.engine import _cap_stage_text
+        from cadre.engine import _cap_stage_text
 
         text = "\n\n".join(f"Finding {i}: " + "z" * 780 for i in range(10))   # ~8 KB
         capped, truncated = _cap_stage_text(text)
@@ -1415,14 +1415,14 @@ class TestSequentialTopology(unittest.TestCase):
     def test_estimate_tokens_floors_chars_over_ratio(self):
         # 43 chars / 4 = 10.75 -> 10 (floor); a hardcoded expected pins FLOOR
         # semantics (round/ceil would give 11) and catches a ratio/operator drift.
-        from fleet_engine.engine import _estimate_tokens
+        from cadre.engine import _estimate_tokens
         self.assertEqual(_estimate_tokens("x" * 43), 10)
 
     def test_cap_bound_is_char_based_not_token_density_aware(self):
         """The cap is a CHAR bound (density-blind): dense content (CJK/code, where the
         ~4 chars/token estimate under-counts) is bounded by CHARS, not real tokens — a
         documented limitation of the provider-neutral heuristic (#39, Codex fold)."""
-        from fleet_engine.engine import _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+        from cadre.engine import _cap_stage_text, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
         char_budget = CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN
         # Over the CHAR bound -> truncated + flagged, regardless of the (higher) real token count.
         dense_over = "中" * (char_budget + 100)
@@ -1559,7 +1559,7 @@ class TestRunRoundDirect(unittest.TestCase):
 
     def test_subset_returns_in_lanes_order(self):
         """_run_round with 2-of-3 specialists returns results in the passed lanes order."""
-        from fleet_engine.engine import _run_round, _specialist_call
+        from cadre.engine import _run_round, _specialist_call
 
         cfg = _config()
         # Use only the first 2 (web, social) — a survivor-subset, just like iterative needs.
@@ -1699,7 +1699,7 @@ class TestIterativeTopology(unittest.TestCase):
 
     def test_ae1_round2_prompt_contains_previous_round_outputs(self):
         """Round-2 prompts contain the DATA marker + round-1 outputs for all lanes."""
-        from fleet_engine.engine import _CHAIN_DELIM
+        from cadre.engine import _CHAIN_DELIM
 
         client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
         run_fleet(_iterative_config(), "task", client)
@@ -1721,7 +1721,7 @@ class TestIterativeTopology(unittest.TestCase):
 
     def test_ae1_round3_prompt_contains_round2_outputs(self):
         """Round-3 prompts contain round-2 outputs (previous-round visibility, not full history)."""
-        from fleet_engine.engine import _CHAIN_DELIM
+        from cadre.engine import _CHAIN_DELIM
 
         client = RoundAwareFakeClient(schedule={("synthesizer", 1): ("ok", "S")})
         run_fleet(_iterative_config(), "task", client)
@@ -1908,7 +1908,7 @@ class TestIterativeTopology(unittest.TestCase):
 
     def test_ae4_self_refine_sees_own_prior_output(self):
         """Self-refine: round-2 and round-3 prompts contain the lane's own prior output."""
-        from fleet_engine.engine import _CHAIN_DELIM
+        from cadre.engine import _CHAIN_DELIM
 
         data = {
             "name": "t",
@@ -2201,7 +2201,7 @@ class TestIterativeTopology(unittest.TestCase):
 
     def test_threading_truncated_when_inter_round_output_oversize(self):
         """threading_truncated=True when a round's output exceeds the token budget."""
-        from fleet_engine.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+        from cadre.engine import CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
 
         long_text = "X" * (CHAIN_STAGE_TOKEN_CAP * CHARS_PER_TOKEN + 100)
 

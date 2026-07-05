@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/personas.py — caller-layer persona resolver (U2).
+"""Tests for cadre/personas.py — caller-layer persona resolver (U2).
 
 All tests use a real temporary directory so confinement invariants are
 exercised against the actual filesystem, not mocks.  macOS `tempfile`
@@ -12,8 +12,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fleet_engine.config import ConfigError, FleetConfig, SpecialistSpec
-from fleet_engine.personas import DEFAULT_PERSONAS_DIR, default_pool_dir, resolve
+from cadre.config import ConfigError, FleetConfig, SpecialistSpec
+from cadre.personas import DEFAULT_PERSONAS_DIR, default_pool_dir, resolve
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ def _static_imports(mod) -> list[str]:
     """Return every module name statically imported by ``mod`` (AST, not runtime).
 
     AST analysis of the source file is immune to test-ordering effects from other
-    test modules that do import fleet_engine.engine.
+    test modules that do import cadre.engine.
     """
     import ast
     import inspect
@@ -364,141 +364,258 @@ class TestEngineIsolation(unittest.TestCase):
     """
 
     def test_personas_does_not_import_engine_or_model_client(self):
-        """fleet_engine/personas.py must NOT import engine or model_client (KTD1)."""
-        import fleet_engine.personas as p_mod
+        """cadre/personas.py must NOT import engine or model_client (KTD1)."""
+        import cadre.personas as p_mod
 
         imported = _static_imports(p_mod)
         self.assertNotIn(
-            "fleet_engine.engine",
+            "cadre.engine",
             imported,
             "personas.py must not import engine (KTD1 — engine-purity constraint)",
         )
         self.assertNotIn(
-            "fleet_engine.model_client",
+            "cadre.model_client",
             imported,
             "personas.py must not import model_client (KTD1 — engine-purity constraint)",
         )
 
     def test_file_input_does_not_import_engine_or_model_client(self):
-        """fleet_engine/file_input.py must NOT import engine or model_client (KTD2)."""
-        import fleet_engine.file_input as fi_mod
+        """cadre/file_input.py must NOT import engine or model_client (KTD2)."""
+        import cadre.file_input as fi_mod
 
         imported = _static_imports(fi_mod)
         self.assertNotIn(
-            "fleet_engine.engine",
+            "cadre.engine",
             imported,
             "file_input.py must not import engine (KTD2 — engine stays path-free)",
         )
         self.assertNotIn(
-            "fleet_engine.model_client",
+            "cadre.model_client",
             imported,
             "file_input.py must not import model_client (KTD2 — engine stays path-free)",
         )
 
     def test_engine_does_not_import_file_input(self):
-        """fleet_engine/engine.py must NOT import file_input (KTD2 / R8).
+        """cadre/engine.py must NOT import file_input (KTD2 / R8).
 
         The engine must never gain file-reading logic — it sees only the composed
         task string. A stray import here is the architecture regression this guards.
         """
-        import fleet_engine.engine as e_mod
+        import cadre.engine as e_mod
 
         imported = _static_imports(e_mod)
         self.assertNotIn(
-            "fleet_engine.file_input",
+            "cadre.file_input",
             imported,
             "engine.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
     def test_judge_grade_does_not_import_engine_or_model_client(self):
-        """fleet_engine/judge_grade.py must NOT import engine or model_client.
+        """cadre/judge_grade.py must NOT import engine or model_client.
 
         The judge-grade parser is caller-layer: the engine returns the judge's
         raw text and the edge parses it (KTD2). A stray engine import here would
         fold parsing back into the core.
         """
-        import fleet_engine.judge_grade as jg_mod
+        import cadre.judge_grade as jg_mod
 
         imported = _static_imports(jg_mod)
         self.assertNotIn(
-            "fleet_engine.engine",
+            "cadre.engine",
             imported,
             "judge_grade.py must not import engine (KTD2 — parsing lives at the edge)",
         )
         self.assertNotIn(
-            "fleet_engine.model_client",
+            "cadre.model_client",
             imported,
             "judge_grade.py must not import model_client (caller-layer parser)",
         )
 
     def test_engine_does_not_import_judge_grade(self):
-        """fleet_engine/engine.py must NOT import judge_grade (KTD2).
+        """cadre/engine.py must NOT import judge_grade (KTD2).
 
         The engine emits the judge's raw text and does no parsing; a stray import
         of the edge parser is the architecture regression this guards.
         """
-        import fleet_engine.engine as e_mod
+        import cadre.engine as e_mod
 
         imported = _static_imports(e_mod)
         self.assertNotIn(
-            "fleet_engine.judge_grade",
+            "cadre.judge_grade",
             imported,
             "engine.py must not import judge_grade (KTD2 — engine returns raw text, edge parses)",
         )
 
     def test_model_client_does_not_import_file_input(self):
-        """fleet_engine/model_client.py must NOT import file_input (KTD2 / R8)."""
-        import fleet_engine.model_client as mc_mod
+        """cadre/model_client.py must NOT import file_input (KTD2 / R8)."""
+        import cadre.model_client as mc_mod
 
         imported = _static_imports(mc_mod)
         self.assertNotIn(
-            "fleet_engine.file_input",
+            "cadre.file_input",
             imported,
             "model_client.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
     def test_approval_does_not_import_engine_or_model_client(self):
-        """fleet_engine/approval.py must NOT import engine or model_client (KTD5).
+        """cadre/approval.py must NOT import engine or model_client (KTD5).
 
         approval.py type-hints its FleetConfig parameter under `TYPE_CHECKING`
         only, so there is no runtime import of engine/model_client here — this
         locks that by-construction guarantee against a careless future edit,
         mirroring the bidirectional coverage the file_input/judge_grade pairs get.
         """
-        import fleet_engine.approval as a_mod
+        import cadre.approval as a_mod
 
         imported = _static_imports(a_mod)
         self.assertNotIn(
-            "fleet_engine.engine",
+            "cadre.engine",
             imported,
             "approval.py must not import engine (KTD5 — engine-purity constraint)",
         )
         self.assertNotIn(
-            "fleet_engine.model_client",
+            "cadre.model_client",
             imported,
             "approval.py must not import model_client (KTD5 — engine-purity constraint)",
         )
 
     def test_engine_does_not_import_approval(self):
-        """fleet_engine/engine.py and model_client.py must NOT import approval (KTD5).
+        """cadre/engine.py and model_client.py must NOT import approval (KTD5).
 
         Preview-bound approval / trust-boundary logic is caller-layer; a stray
         import here would fold trust-surface concerns back into the pure engine core.
         """
-        import fleet_engine.engine as e_mod
-        import fleet_engine.model_client as mc_mod
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
 
         imported_engine = _static_imports(e_mod)
         self.assertNotIn(
-            "fleet_engine.approval",
+            "cadre.approval",
             imported_engine,
             "engine.py must not import approval (KTD5 — engine-purity constraint)",
         )
         imported_mc = _static_imports(mc_mod)
         self.assertNotIn(
-            "fleet_engine.approval",
+            "cadre.approval",
             imported_mc,
             "model_client.py must not import approval (KTD5 — engine-purity constraint)",
+        )
+
+    def test_install_skill_does_not_import_engine_or_model_client(self):
+        """cadre/install_skill.py must NOT import engine or model_client (U6).
+
+        install_skill materializes the Hermes skill from package data — pure
+        filesystem/trust-boundary logic (reuses approval._parent_is_safe),
+        same posture as approval.py itself.
+        """
+        import cadre.install_skill as is_mod
+
+        imported = _static_imports(is_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "install_skill.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "install_skill.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_install_skill(self):
+        """cadre/engine.py and model_client.py must NOT import install_skill (U6)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.install_skill",
+            imported_engine,
+            "engine.py must not import install_skill (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.install_skill",
+            imported_mc,
+            "model_client.py must not import install_skill (engine-purity constraint)",
+        )
+
+    def test_provision_does_not_import_engine_or_model_client(self):
+        """cadre/provision.py must NOT import engine or model_client (U4).
+
+        provision.py scaffolds ~/.cadre, seeds starter data, writes config, and
+        subprocess-verifies importability — pure filesystem/trust-boundary
+        logic, same posture as install_skill.py/approval.py.
+        """
+        import cadre.provision as prov_mod
+
+        imported = _static_imports(prov_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "provision.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "provision.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_provision(self):
+        """cadre/engine.py and model_client.py must NOT import provision (U4)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.provision",
+            imported_engine,
+            "engine.py must not import provision (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.provision",
+            imported_mc,
+            "model_client.py must not import provision (engine-purity constraint)",
+        )
+
+    def test_verify_palette_does_not_import_engine_or_model_client(self):
+        """cadre/verify_palette.py must NOT import engine or model_client (U5).
+
+        verify_palette makes live host calls to confirm (provider, model)
+        candidates and writes ~/.cadre/palette.yaml — caller-layer, same
+        posture as provision.py/install_skill.py.
+        """
+        import cadre.verify_palette as vp_mod
+
+        imported = _static_imports(vp_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "verify_palette.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "verify_palette.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_verify_palette(self):
+        """cadre/engine.py and model_client.py must NOT import verify_palette (U5)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.verify_palette",
+            imported_engine,
+            "engine.py must not import verify_palette (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.verify_palette",
+            imported_mc,
+            "model_client.py must not import verify_palette (engine-purity constraint)",
         )
 
 

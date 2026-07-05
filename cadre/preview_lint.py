@@ -1,7 +1,7 @@
 """Caller-layer palette and focus validation for fleet previews.
 
-Caller-layer only: imported by ``skills/cadre-fleet/run.py`` and
-``fleet_engine/cli.py``. NEVER imported by ``engine.py``, ``model_client.py``,
+Caller-layer only: imported by ``cadre/data/skill/run.py`` and
+``cadre/cli.py``. NEVER imported by ``engine.py``, ``model_client.py``,
 or ``config.py`` (R8). Those modules must stay palette-free so the engine
 remains a pure, host-agnostic computation.
 
@@ -26,8 +26,8 @@ from typing import Optional
 
 import yaml
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.text_safety import sanitize as _sanitize  # shared trust boundary (GH #23)
+from cadre.config import FleetConfig
+from cadre.text_safety import sanitize as _sanitize  # shared trust boundary (GH #23)
 
 # Default palette location — mirrors the CADRE_RUN_DIR convention in capture.py.
 DEFAULT_PALETTE_PATH = "~/.cadre/palette.yaml"
@@ -314,7 +314,7 @@ def render_preview_warnings(
             # approval surface (the same invariant render.py enforces for CADRE_RUN_DIR
             # paths in breadcrumbs).
             f"palette validation skipped — no palette at {_sanitize(str(resolved_path))}; "
-            "run `spikes/verify_aiagent_providers.py write_palette` to generate one"
+            "run `cadre verify-palette` to generate one"
         )
         # U6: if focus_warnings, prepend a ⚠ block for focus-lint even without a palette.
         if focus_warnings:

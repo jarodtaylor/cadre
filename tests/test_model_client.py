@@ -2,7 +2,7 @@ import sys
 import types
 import unittest
 
-from fleet_engine.model_client import ModelClient
+from cadre.model_client import ModelClient
 
 
 class FakeAgent:

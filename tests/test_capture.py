@@ -1,4 +1,4 @@
-"""Tests for fleet_engine.capture.save_run (U2).
+"""Tests for cadre.capture.save_run (U2).
 
 All tests inject a tempfile.mkdtemp() run_dir and never touch ~/.cadre.
 Fixtures build FleetResult/AgentResult directly — no live model calls.
@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.capture import (
+from cadre.capture import (
     _safe_role,
     _specialist_md,
     _synthesis_md,
@@ -26,12 +26,13 @@ from fleet_engine.capture import (
     save_prompt,
     save_run,
 )
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, FleetStatus, run_fleet
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import resolve
-from fleet_engine.progress_runner import run_with_progress
-from fleet_engine.render import render_result
+from cadre.config import FleetConfig
+from cadre.engine import FleetResult, FleetStatus, run_fleet
+from cadre.model_client import AgentResult
+from cadre.personas import resolve
+from cadre.progress_runner import run_with_progress
+from cadre.render import render_result
+from cadre.resources import fleets_dir
 from tests.test_engine import RoundAwareFakeClient, _derive_status, _iterative_config
 
 
@@ -639,7 +640,7 @@ class TestResolveRunDirPure(unittest.TestCase):
     def test_resolve_run_dir_does_not_create_directory(self):
         """resolve_run_dir must NOT create the directory it returns."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
                 result = resolve_run_dir("pure resolver test")
         self.assertFalse(result.exists(), "resolve_run_dir must not create the directory")
@@ -655,7 +656,7 @@ class TestResolveRunDirPure(unittest.TestCase):
     def test_same_second_returns_same_base(self):
         """Two calls in the same second return the same base path (no collision logic)."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
                 first = resolve_run_dir("collision test")
                 second = resolve_run_dir("collision test")
@@ -678,7 +679,7 @@ class TestPrepareRunDirAtomicReservation(unittest.TestCase):
     def test_two_calls_same_task_return_distinct_created_dirs(self):
         """Two same-second default-path calls get two distinct, already-created dirs."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
                 first = prepare_run_dir("collision test")
                 second = prepare_run_dir("collision test")
@@ -693,7 +694,7 @@ class TestPrepareRunDirAtomicReservation(unittest.TestCase):
     def test_first_call_creates_dir(self):
         """prepare_run_dir creates the directory it returns."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
                 result = prepare_run_dir("basic creation test")
         self.assertTrue(result.exists())
@@ -703,7 +704,7 @@ class TestPrepareRunDirAtomicReservation(unittest.TestCase):
         nested_root = self.tmp / "cadre" / "runs"
         # Don't pre-create nested_root — simulate a fresh host
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(nested_root)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(nested_root)):
             with patch.dict(os.environ, env_without, clear=True):
                 result = prepare_run_dir("first ever run")
         self.assertTrue(result.exists(), "run_dir must be created even when parents are missing")
@@ -728,7 +729,7 @@ class TestPrepareRunDirAtomicReservation(unittest.TestCase):
         """prepare_run_dir creates directories owner-only."""
         import stat as stat_mod
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp)):
             with patch.dict(os.environ, env_without, clear=True):
                 result = prepare_run_dir("perm test")
         mode = stat_mod.S_IMODE(result.stat().st_mode)
@@ -1007,7 +1008,7 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
         return ro_dir
 
     def test_read_only_injected_dir_returns_nonzero(self):
-        from fleet_engine.cli import run_command
+        from cadre.cli import run_command
         ro_dir = self._make_readonly("readonly")
 
         from tests.test_cli import FakeClient
@@ -1017,7 +1018,7 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
         self.assertNotEqual(code, 0, "should return non-zero for unwritable dir")
 
     def test_read_only_injected_dir_makes_zero_model_calls(self):
-        from fleet_engine.cli import run_command
+        from cadre.cli import run_command
         ro_dir = self._make_readonly("readonly2")
 
         from tests.test_cli import FakeClient
@@ -1027,7 +1028,7 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
         self.assertEqual(len(client.calls), 0, "no model calls should be made (fail-fast)")
 
 
-EXAMPLE = "fleets/research-swarm.example.yaml"
+EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -1886,8 +1887,8 @@ class TestRunTitleRename(unittest.TestCase):
     def test_stamp_regex_matches_real_prepare_run_dir_leaf(self):
         """Coupling guard: the rename's stamp prefix must match what prepare_run_dir
         actually produces, so the regex can't silently drift from the strftime format."""
-        from fleet_engine.capture import _STAMP_RE
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.root)):
+        from cadre.capture import _STAMP_RE
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.root)):
             created = prepare_run_dir("a real task title")
         self.assertIsNotNone(
             _STAMP_RE.match(created.name),

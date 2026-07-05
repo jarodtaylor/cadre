@@ -1,6 +1,6 @@
 """Edge orchestration: drive a fleet run with live progress + incremental capture.
 
-Both entry points — ``cli.py`` and ``skills/cadre-fleet/run.py`` — share this so
+Both entry points — ``cli.py`` and ``cadre/data/skill/run.py`` — share this so
 they behave IDENTICALLY (the U4 verification). It builds the breadcrumb renderer
 (always) and wires per-lane capture (when a ``run_dir`` is given), emits the
 edge-only events the engine can't know (validated, run folder, completion), runs
@@ -20,12 +20,12 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from fleet_engine.capture import lane_filename_map, round_subdir, save_lane, save_prompt
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, run_fleet
-from fleet_engine.model_client import ModelClient
-from fleet_engine.progress import Completion, LaneDone, RoundStarted, RunFolder, Validated
-from fleet_engine.render import ProgressRenderer
+from cadre.capture import lane_filename_map, round_subdir, save_lane, save_prompt
+from cadre.config import FleetConfig
+from cadre.engine import FleetResult, run_fleet
+from cadre.model_client import ModelClient
+from cadre.progress import Completion, LaneDone, RoundStarted, RunFolder, Validated
+from cadre.render import ProgressRenderer
 
 
 def run_with_progress(

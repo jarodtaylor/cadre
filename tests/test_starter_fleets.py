@@ -10,27 +10,30 @@ are example assignments the operator swaps from their own palette, so palette
 warnings are expected on any dev host without a matching ``~/.cadre/palette.yaml``.
 Only the focus-grounding lint must be zero.
 
-Paths are resolved relative to the repo root (``tests/../fleets/``), following
-the ``_EXAMPLE_FLEET`` pattern in ``test_render.py``.
+Paths are resolved via ``cadre.resources`` (package data under
+``cadre/data/fleets/``), which works identically in dev (repo root, no
+install) and installed (wheel data) — see the ``_EXAMPLE_FLEET`` pattern in
+``test_render.py``.
 """
 
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.personas import resolve
-from fleet_engine.preview_lint import check_focus_grounding
+from cadre.config import FleetConfig
+from cadre.personas import resolve
+from cadre.preview_lint import check_focus_grounding
+from cadre.resources import fleets_dir, personas_dir
 
-_REPO = Path(__file__).resolve().parents[1]
-_RESEARCH_SWARM = _REPO / "fleets" / "research-swarm.example.yaml"
-_CODE_REVIEW = _REPO / "fleets" / "code-review.example.yaml"
-_DOC_REVIEW = _REPO / "fleets" / "doc-review.example.yaml"
-_REVIEW_SCORING = _REPO / "fleets" / "review-scoring.example.yaml"
-_RESEARCH_BRIEF = _REPO / "fleets" / "research-brief.example.yaml"
-_DEBATE = _REPO / "fleets" / "debate.example.yaml"
-_CRITIQUE_REVISE = _REPO / "fleets" / "critique-revise.example.yaml"
+_FLEETS_DIR = fleets_dir()
+_PERSONAS_DIR = personas_dir()
+_RESEARCH_SWARM = _FLEETS_DIR / "research-swarm.example.yaml"
+_CODE_REVIEW = _FLEETS_DIR / "code-review.example.yaml"
+_DOC_REVIEW = _FLEETS_DIR / "doc-review.example.yaml"
+_REVIEW_SCORING = _FLEETS_DIR / "review-scoring.example.yaml"
+_RESEARCH_BRIEF = _FLEETS_DIR / "research-brief.example.yaml"
+_DEBATE = _FLEETS_DIR / "debate.example.yaml"
+_CRITIQUE_REVISE = _FLEETS_DIR / "critique-revise.example.yaml"
 
 # The five review lenses doc-review ports from ce-doc-review, in fleet order.
 _DOC_REVIEW_ROLES = ["coherence", "feasibility", "scope-guardian", "product", "adversarial"]
@@ -236,7 +239,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
         grounding check only applies to retrieval-toolset lanes. A non-empty
         retrieval toolset on any reviewer lane would require a sourcing term.
         """
-        from fleet_engine.preview_lint import RETRIEVAL_TOOLSETS
+        from cadre.preview_lint import RETRIEVAL_TOOLSETS
 
         cfg = FleetConfig.load(_CODE_REVIEW)
         for spec in cfg.specialists:
@@ -260,7 +263,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
         against the real repo pool (not /unused — that would raise).
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
-        resolve(cfg, str(_REPO / "personas"))
+        resolve(cfg, str(_PERSONAS_DIR))
         warnings = check_focus_grounding(cfg)
         self.assertEqual(
             warnings,
@@ -426,7 +429,7 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
         """
         cfg = FleetConfig.load(_DOC_REVIEW)
         # Must not raise — pool exists and all five persona files are present.
-        resolve(cfg, str(_REPO / "personas"))
+        resolve(cfg, str(_PERSONAS_DIR))
         for spec in cfg.specialists:
             self.assertTrue(
                 spec.persona,
@@ -445,7 +448,7 @@ class TestDocReviewFleetInvariants(unittest.TestCase):
             )
             # Assert exact contents — not just non-empty — so a resolver regression
             # that returns the wrong persona file fails rather than silently passes.
-            expected_text = (_REPO / "personas" / (spec.persona + ".md")).read_text(encoding="utf-8")
+            expected_text = (_PERSONAS_DIR / (spec.persona + ".md")).read_text(encoding="utf-8")
             self.assertEqual(
                 spec.effective_instruction,
                 expected_text,
@@ -913,10 +916,9 @@ class TestUntrustedContentFraming(unittest.TestCase):
 
     def test_doc_review_personas_frame_document_as_untrusted(self):
         # doc-review lanes read the untrusted --doc document via persona files.
-        personas_dir = _REPO / "personas"
         for role in _DOC_REVIEW_ROLES:
             # persona filename convention: <role>-reviewer.md (adversarial is *-document-reviewer)
-            candidates = list(personas_dir.glob(f"{role}*reviewer.md"))
+            candidates = list(_PERSONAS_DIR.glob(f"{role}*reviewer.md"))
             self.assertTrue(candidates, f"no persona file for {role}")
             text = candidates[0].read_text(encoding="utf-8").lower()
             self.assertIn("untrusted", text, f"{role} persona missing untrusted framing")

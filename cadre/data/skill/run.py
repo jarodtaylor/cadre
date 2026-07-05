@@ -13,27 +13,25 @@ import argparse
 import contextlib
 import sys
 import time
-from pathlib import Path
 
-# Make the repo root importable when run from the skill directory.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT))
-
-from fleet_engine.approval import (  # noqa: E402
+# The installed `cadre` package is importable directly (R15) — this runner is
+# executed by the Hermes venv Python, which is the same interpreter `cadre`
+# was pip-installed into (KTD2); no repo-relative sys.path bootstrap needed.
+from cadre.approval import (
     consume_approval,
     default_approval_path,
     surface_digest,
     write_approval,
 )
-from fleet_engine.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
-from fleet_engine.config import ConfigError, FleetConfig  # noqa: E402
-from fleet_engine.file_input import MAX_FILE_BYTES, compose  # noqa: E402
-from fleet_engine.model_client import ModelClient  # noqa: E402
-from fleet_engine.personas import default_pool_dir, resolve  # noqa: E402
-from fleet_engine.preview_lint import render_preview_warnings  # noqa: E402
-from fleet_engine.progress_runner import run_with_progress  # noqa: E402
-from fleet_engine.text_safety import sanitize as _sanitize  # noqa: E402  (GH #23)
-from fleet_engine.render import (  # noqa: E402
+from cadre.capture import prepare_run_dir, resolved_hermes_home, save_run
+from cadre.config import ConfigError, FleetConfig
+from cadre.file_input import MAX_FILE_BYTES, compose
+from cadre.model_client import ModelClient
+from cadre.personas import default_pool_dir, resolve
+from cadre.preview_lint import render_preview_warnings
+from cadre.progress_runner import run_with_progress
+from cadre.text_safety import sanitize as _sanitize  # GH #23
+from cadre.render import (
     render_composed_task,
     render_file_inputs,
     render_fleet_preview,
@@ -111,8 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(
             f"Could not read fleet spec '{args.fleet}': {exc}\n"
-            "Pass a specific .yaml file (not a directory). Copy one from the repo's "
-            "fleets/ into ~/.cadre/fleets/, or compose one from ~/.cadre/palette.yaml."
+            "Pass a specific .yaml file (not a directory). List ~/.cadre/fleets/ for "
+            "a curated fleet (seeded by `cadre setup`), or compose one from "
+            "~/.cadre/palette.yaml."
         )
         return 1
 
@@ -194,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     # profile. consume_approval unlinks the token before reading, so one-shot
     # holds even for a mismatch (a burned attempt forces a fresh --preview).
     # Fail-closed: absent / mismatched / expired all refuse. The direct-human
-    # `python -m fleet_engine.cli` runner is intentionally NOT gated (a human
+    # `python -m cadre.cli` runner is intentionally NOT gated (a human
     # invoking it IS the operator); this binding scopes to the agent handoff.
     token = consume_approval()
     expected_digest = _surface_digest_for(cfg, composed_task)

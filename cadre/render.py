@@ -16,11 +16,11 @@ import threading
 import time
 from typing import Callable, Optional
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.text_safety import frame_body, sanitize
-from fleet_engine.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
-from fleet_engine.judge_grade import parse_grades
-from fleet_engine.progress import (
+from cadre.config import FleetConfig
+from cadre.text_safety import frame_body, sanitize
+from cadre.engine import DEFAULT_CALL_TIMEOUT, FleetResult, FleetStatus, CHAIN_STAGE_TOKEN_CAP, CHARS_PER_TOKEN
+from cadre.judge_grade import parse_grades
+from cadre.progress import (
     Completion,
     JudgeDone,
     JudgeStarted,
@@ -72,7 +72,7 @@ def _cost_warning(provider: str, model: str) -> str | None:
     return "  ⚠ bills at API rates inside Hermes"
 
 
-# The sanitizer now lives in fleet_engine.text_safety (GH #23 — a shared trust
+# The sanitizer now lives in cadre.text_safety (GH #23 — a shared trust
 # boundary imported across modules deserves a public home). Keep the private
 # alias so render's in-file call sites and any legacy importer keep working.
 _sanitize = sanitize

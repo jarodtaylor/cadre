@@ -1,6 +1,6 @@
 """Capture module — write a run folder with per-specialist markdown and a JSON manifest.
 
-This is a caller-layer module: imported only by cli.py and skills/cadre-fleet/run.py.
+This is a caller-layer module: imported only by cli.py and cadre/data/skill/run.py.
 NEVER imported by engine.py or model_client.py — the engine holds no file I/O.
 
 Incremental capture split (U3):
@@ -33,10 +33,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, FleetStatus
-from fleet_engine.judge_grade import parse_grades
-from fleet_engine.text_safety import frame_body, sanitize as _sanitize
+from cadre.config import FleetConfig
+from cadre.engine import FleetResult, FleetStatus
+from cadre.judge_grade import parse_grades
+from cadre.text_safety import frame_body, sanitize as _sanitize
 
 # Default Hermes profile location — recorded in the manifest and shown in the
 # fleet preview when HERMES_HOME is unset.

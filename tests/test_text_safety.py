@@ -1,4 +1,4 @@
-"""Tests for fleet_engine.text_safety.sanitize (promoted from render._sanitize, GH #23).
+"""Tests for cadre.text_safety.sanitize (promoted from render._sanitize, GH #23).
 
 Guards the behavior contract the whole trust surface depends on: control/escape
 bytes stripped, bidi/line-sep stripped, legitimate content byte-identical, and
@@ -7,7 +7,7 @@ bytes stripped, bidi/line-sep stripped, legitimate content byte-identical, and
 
 import unittest
 
-from fleet_engine.text_safety import BODY_GUTTER, frame_body, sanitize
+from cadre.text_safety import BODY_GUTTER, frame_body, sanitize
 
 
 class TestSanitizeStripsControlBytes(unittest.TestCase):
@@ -89,7 +89,7 @@ class TestSanitizeAliasedFromRender(unittest.TestCase):
     def test_render_private_alias_is_the_same_callable(self):
         # render._sanitize must remain a working alias so its in-file call sites
         # and any legacy importer keep working after the #23 move.
-        from fleet_engine.render import _sanitize as render_sanitize
+        from cadre.render import _sanitize as render_sanitize
 
         self.assertIs(render_sanitize, sanitize)
 
