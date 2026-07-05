@@ -529,10 +529,10 @@ class TestStandaloneScriptImport(unittest.TestCase):
     """Regression (live dogfood, 2026-06-20): run as a standalone script
     (`python spikes/verify_aiagent_providers.py`, how install.sh invokes it),
     spikes/ is on sys.path[0] but the repo root is NOT, so write_palette's
-    `from fleet_engine.config import SAFE_TOOLSETS` raised ModuleNotFoundError.
+    `from cadre.config import SAFE_TOOLSETS` raised ModuleNotFoundError.
     The module now inserts the repo root itself."""
 
-    def test_write_palette_imports_fleet_engine_without_repo_root_on_path(self):
+    def test_write_palette_imports_cadre_without_repo_root_on_path(self):
         import subprocess
 
         repo_root = Path(__file__).resolve().parents[1]
@@ -550,7 +550,7 @@ class TestStandaloneScriptImport(unittest.TestCase):
             "print('OK')\n"
         )
         # `-I` (isolated): does NOT prepend cwd/'' to sys.path and ignores
-        # PYTHONPATH, so fleet_engine is importable ONLY via the spike's own
+        # PYTHONPATH, so cadre is importable ONLY via the spike's own
         # repo-root insertion — reproducing the standalone-script condition.
         result = subprocess.run(
             [sys.executable, "-I", "-c", driver],

@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/file_input.py — the caller-layer file reader/composer (U1).
+"""Tests for cadre/file_input.py — the caller-layer file reader/composer (U1).
 
 Test-first: the failure modes (missing / oversize / non-UTF-8 / ~-path) are the
 load-bearing behavior. All tests use a real temporary directory so the read site
@@ -16,8 +16,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fleet_engine.config import ConfigError
-from fleet_engine.file_input import MAX_FILE_BYTES, compose
+from cadre.config import ConfigError
+from cadre.file_input import MAX_FILE_BYTES, compose
 
 
 def _write(path: str, data, *, binary: bool = False) -> None:

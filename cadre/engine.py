@@ -45,9 +45,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from fleet_engine.config import FleetConfig, SpecialistSpec
-from fleet_engine.model_client import AgentResult, ModelClient
-from fleet_engine.progress import (
+from cadre.config import FleetConfig, SpecialistSpec
+from cadre.model_client import AgentResult, ModelClient
+from cadre.progress import (
     JudgeDone,
     JudgeStarted,
     LaneDone,

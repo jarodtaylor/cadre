@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/preview_lint.py — palette validation (U5) and focus lint (U6).
+"""Tests for cadre/preview_lint.py — palette validation (U5) and focus lint (U6).
 
 All tests are hermetic: palette files are written to tempfile.mkdtemp() (never
 ~/.cadre), and CADRE_PALETTE is patched via patch.dict so tests don't leak env
@@ -28,9 +28,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fleet_engine.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
-from fleet_engine.personas import resolve
-from fleet_engine.preview_lint import (
+from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
+from cadre.personas import resolve
+from cadre.preview_lint import (
     DEFAULT_PALETTE_PATH,
     RETRIEVAL_TOOLSETS,
     Palette,
@@ -335,7 +335,7 @@ class TestLoadPalettePathResolution(unittest.TestCase):
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_PALETTE"}
         missing = str(self.tmp / "definitely-missing-palette.yaml")
         with patch.dict(os.environ, env_without, clear=True), \
-                patch("fleet_engine.preview_lint.DEFAULT_PALETTE_PATH", missing):
+                patch("cadre.preview_lint.DEFAULT_PALETTE_PATH", missing):
             result = load_palette(None)
         self.assertIsNone(result)
 
@@ -1022,7 +1022,7 @@ class TestCheckFocusGroundingReadsPersonaInstruction(unittest.TestCase):
 
     def _persona_config(self, name: str, toolset=None) -> FleetConfig:
         """Build a single-specialist collect config using a named persona."""
-        from fleet_engine.personas import resolve as _resolve
+        from cadre.personas import resolve as _resolve
         if toolset is None:
             toolset = ["web"]
         cfg = FleetConfig(
@@ -1243,7 +1243,7 @@ class TestR8EnginePurity(unittest.TestCase):
 
     def _module_source(self, name: str) -> str:
         import importlib
-        spec = importlib.util.find_spec(f"fleet_engine.{name}")
+        spec = importlib.util.find_spec(f"cadre.{name}")
         return Path(spec.origin).read_text(encoding="utf-8")
 
     def test_engine_does_not_import_preview_lint(self):

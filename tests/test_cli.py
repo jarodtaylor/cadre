@@ -15,13 +15,13 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
-from fleet_engine.approval import consume_approval, surface_digest, write_approval
-from fleet_engine.capture import _slugify, resolve_run_dir, resolved_hermes_home
-from fleet_engine.cli import main as cli_main, run_command, validate_command
-from fleet_engine.config import FleetConfig
-from fleet_engine.file_input import compose
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import default_pool_dir, resolve
+from cadre.approval import consume_approval, surface_digest, write_approval
+from cadre.capture import _slugify, resolve_run_dir, resolved_hermes_home
+from cadre.cli import main as cli_main, run_command, validate_command
+from cadre.config import FleetConfig
+from cadre.file_input import compose
+from cadre.model_client import AgentResult
+from cadre.personas import default_pool_dir, resolve
 
 EXAMPLE = "fleets/research-swarm.example.yaml"
 
@@ -254,7 +254,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "writerun"
         client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
 
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
         # The run itself succeeded — exit code 0, synthesis visible
@@ -266,7 +266,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "writerun2"
         client = FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
 
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
         self.assertEqual(code, 1)  # run failed → non-zero even if save_run also failed
@@ -277,7 +277,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         run_dir = self.tmp / "passed-in"
         sentinel = Path("/cadre-sentinel/2026-06-29-150719-renamed-by-title")
         client = FakeClient({"synthesizer": ("ok", "S")})
-        with patch("fleet_engine.cli.save_run", return_value=sentinel):
+        with patch("cadre.cli.save_run", return_value=sentinel):
             _, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
         self.assertIn(f"Run folder: {sentinel}", out)
         self.assertNotIn(f"Run folder: {run_dir}", out)
@@ -308,7 +308,7 @@ class TestRunCaptureUmaskParentDirs(unittest.TestCase):
     def test_default_path_parent_dirs_are_0o700(self):
         """When CADRE_RUN_DIR is unset, the auto-created default root is 0o700."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_RUN_DIR"}
-        with patch("fleet_engine.capture._DEFAULT_RUNS_ROOT", str(self.tmp / "cadre" / "runs")):
+        with patch("cadre.capture._DEFAULT_RUNS_ROOT", str(self.tmp / "cadre" / "runs")):
             with patch.dict(os.environ, env_without, clear=True):
                 client = FakeClient({"synthesizer": ("ok", "SYNTH")})
                 run_command(EXAMPLE, "find tools", client=client)
@@ -1348,7 +1348,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         # print() must not raise out of run_command and cost the (already computed)
         # report.
         client = FakeClient({"synthesizer": ("ok", "MY SYNTHESIS")})
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, output = run_command(
                 EXAMPLE, "task", client=client,
                 run_dir=self.tmp / "r2", progress_stream=_BrokenStream(),
@@ -1362,7 +1362,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
         # second line.
         prog = io.StringIO()
         client = FakeClient({"synthesizer": ("ok", "S")})
-        with patch("fleet_engine.cli.save_run", side_effect=OSError("disk full\n[cadre] forged")):
+        with patch("cadre.cli.save_run", side_effect=OSError("disk full\n[cadre] forged")):
             run_command(EXAMPLE, "task", client=client, run_dir=self.tmp / "r3", progress_stream=prog)
         text = prog.getvalue()
         self.assertIn("[cadre] warn: failed to save run artifacts:", text)
@@ -1380,7 +1380,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def test_save_lane_failure_warns_and_run_succeeds(self):
-        from fleet_engine.capture import save_lane as real_save_lane
+        from cadre.capture import save_lane as real_save_lane
 
         def flaky(lane, filename, run_dir):
             if lane.role == "web":
@@ -1390,7 +1390,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
         prog = io.StringIO()
         run_dir = self.tmp / "r"
         client = FakeClient({"synthesizer": ("ok", "SYNTH")})
-        with patch("fleet_engine.progress_runner.save_lane", flaky):
+        with patch("cadre.progress_runner.save_lane", flaky):
             code, output = run_command(
                 EXAMPLE, "task", client=client, run_dir=run_dir, progress_stream=prog,
             )
@@ -1739,7 +1739,7 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
 
 
 class TestCLIDocFlag(unittest.TestCase):
-    """fleet_engine/cli.py `run --doc`: read named files into the task (#26).
+    """cadre/cli.py `run --doc`: read named files into the task (#26).
 
     Drives cli.main() so the argparse wiring (--doc; --task now optional) and the
     at-least-one guard are exercised end-to-end. A prompt-capturing client (via a
@@ -1758,7 +1758,7 @@ class TestCLIDocFlag(unittest.TestCase):
     def _run(self, argv, fake=None):
         fake = fake if fake is not None else _PromptCapturingClient()
         buf = io.StringIO()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with contextlib.redirect_stdout(buf):
                 code = cli_main(argv)
         return code, fake, buf.getvalue()
@@ -1804,11 +1804,11 @@ class TestCLIDocFlag(unittest.TestCase):
     def test_oversize_doc_run_warns_on_stderr(self):
         """A non-preview run with an oversize --doc warns the operator on stderr that
         the review runs over a partial file (cli has no preview to disclose it)."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
         fake = _PromptCapturingClient()
         err = io.StringIO()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with contextlib.redirect_stderr(err):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = cli_main(["run", EXAMPLE, "--doc", big, "--no-capture"])
@@ -1822,7 +1822,7 @@ class TestCLIDocFlag(unittest.TestCase):
         doc = self._doc("plan.md", "CAPTURED_DOC_BODY")
         run_dir = self.tmp / "run"
         fake = _PromptCapturingClient()
-        with patch("fleet_engine.cli.ModelClient", return_value=fake):
+        with patch("cadre.cli.ModelClient", return_value=fake):
             with patch.dict(os.environ, {"CADRE_RUN_DIR": str(run_dir)}):
                 with contextlib.redirect_stdout(io.StringIO()):
                     code = cli_main(["run", EXAMPLE, "--task", "review", "--doc", doc])
@@ -1962,7 +1962,7 @@ class TestSkillDocFlag(unittest.TestCase):
     def test_oversize_doc_run_warns_on_stderr(self):
         """A non-preview skill run with an oversize --doc warns on stderr (run path has
         no preview gate to disclose the partial-file truncation)."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self._doc("huge.md", "x" * (MAX_FILE_BYTES + 4096))
         run_argv = ["--fleet", _EXAMPLE_FLEET, "--doc", big, "--no-capture"]
         fake = _PromptCapturingClient()
@@ -1984,7 +1984,7 @@ class TestSkillDocFlag(unittest.TestCase):
         """The preview discloses that an oversize --doc will be reviewed only partially.
         The in-block truncation note is model-facing; the human-approval surface must
         surface it too (cross-model review finding), still with zero model calls."""
-        from fleet_engine.file_input import MAX_FILE_BYTES
+        from cadre.file_input import MAX_FILE_BYTES
         big = self.tmp / "huge.md"
         big.write_text("x" * (MAX_FILE_BYTES + 4096), encoding="utf-8")
         fake_client_cls = MagicMock()

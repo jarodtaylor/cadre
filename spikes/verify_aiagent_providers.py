@@ -50,7 +50,7 @@ import yaml
 
 # When run as a standalone script (`python spikes/verify_aiagent_providers.py` —
 # how install.sh invokes it), Python puts spikes/ on sys.path[0], NOT the repo
-# root, so write_palette's lazy `from fleet_engine.config import ...` fails with
+# root, so write_palette's lazy `from cadre.config import ...` fails with
 # ModuleNotFoundError. Insert the repo root so it resolves whether run as a script
 # or imported. Mirrors skills/cadre-fleet/run.py. (Dev tests never hit this: they
 # run via `python -m unittest` from the repo root, which is already on sys.path.)
@@ -216,7 +216,7 @@ def write_palette(
     """Write the verified palette to ``path`` as owner-only YAML (0o600).
 
     Filters ``records`` to only ``ok=True`` pairs. Intersects ``toolsets`` with
-    ``fleet_engine.config.SAFE_TOOLSETS``, preserving input order (list
+    ``cadre.config.SAFE_TOOLSETS``, preserving input order (list
     comprehension, not set intersection — order is locked by the downstream
     schema). Raises ValueError (before any filesystem side-effects) if there are
     zero ok records.
@@ -240,8 +240,8 @@ def write_palette(
         ValueError: If there are no ``ok=True`` records (nothing to write).
     """
     # Import here to keep the lazy-import discipline consistent with _agent,
-    # and so this module stays importable on the dev box without fleet_engine.
-    from fleet_engine.config import SAFE_TOOLSETS  # noqa: PLC0415
+    # and so this module stays importable on the dev box without cadre.
+    from cadre.config import SAFE_TOOLSETS  # noqa: PLC0415
 
     # Validate BEFORE any side effects — zero ok records → don't write anything.
     ok_records = [r for r in records if r.ok]

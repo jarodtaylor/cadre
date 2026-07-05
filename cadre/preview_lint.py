@@ -1,7 +1,7 @@
 """Caller-layer palette and focus validation for fleet previews.
 
 Caller-layer only: imported by ``skills/cadre-fleet/run.py`` and
-``fleet_engine/cli.py``. NEVER imported by ``engine.py``, ``model_client.py``,
+``cadre/cli.py``. NEVER imported by ``engine.py``, ``model_client.py``,
 or ``config.py`` (R8). Those modules must stay palette-free so the engine
 remains a pure, host-agnostic computation.
 
@@ -26,8 +26,8 @@ from typing import Optional
 
 import yaml
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.text_safety import sanitize as _sanitize  # shared trust boundary (GH #23)
+from cadre.config import FleetConfig
+from cadre.text_safety import sanitize as _sanitize  # shared trust boundary (GH #23)
 
 # Default palette location — mirrors the CADRE_RUN_DIR convention in capture.py.
 DEFAULT_PALETTE_PATH = "~/.cadre/palette.yaml"

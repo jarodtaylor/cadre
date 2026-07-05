@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from fleet_engine.config import MAX_ROUNDS, ConfigError, FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
+from cadre.config import MAX_ROUNDS, ConfigError, FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 
 
 def make_data(**overrides):

@@ -1,7 +1,7 @@
 """resolve_venv.py — Resolve the Hermes venv Python path, scaffold ~/.cadre, and record it.
 
 This script is the ONLY unit-tested piece of the U4 install. It is pure stdlib,
-importable on the dev machine (no hermes-agent, no fleet_engine import needed).
+importable on the dev machine (no hermes-agent, no cadre import needed).
 
 Five exported functions:
   resolve_venv(override, *, probe_paths, env)  — pure resolver, no I/O

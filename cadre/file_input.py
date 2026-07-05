@@ -1,6 +1,6 @@
 """Caller-layer file reader and composer for ``--doc`` inputs.
 
-Caller-layer only: imported by ``fleet_engine/cli.py`` and
+Caller-layer only: imported by ``cadre/cli.py`` and
 ``skills/cadre-fleet/run.py``. NEVER imported by ``engine.py`` or
 ``model_client.py`` — the engine receives only the finished task *string* and
 gains no file I/O (the import-isolation guard in ``tests/test_personas.py``
@@ -34,7 +34,7 @@ import codecs
 import os
 import stat
 
-from fleet_engine.config import ConfigError
+from cadre.config import ConfigError
 
 # Cap on bytes injected per ``--doc`` file. A reviewer's plan/diff is well under
 # this; the cap exists so a stray huge or binary path cannot inject an unbounded

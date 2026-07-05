@@ -19,9 +19,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.personas import resolve
-from fleet_engine.preview_lint import check_focus_grounding
+from cadre.config import FleetConfig
+from cadre.personas import resolve
+from cadre.preview_lint import check_focus_grounding
 
 _REPO = Path(__file__).resolve().parents[1]
 _RESEARCH_SWARM = _REPO / "fleets" / "research-swarm.example.yaml"
@@ -236,7 +236,7 @@ class TestStarterFleetsLintClean(unittest.TestCase):
         grounding check only applies to retrieval-toolset lanes. A non-empty
         retrieval toolset on any reviewer lane would require a sourcing term.
         """
-        from fleet_engine.preview_lint import RETRIEVAL_TOOLSETS
+        from cadre.preview_lint import RETRIEVAL_TOOLSETS
 
         cfg = FleetConfig.load(_CODE_REVIEW)
         for spec in cfg.specialists:

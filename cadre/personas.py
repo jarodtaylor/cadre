@@ -1,6 +1,6 @@
 """Caller-layer persona resolver.
 
-Caller-layer only: imported by ``fleet_engine/cli.py`` and
+Caller-layer only: imported by ``cadre/cli.py`` and
 ``skills/cadre-fleet/run.py``. NEVER imported by ``engine.py`` or
 ``model_client.py`` — the engine receives only the resolved
 ``effective_instruction`` string and gains no file I/O or fleet-domain
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 
-from fleet_engine.config import ConfigError, FleetConfig
+from cadre.config import ConfigError, FleetConfig
 
 # Default persona pool location — mirrors the CADRE_PALETTE / CADRE_RUN_DIR
 # pattern.  Override in tests via CADRE_PERSONAS_DIR to avoid touching home.

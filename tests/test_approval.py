@@ -1,4 +1,4 @@
-"""Tests for fleet_engine/approval.py.
+"""Tests for cadre/approval.py.
 
 U1 — surface_digest: a pure function binding the full previewed run surface
 (the whole resolved FleetConfig, the composed task, and the resolved profile
@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fleet_engine.approval import (
+from cadre.approval import (
     DEFAULT_APPROVAL_PATH,
     ApprovalToken,
     consume_approval,
@@ -27,7 +27,7 @@ from fleet_engine.approval import (
     surface_digest,
     write_approval,
 )
-from fleet_engine.config import FleetConfig
+from cadre.config import FleetConfig
 
 
 # ---------------------------------------------------------------------------

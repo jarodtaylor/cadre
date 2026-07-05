@@ -25,9 +25,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fleet_engine.capture import save_run
-from fleet_engine.engine import FleetStatus, run_fleet
-from fleet_engine.render import render_result
+from cadre.capture import save_run
+from cadre.engine import FleetStatus, run_fleet
+from cadre.render import render_result
 from tests.test_engine import (
     FakeClient,
     _chain_config,

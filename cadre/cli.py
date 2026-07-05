@@ -1,12 +1,12 @@
 """Standalone CLI: ``validate`` a fleet spec and ``run`` it on a task.
 
 This is the no-Hermes entry surface — it enables the baseline gut-check and
-dogfooding. Rendering lives in ``fleet_engine.render``, shared with the skill.
+dogfooding. Rendering lives in ``cadre.render``, shared with the skill.
 Usage:
 
-    python -m fleet_engine.cli validate fleets/research-swarm.yaml
-    python -m fleet_engine.cli run fleets/research-swarm.yaml --task "..."
-    python -m fleet_engine.cli run fleets/research-swarm.yaml --task "..." --no-capture
+    python -m cadre.cli validate fleets/research-swarm.yaml
+    python -m cadre.cli run fleets/research-swarm.yaml --task "..."
+    python -m cadre.cli run fleets/research-swarm.yaml --task "..." --no-capture
 """
 
 from __future__ import annotations
@@ -16,15 +16,15 @@ import contextlib
 import sys
 from pathlib import Path
 
-from fleet_engine.capture import prepare_run_dir, save_run
-from fleet_engine.config import ConfigError, FleetConfig
-from fleet_engine.file_input import MAX_FILE_BYTES, compose
-from fleet_engine.model_client import ModelClient
-from fleet_engine.personas import default_pool_dir, resolve
-from fleet_engine.preview_lint import render_preview_warnings
-from fleet_engine.progress_runner import run_with_progress
-from fleet_engine.render import render_result
-from fleet_engine.text_safety import sanitize as _sanitize
+from cadre.capture import prepare_run_dir, save_run
+from cadre.config import ConfigError, FleetConfig
+from cadre.file_input import MAX_FILE_BYTES, compose
+from cadre.model_client import ModelClient
+from cadre.personas import default_pool_dir, resolve
+from cadre.preview_lint import render_preview_warnings
+from cadre.progress_runner import run_with_progress
+from cadre.render import render_result
+from cadre.text_safety import sanitize as _sanitize
 
 
 def validate_command(path: str) -> tuple[int, str]:

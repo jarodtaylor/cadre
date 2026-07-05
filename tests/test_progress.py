@@ -11,13 +11,13 @@ import threading
 import time
 import unittest
 
-import fleet_engine.engine as engine_mod
-import fleet_engine.model_client as model_client_mod
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import run_fleet
-from fleet_engine.model_client import AgentResult
-from fleet_engine.personas import resolve
-from fleet_engine.progress import (
+import cadre.engine as engine_mod
+import cadre.model_client as model_client_mod
+from cadre.config import FleetConfig
+from cadre.engine import run_fleet
+from cadre.model_client import AgentResult
+from cadre.personas import resolve
+from cadre.progress import (
     JudgeDone,
     JudgeStarted,
     LaneDone,
@@ -311,9 +311,9 @@ class TestJudgeProgressEvents(unittest.TestCase):
 
     def test_judge_events_emitted_on_judge_run(self):
         """Engine emits JudgeStarted then JudgeDone on a successful judge fleet run."""
-        from fleet_engine.config import FleetConfig
-        from fleet_engine.engine import run_fleet
-        from fleet_engine.personas import resolve
+        from cadre.config import FleetConfig
+        from cadre.engine import run_fleet
+        from cadre.personas import resolve
 
         cfg = FleetConfig.from_dict({
             "name": "t",
@@ -338,9 +338,9 @@ class TestJudgeProgressEvents(unittest.TestCase):
 
     def test_judge_events_not_emitted_on_synthesize_run(self):
         """A synthesize fleet emits no JudgeStarted/JudgeDone events."""
-        from fleet_engine.config import FleetConfig
-        from fleet_engine.engine import run_fleet
-        from fleet_engine.personas import resolve
+        from cadre.config import FleetConfig
+        from cadre.engine import run_fleet
+        from cadre.personas import resolve
 
         cfg = FleetConfig.from_dict({
             "name": "t",
@@ -388,7 +388,7 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
     def _run_and_get_progress(self, cfg):
         """Run run_with_progress with a FakeClient and capture the progress stream."""
         from io import StringIO
-        from fleet_engine.progress_runner import run_with_progress
+        from cadre.progress_runner import run_with_progress
         prog = StringIO()
         run_with_progress(cfg, "test task", FakeClient({"synthesizer": ("ok", "S")}),
                           run_dir=None, progress_stream=prog)
@@ -431,8 +431,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
 
     def test_collect_validated_event_synthesizers_is_zero(self):
         """run_with_progress emits a Validated event with synthesizers=0 for collect."""
-        from fleet_engine.progress import Validated
-        from fleet_engine.progress_runner import run_with_progress
+        from cadre.progress import Validated
+        from cadre.progress_runner import run_with_progress
 
         # Patch ProgressRenderer to capture the Validated event directly.
         # We drive run_with_progress and intercept the emitted Validated events.
@@ -457,7 +457,7 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
             def note(self, _msg):
                 pass
 
-        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+        with _patch("cadre.progress_runner.ProgressRenderer", CapturingRenderer):
             run_with_progress(self._collect_config(), "task", FakeClient(),
                               run_dir=None, progress_stream=None)
 
@@ -466,8 +466,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
 
     def test_synthesize_validated_event_synthesizers_is_one(self):
         """run_with_progress emits a Validated event with synthesizers=1 for synthesize."""
-        from fleet_engine.progress import Validated
-        from fleet_engine.progress_runner import run_with_progress
+        from cadre.progress import Validated
+        from cadre.progress_runner import run_with_progress
         from unittest.mock import patch as _patch
 
         validated_events = []
@@ -489,7 +489,7 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
             def note(self, _msg):
                 pass
 
-        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+        with _patch("cadre.progress_runner.ProgressRenderer", CapturingRenderer):
             run_with_progress(self._synthesize_config(), "task",
                               FakeClient({"synthesizer": ("ok", "S")}),
                               run_dir=None, progress_stream=None)
@@ -520,8 +520,8 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
 
     def test_judge_validated_event_convergence_is_judge(self):
         """run_with_progress emits a Validated event with convergence='judge' for judge fleets."""
-        from fleet_engine.progress import Validated
-        from fleet_engine.progress_runner import run_with_progress
+        from cadre.progress import Validated
+        from cadre.progress_runner import run_with_progress
         from unittest.mock import patch as _patch
 
         validated_events = []
@@ -543,7 +543,7 @@ class TestValidatedBreadcrumbSynthesizerCount(unittest.TestCase):
             def note(self, _msg):
                 pass
 
-        with _patch("fleet_engine.progress_runner.ProgressRenderer", CapturingRenderer):
+        with _patch("cadre.progress_runner.ProgressRenderer", CapturingRenderer):
             run_with_progress(
                 self._judge_config(), "task",
                 FakeClient({"judge": ("ok", "JUDGE OUTPUT")}),

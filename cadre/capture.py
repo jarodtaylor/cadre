@@ -33,10 +33,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from fleet_engine.config import FleetConfig
-from fleet_engine.engine import FleetResult, FleetStatus
-from fleet_engine.judge_grade import parse_grades
-from fleet_engine.text_safety import frame_body, sanitize as _sanitize
+from cadre.config import FleetConfig
+from cadre.engine import FleetResult, FleetStatus
+from cadre.judge_grade import parse_grades
+from cadre.text_safety import frame_body, sanitize as _sanitize
 
 # Default Hermes profile location — recorded in the manifest and shown in the
 # fleet preview when HERMES_HOME is unset.
