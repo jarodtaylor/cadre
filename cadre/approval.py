@@ -1,6 +1,6 @@
 """Preview-bound approval — canonical surface digest (U1) + owner-only token store (U2).
 
-Caller-layer only: intended for ``skills/cadre-fleet/run.py`` (and ``render.py``
+Caller-layer only: intended for ``cadre/data/skill/run.py`` (and ``render.py``
 for surfacing the digest inputs). NEVER imported by ``engine.py`` or
 ``model_client.py`` — approval / trust-boundary logic is not the engine's
 concern (KTD5; ``tests/test_personas.py``'s ``TestEngineIsolation`` guards

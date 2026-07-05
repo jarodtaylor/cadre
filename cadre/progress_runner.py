@@ -1,6 +1,6 @@
 """Edge orchestration: drive a fleet run with live progress + incremental capture.
 
-Both entry points — ``cli.py`` and ``skills/cadre-fleet/run.py`` — share this so
+Both entry points — ``cli.py`` and ``cadre/data/skill/run.py`` — share this so
 they behave IDENTICALLY (the U4 verification). It builds the breadcrumb renderer
 (always) and wires per-lane capture (when a ``run_dir`` is given), emits the
 edge-only events the engine can't know (validated, run folder, completion), runs

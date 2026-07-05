@@ -326,7 +326,7 @@ class TestApprovalTokenExpiry(unittest.TestCase):
         produces this pairing — it always sets minted_at whenever ttl_seconds
         is given). is_expired treats a missing mint time as maximally stale
         (epoch 0) rather than raising, so a malformed token reads as expired —
-        fail-closed — instead of crashing the caller (skills/cadre-fleet/run.py)
+        fail-closed — instead of crashing the caller (cadre/data/skill/run.py)
         with an uncaught TypeError on `None + ttl_seconds`."""
         token = ApprovalToken(digest="d", privileged=False, ttl_seconds=60)
         self.assertTrue(token.is_expired(1000.0))

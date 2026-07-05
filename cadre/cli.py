@@ -21,6 +21,7 @@ from cadre import provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.file_input import MAX_FILE_BYTES, compose
+from cadre.install_skill import install_skill
 from cadre.model_client import ModelClient
 from cadre.personas import default_pool_dir, resolve
 from cadre.preview_lint import render_preview_warnings
@@ -247,6 +248,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    p_install_skill = sub.add_parser(
+        "install-skill",
+        help="Materialize the Hermes cadre-fleet skill into a skills directory",
+    )
+    p_install_skill.add_argument(
+        "--skills-dir",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Target Hermes skills directory (falls back to HERMES_SKILLS_DIR "
+            "if not given)"
+        ),
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "validate":
         code, out = validate_command(args.spec)
@@ -258,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         # message) — so it owns its own printing; propagate its exit code as-is
         # rather than forcing it through the (code, out); print(out) shape below.
         return verify_palette.main()
+    elif args.cmd == "install-skill":
+        code, out = install_skill(args.skills_dir)
     else:
         # A real run needs at least one of --task / --doc. Explicit exit-2 usage
         # error (not argparse's required-flag error, since --task is now optional).

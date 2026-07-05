@@ -1,6 +1,6 @@
 """Caller-layer palette and focus validation for fleet previews.
 
-Caller-layer only: imported by ``skills/cadre-fleet/run.py`` and
+Caller-layer only: imported by ``cadre/data/skill/run.py`` and
 ``cadre/cli.py``. NEVER imported by ``engine.py``, ``model_client.py``,
 or ``config.py`` (R8). Those modules must stay palette-free so the engine
 remains a pure, host-agnostic computation.

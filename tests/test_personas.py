@@ -501,6 +501,45 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import approval (KTD5 — engine-purity constraint)",
         )
 
+    def test_install_skill_does_not_import_engine_or_model_client(self):
+        """cadre/install_skill.py must NOT import engine or model_client (U6).
+
+        install_skill materializes the Hermes skill from package data — pure
+        filesystem/trust-boundary logic (reuses approval._parent_is_safe),
+        same posture as approval.py itself.
+        """
+        import cadre.install_skill as is_mod
+
+        imported = _static_imports(is_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "install_skill.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "install_skill.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_install_skill(self):
+        """cadre/engine.py and model_client.py must NOT import install_skill (U6)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.install_skill",
+            imported_engine,
+            "engine.py must not import install_skill (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.install_skill",
+            imported_mc,
+            "model_client.py must not import install_skill (engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).

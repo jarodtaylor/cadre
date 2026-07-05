@@ -41,3 +41,13 @@ def personas_dir() -> Path:
 def palette_example_path() -> Path:
     """Path to ``palette.example.yaml`` — a sibling of ``fleets/``/``personas/`` (KTD3)."""
     return data_dir() / "palette.example.yaml"
+
+
+def skill_dir() -> Path:
+    """Directory containing the shipped Hermes skill (``SKILL.md`` + ``run.py``).
+
+    ``cadre install-skill`` (``cadre/install_skill.py``) symlinks a Hermes
+    skills directory entry to this path (R15/R16) — the same dev/installed
+    parity every other ``cadre/data/`` reader gets from this module.
+    """
+    return data_dir() / "skill"

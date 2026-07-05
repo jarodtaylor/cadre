@@ -1,7 +1,7 @@
 """Caller-layer persona resolver.
 
 Caller-layer only: imported by ``cadre/cli.py`` and
-``skills/cadre-fleet/run.py``. NEVER imported by ``engine.py`` or
+``cadre/data/skill/run.py``. NEVER imported by ``engine.py`` or
 ``model_client.py`` — the engine receives only the resolved
 ``effective_instruction`` string and gains no file I/O or fleet-domain
 knowledge (KTD1).

@@ -1,7 +1,7 @@
 """Caller-layer file reader and composer for ``--doc`` inputs.
 
 Caller-layer only: imported by ``cadre/cli.py`` and
-``skills/cadre-fleet/run.py``. NEVER imported by ``engine.py`` or
+``cadre/data/skill/run.py``. NEVER imported by ``engine.py`` or
 ``model_client.py`` — the engine receives only the finished task *string* and
 gains no file I/O (the import-isolation guard in ``tests/test_personas.py``
 ``TestEngineIsolation`` enforces this; pattern:

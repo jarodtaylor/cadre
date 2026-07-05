@@ -22,7 +22,7 @@ from cadre.config import FleetConfig
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
-from cadre.resources import fleets_dir
+from cadre.resources import fleets_dir, skill_dir
 
 EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
@@ -415,12 +415,12 @@ class TestSlugify(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Skill entry (skills/cadre-fleet/run.py) capture tests
+# Skill entry (cadre/data/skill/run.py) capture tests
 # ---------------------------------------------------------------------------
 
 def _load_skill_module():
-    """Import skills/cadre-fleet/run.py as a module without running it."""
-    skill_path = Path(__file__).resolve().parents[1] / "skills" / "cadre-fleet" / "run.py"
+    """Import cadre/data/skill/run.py as a module without running it."""
+    skill_path = skill_dir() / "run.py"
     spec = importlib.util.spec_from_file_location("cadre_fleet_run", skill_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["cadre_fleet_run"] = mod
@@ -429,7 +429,7 @@ def _load_skill_module():
 
 
 class TestSkillEntryCapture(unittest.TestCase):
-    """skills/cadre-fleet/run.py captures identically to run_command."""
+    """cadre/data/skill/run.py captures identically to run_command."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1136,7 +1136,7 @@ class TestSkillTaskRequiredForRealRun(unittest.TestCase):
 
 
 class TestSkillFleetErrorPaths(unittest.TestCase):
-    """Error-path tests for skills/cadre-fleet/run.py main(): nonexistent file,
+    """Error-path tests for cadre/data/skill/run.py main(): nonexistent file,
     invalid YAML, and directory path all return 1 cleanly."""
 
     def setUp(self):
@@ -1840,7 +1840,7 @@ class TestCLIDocFlag(unittest.TestCase):
 
 
 class TestSkillDocFlag(unittest.TestCase):
-    """skills/cadre-fleet/run.py --doc: read named files into the task (#26).
+    """cadre/data/skill/run.py --doc: read named files into the task (#26).
 
     Covers AE1/AE2/AE4/AE6 + R2/R3/R5/R7 at the skill entry. A prompt-capturing
     client proves the composed file content actually reaches the specialist prompt.
@@ -2286,6 +2286,42 @@ class TestVerifyPaletteCommandCLIWiring(unittest.TestCase):
         with patch("cadre.verify_palette.main", return_value=1):
             code = cli_main(["verify-palette"])
         self.assertEqual(code, 1)
+
+
+# ---------------------------------------------------------------------------
+# U6: `cadre install-skill` — a thin dispatch onto cadre.install_skill.
+# install_skill()'s own behavior (guards, atomic swap, copy fallback) is
+# covered by tests/test_install_skill.py; this only proves the argparse wiring
+# and exit-code propagation (R11).
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSkillCommandCLIWiring(unittest.TestCase):
+    """`cadre install-skill` is reachable through cli.main()'s argparse dispatch
+    and propagates install_skill()'s exit code verbatim."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.skills_dir = str(Path(self.tmp) / "skills")
+
+    def test_main_install_skill_subcommand_creates_symlink(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(["install-skill", "--skills-dir", self.skills_dir])
+        self.assertEqual(code, 0)
+        entry = Path(self.skills_dir) / "cadre-fleet"
+        self.assertTrue(entry.is_symlink())
+        self.assertIn("installed cadre-fleet skill", buf.getvalue())
+
+    def test_main_install_skill_propagates_nonzero_exit(self):
+        with patch("cadre.cli.install_skill", return_value=(1, "boom")) as fake:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli_main(["install-skill", "--skills-dir", self.skills_dir])
+        fake.assert_called_once_with(self.skills_dir)
+        self.assertEqual(code, 1)
+        self.assertIn("boom", buf.getvalue())
 
 
 if __name__ == "__main__":

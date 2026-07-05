@@ -1,6 +1,6 @@
 """Capture module — write a run folder with per-specialist markdown and a JSON manifest.
 
-This is a caller-layer module: imported only by cli.py and skills/cadre-fleet/run.py.
+This is a caller-layer module: imported only by cli.py and cadre/data/skill/run.py.
 NEVER imported by engine.py or model_client.py — the engine holds no file I/O.
 
 Incremental capture split (U3):

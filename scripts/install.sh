@@ -81,18 +81,21 @@ else
 fi
 
 # ── 5. Install the cadre-fleet skill ─────────────────────────────────────────
-# U6 will convert this to `"$PYBIN" -m cadre.cli install-skill`.
+# cadre install-skill materializes SKILL.md + run.py from the INSTALLED package
+# (cadre/data/skill/, via importlib.resources) into the skills dir as an atomic
+# symlink — no repo path involved, so it survives the clone moving or being
+# deleted (R14/R15) and a same-Python in-place `cadre` upgrade (R16). It reads
+# HERMES_SKILLS_DIR itself when no --skills-dir is given.
 if [ -n "${HERMES_SKILLS_DIR:-}" ]; then
-    # Expand a leading ~ (it does NOT expand inside a quoted variable) and ensure
-    # the dir exists, so a ~-prefixed or not-yet-created skills dir still works.
-    DEST="${HERMES_SKILLS_DIR/#\~/$HOME}"
-    mkdir -p "$DEST"
-    ln -sfn "$(pwd)/skills/cadre-fleet" "$DEST/cadre-fleet"
-    echo "[OK] installed cadre-fleet skill → $DEST/cadre-fleet"
+    if "$PYBIN" -m cadre.cli install-skill; then
+        echo "[OK] installed cadre-fleet skill"
+    else
+        echo "install-skill failed — see the message above; the skill was not installed." >&2
+    fi
 else
     echo ""
     echo "HERMES_SKILLS_DIR is not set. To install the skill manually, run:"
-    echo "  ln -sfn $(pwd)/skills/cadre-fleet /path/to/hermes/skills/cadre-fleet"
+    echo "  HERMES_SKILLS_DIR=/path/to/hermes/skills $PYBIN -m cadre.cli install-skill"
     echo "See docs/RUNBOOK.md for your Hermes install's skills directory location."
 fi
 

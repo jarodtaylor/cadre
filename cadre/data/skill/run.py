@@ -13,27 +13,25 @@ import argparse
 import contextlib
 import sys
 import time
-from pathlib import Path
 
-# Make the repo root importable when run from the skill directory.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT))
-
-from cadre.approval import (  # noqa: E402
+# The installed `cadre` package is importable directly (R15) — this runner is
+# executed by the Hermes venv Python, which is the same interpreter `cadre`
+# was pip-installed into (KTD2); no repo-relative sys.path bootstrap needed.
+from cadre.approval import (
     consume_approval,
     default_approval_path,
     surface_digest,
     write_approval,
 )
-from cadre.capture import prepare_run_dir, resolved_hermes_home, save_run  # noqa: E402
-from cadre.config import ConfigError, FleetConfig  # noqa: E402
-from cadre.file_input import MAX_FILE_BYTES, compose  # noqa: E402
-from cadre.model_client import ModelClient  # noqa: E402
-from cadre.personas import default_pool_dir, resolve  # noqa: E402
-from cadre.preview_lint import render_preview_warnings  # noqa: E402
-from cadre.progress_runner import run_with_progress  # noqa: E402
-from cadre.text_safety import sanitize as _sanitize  # noqa: E402  (GH #23)
-from cadre.render import (  # noqa: E402
+from cadre.capture import prepare_run_dir, resolved_hermes_home, save_run
+from cadre.config import ConfigError, FleetConfig
+from cadre.file_input import MAX_FILE_BYTES, compose
+from cadre.model_client import ModelClient
+from cadre.personas import default_pool_dir, resolve
+from cadre.preview_lint import render_preview_warnings
+from cadre.progress_runner import run_with_progress
+from cadre.text_safety import sanitize as _sanitize  # GH #23
+from cadre.render import (
     render_composed_task,
     render_file_inputs,
     render_fleet_preview,
