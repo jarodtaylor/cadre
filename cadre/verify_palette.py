@@ -282,8 +282,12 @@ def write_palette(
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         # Write owner-only at creation — never the momentary 0o644 a write-then-chmod
-        # leaves under a default umask (mirrors capture._write exactly).
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # leaves under a default umask (mirrors capture._write exactly). O_NOFOLLOW
+        # (not part of capture._write's base idiom) refuses to follow a symlink
+        # planted at path — matching provision.write_config / _seed_files / the
+        # approval-token writer's same guard.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         path.chmod(0o600)
@@ -350,7 +354,11 @@ def main() -> int:
     n_ok = sum(1 for r in records if r.ok)
     try:
         write_palette(records, declared_toolsets, palette_path)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # ValueError: zero verified providers (nothing to write). OSError: a
+        # write failure — including O_NOFOLLOW's ELOOP when ~/.cadre/palette.yaml
+        # is a planted symlink (the correct fail-closed behavior). Degrade to a
+        # clean message + nonzero exit, never a raw traceback.
         print(f"\n✗ {exc}")
         return 1
 

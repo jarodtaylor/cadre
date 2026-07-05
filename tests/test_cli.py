@@ -2134,6 +2134,188 @@ class TestSetupCommandKTD11FailClosed(unittest.TestCase):
         self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
 
 
+class TestSetupCommandNewlineRejection(unittest.TestCase):
+    """C4: a recorded_python containing a newline/CR/NUL is rejected BEFORE
+    verify_importable ever runs. Closes a real config-contract break: the
+    skill's `grep -E '^CADRE_HERMES_PYTHON=' | cut -d= -f2-` reader only sees
+    the FIRST line of the value, so a smuggled trailing line after a newline
+    could pass verify_importable's real execve-based check (the full string)
+    yet have the skill later run a different, unverified path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_newline_rejected_before_verify_importable_runs(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command("/tmp/py\nsuffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("newline", out.lower())
+
+    def test_newline_writes_no_config(self):
+        with patch("cadre.provision.verify_importable"):
+            setup_command("/tmp/py\nsuffix")
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertFalse(config_path.exists())
+
+    def test_carriage_return_rejected(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command("/tmp/py\rsuffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("control character", out.lower())
+
+    def test_nul_byte_rejected(self):
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command("/tmp/py\x00suffix")
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+
+    def test_newline_via_env_var_also_rejected(self):
+        """The check applies regardless of which precedence branch (arg vs
+        CADRE_HERMES_PYTHON env) produced recorded_python."""
+        with patch("cadre.provision.verify_importable") as mock_verify:
+            code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": "/tmp/py\nsuffix"})
+        mock_verify.assert_not_called()
+        self.assertEqual(code, 1)
+
+
+class TestSetupCommandBareNameResolution(unittest.TestCase):
+    """C3: a bare/relative --venv-python is PATH-unstable (verify-time PATH
+    here vs skill-run-time PATH later can resolve two different binaries) —
+    setup_command resolves it to an absolute path via shutil.which before
+    verifying and recording, so the value verified is the value later run."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_bare_name_resolved_verified_and_recorded_as_absolute_path(self):
+        with patch("shutil.which", return_value="/abs/path/to/python") as mock_which:
+            with patch("cadre.provision.verify_importable", return_value=True) as mock_verify:
+                code, out = setup_command("python")
+        mock_which.assert_called_once_with("python")
+        mock_verify.assert_called_once_with("/abs/path/to/python")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(
+            config_path.read_text(encoding="utf-8"),
+            "CADRE_HERMES_PYTHON=/abs/path/to/python\n",
+        )
+
+    def test_unresolvable_bare_name_left_unchanged(self):
+        """shutil.which returning None (not found on PATH) leaves the bare
+        name as-is: verify_importable then fails closed on it in real usage
+        (mocked True here, since this test is about what gets RECORDED)."""
+        with patch("shutil.which", return_value=None):
+            code, out = setup_command("totally-bogus-not-on-path")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(
+            config_path.read_text(encoding="utf-8"),
+            "CADRE_HERMES_PYTHON=totally-bogus-not-on-path\n",
+        )
+
+    def test_relative_path_with_slash_recorded_as_absolute(self):
+        """Codex confirm: shutil.which returns a relative path WITH a directory
+        component (e.g. '.venv/bin/python') unchanged, so it must be abspath'd
+        against the current cwd before recording — otherwise the skill later
+        runs a cwd-relative interpreter that differs from the verified one."""
+        rel = os.path.join(".venv", "bin", "python")
+        with patch("shutil.which", return_value=rel):
+            code, out = setup_command(rel)
+        self.assertEqual(code, 0, out)
+        recorded = (Path(self.tmp) / ".cadre" / "config").read_text(encoding="utf-8")
+        self.assertEqual(recorded, f"CADRE_HERMES_PYTHON={os.path.abspath(rel)}\n")
+        self.assertTrue(os.path.isabs(recorded.split("=", 1)[1].strip()))
+
+    def test_absolute_path_not_passed_through_which(self):
+        """An already-absolute path (e.g. sys.executable) is untouched — no
+        shutil.which call at all."""
+        with patch("shutil.which") as mock_which:
+            code, out = setup_command(sys.executable)
+        mock_which.assert_not_called()
+        self.assertEqual(code, 0, out)
+
+
+class TestSetupCommandHomeSafetyGuard(unittest.TestCase):
+    """C5a: a pre-planted symlinked or group/other-writable ~/.cadre is
+    refused BEFORE any write — the provisioning steps below would otherwise
+    write fleets/config/palette THROUGH a tampered control directory (no MAC
+    protects ~/.cadre's contents; its integrity rests on this)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def test_symlinked_cadre_home_refused(self):
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir(mode=0o700)
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.symlink_to(elsewhere, target_is_directory=True)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("symlink", out.lower())
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing written through the symlinked home")
+        self.assertTrue(cadre_home.is_symlink(), "the symlink itself must be untouched, not replaced")
+
+    def test_group_writable_cadre_home_refused(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o770)
+        os.chmod(cadre_home, 0o770)  # chmod after mkdir — mkdir's mode arg is umask-affected
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("writable", out.lower())
+        self.assertFalse((cadre_home / "config").exists())
+
+    def test_other_writable_cadre_home_refused(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o707)
+        os.chmod(cadre_home, 0o707)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("writable", out.lower())
+
+    def test_preexisting_0o700_cadre_home_accepted(self):
+        """A normal owner-only ~/.cadre (e.g. from a prior successful setup
+        run) must NOT be refused — only a symlink or a loose mode is unsafe."""
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700)
+        os.chmod(cadre_home, 0o700)
+
+        code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+
+    def test_no_preexisting_cadre_home_accepted(self):
+        """The common case: ~/.cadre does not exist yet — nothing to refuse."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+
+
 class TestSetupCommandOSErrorDegrade(unittest.TestCase):
     """Fix C regression: an OSError from the scaffold/seed/write-config sequence
     degrades to a clean (1, message) — never a raw traceback (the pre-#11

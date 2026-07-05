@@ -49,9 +49,16 @@ fi
 # ── 3. Install cadre into the resolved venv ──────────────────────────────────
 # --force-reinstall: pip no-ops a same-version reinstall otherwise (KTD12) —
 # this repo-present install should always reflect the current working tree.
-# --no-deps: the resolved venv is the Hermes host's, which already carries
-# pyyaml from running cadre pre-packaging; a from-scratch venv needs it added.
+# --no-deps: protects the Hermes venv's own pinned dependencies from being
+# upgraded/downgraded by cadre's requirements.
 "$PYBIN" -m pip install --force-reinstall --no-deps .
+
+# --no-deps above means pip never installs pyyaml for us — but cadre imports
+# it at startup (cadre.config), so a venv that doesn't already have one
+# (e.g. a fresh Hermes install) would fail at `cadre setup` below. Install it
+# WITHOUT force-reinstalling (never touches a pyyaml Hermes already pinned),
+# and only when it's actually missing.
+"$PYBIN" -c "import yaml" 2>/dev/null || "$PYBIN" -m pip install "pyyaml>=6.0"
 
 # ── 4. Provision ~/.cadre + two-phase palette seed ───────────────────────────
 # cadre setup scaffolds ~/.cadre, seeds fleets/personas/palette-candidates from

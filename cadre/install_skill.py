@@ -188,6 +188,30 @@ def _install_copy(entry: Path) -> tuple[int, str]:
     personas. A package upgrade will NOT refresh an already-copied file (the
     accepted R16 cost of this fallback — see the module docstring);
     re-materializing after an upgrade requires clearing the stale copy first.
+
+    _seed_files is warn-and-skip / never-raises BY DESIGN (one bad file must
+    not abort a seeding pass) — so on its own it can leave `entry` missing or
+    partial while still returning normally: a missing/unreadable source (a
+    mis-built or tampered wheel), a symlinked `entry` dir (refused whole by
+    _seed_files's own directory-symlink guard, so nothing gets written at
+    all), or a mid-copy failure. Verify every _SKILL_FILES name actually
+    landed under `entry` before reporting success, so a partial/no-op install
+    is reported as the failure it is rather than a false (0, ...).
     """
     _seed_files(skill_dir(), entry, _SKILL_FILES, lambda name: name)
+    # A landed file must be a REAL regular file, not a preserved pre-existing
+    # symlink: `.exists()` follows a symlink, so a stale `entry/SKILL.md` ->
+    # somewhere (which _seed_files preserves, never overwrites) would falsely
+    # read as installed. is_symlink() (lstat, no follow) catches it; is_file()
+    # catches missing/non-file.
+    missing = [
+        name
+        for name in _SKILL_FILES
+        if (entry / name).is_symlink() or not (entry / name).is_file()
+    ]
+    if missing:
+        return (
+            1,
+            f"copy install incomplete — {missing} not written under {entry}",
+        )
     return 0, f"installed cadre-fleet skill (copy) -> {entry}"

@@ -14,6 +14,7 @@ import io
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -112,6 +113,21 @@ class TestWriteConfig(unittest.TestCase):
         line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
         value = line.split("=", 1)[1]
         self.assertEqual(value, "/second/python")
+
+    def test_symlinked_destination_not_written_through(self):
+        """C5b: a symlink planted at config_path is refused (O_NOFOLLOW),
+        never followed and written through — matches _seed_files's per-file
+        guard and approval.write_approval's O_NOFOLLOW."""
+        sentinel = Path(self.tmp) / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        config_path = Path(self.tmp) / "config"
+        config_path.symlink_to(sentinel)
+
+        with self.assertRaises(OSError):
+            provision.write_config("/some/python", str(config_path))
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(config_path.is_symlink(), "the symlink itself must be untouched, not replaced")
 
 
 class TestEnsureCadreDirs(unittest.TestCase):
@@ -589,6 +605,48 @@ class TestVerifyImportable(unittest.TestCase):
         stub.write_text("#!/bin/sh\nsleep 1\nexit 0\n", encoding="utf-8")
         stub.chmod(0o700)
         self.assertFalse(provision.verify_importable(str(stub), timeout=0.05))
+
+    def test_ignores_pythonpath_injection(self):
+        """C1 regression: -I ignores PYTHONPATH, so a planted fake `cadre`
+        package on an attacker- (or dev-shell-) controlled PYTHONPATH entry
+        must NOT satisfy the import check.
+
+        sys.executable does not have cadre installed in its own site-packages
+        (see test_real_interpreter_without_cadre_installed_returns_false_even_from_repo_root's
+        docstring — confirmed by `pip show cadre` finding nothing in this dev
+        venv), so this exercises a REAL subprocess rather than a mock. Before
+        the -I fix, a `-P`-only invocation dropped cwd from sys.path but
+        still honored PYTHONPATH — planting a fake cadre/__init__.py on
+        PYTHONPATH would have made this wrongly return True, the same class
+        of false success as the cwd fail-open Fix A closed. -I additionally
+        ignores PYTHONPATH/PYTHON* env entirely, closing this second
+        injection path too.
+        """
+        fake_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, fake_root)
+        fake_pkg = Path(fake_root) / "cadre"
+        fake_pkg.mkdir()
+        (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = fake_root
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(
+                provision.verify_importable(sys.executable),
+                "a planted cadre/__init__.py on PYTHONPATH must not satisfy the import check",
+            )
+
+    def test_subprocess_uses_isolated_mode_flag(self):
+        """Documents the exact isolation flag the security property rests on
+        (belt-and-suspenders alongside the real-subprocess proof above): a
+        future edit that swaps -I for something less isolated (e.g. back to
+        -P) must fail this directly, not just the PYTHONPATH behavioral test."""
+        with unittest.mock.patch("cadre.provision.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+            provision.verify_importable("/some/python")
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("-I", cmd)
+        self.assertNotIn("-P", cmd, "-I already implies -P; the flag must not be weakened to -P alone")
 
 
 if __name__ == "__main__":

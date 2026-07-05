@@ -363,9 +363,11 @@ class TestInstallSkillCopyFallback(unittest.TestCase):
         self.assertIn("preserved", stderr_buf.getvalue())
 
     def test_copy_symlinked_destination_file_not_followed(self):
-        """A symlink planted at a destination filename is not followed or
-        overwritten (O_EXCL|O_NOFOLLOW — the same _seed_files guard the
-        starter fleets/personas use)."""
+        """A symlink planted at a destination filename is neither followed nor
+        overwritten (O_EXCL|O_NOFOLLOW — the _seed_files guard) AND the install
+        reports incomplete: a preserved symlink is NOT the real copied file, so
+        _install_copy's landed-check flags it (is_symlink) rather than following
+        it via .exists() and claiming a false success (Codex confirm)."""
         self.entry.mkdir(parents=True, mode=0o700)
         sentinel = Path(self.tmp) / "sentinel.txt"
         sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
@@ -373,8 +375,51 @@ class TestInstallSkillCopyFallback(unittest.TestCase):
 
         code, msg = install_skill(self.skills_dir, copy=True)
 
-        self.assertEqual(code, 0, msg)
+        self.assertEqual(code, 1)
+        self.assertIn("incomplete", msg)
+        self.assertIn("SKILL.md", msg)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue((self.entry / "SKILL.md").is_symlink())
+
+    def test_copy_missing_source_file_reports_incomplete_not_false_success(self):
+        """C6: _seed_files is warn-and-skip / never-raises, so a missing or
+        unreadable source file (e.g. a mis-built or tampered wheel omitting
+        run.py) would otherwise leave `entry` partial while this still
+        reported (0, "installed..."). Force a source dir missing one of the
+        two skill files and confirm the copy path reports the incompleteness
+        instead of a false success."""
+        partial_src = Path(self.tmp) / "partial-skill-src"
+        partial_src.mkdir()
+        (partial_src / "SKILL.md").write_text("skill doc", encoding="utf-8")
+        # run.py deliberately NOT created — the missing file this test forces.
+
+        with unittest.mock.patch("cadre.install_skill.skill_dir", return_value=partial_src):
+            code, msg = install_skill(self.skills_dir, copy=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("incomplete", msg)
+        self.assertIn("run.py", msg)
+        # The file that DID seed successfully is still on disk (never rolled back) —
+        # the fix reports the incomplete state, it doesn't undo the partial seed.
+        self.assertTrue((self.entry / "SKILL.md").exists())
+        self.assertFalse((self.entry / "run.py").exists())
+
+    def test_copy_symlinked_entry_dir_reports_incomplete(self):
+        """A pre-planted symlinked `cadre-fleet` entry dir makes _seed_files
+        refuse to seed anything at all (its own directory-symlink guard) —
+        the copy path must report that as an incomplete install, not a false
+        success, and must never write through the symlink."""
+        Path(self.skills_dir).mkdir(mode=0o700)
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir()
+        self.entry.symlink_to(elsewhere, target_is_directory=True)
+
+        code, msg = install_skill(self.skills_dir, copy=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("incomplete", msg)
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing written through the symlinked entry")
+        self.assertTrue(self.entry.is_symlink(), "the symlink itself must be untouched")
 
 
 if __name__ == "__main__":

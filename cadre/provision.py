@@ -267,7 +267,11 @@ def write_config(
 
     Uses the capture._write idiom (os.open with O_CREAT/O_TRUNC at mode 0o600,
     then explicit chmod) so the file is owner-only at creation — never the
-    momentary 0o644 a write-then-chmod leaves under a default umask.
+    momentary 0o644 a write-then-chmod leaves under a default umask. Adds
+    O_NOFOLLOW on top of that idiom (capture._write itself omits it) so a
+    symlink planted at config_path is refused (OSError) rather than followed
+    and written through — matching the repo's other hardened writers
+    (approval.write_approval, provision._seed_files's per-file guard).
 
     Idempotent: overwrites on re-run (single-key file, O_TRUNC).
 
@@ -287,7 +291,8 @@ def write_config(
     old_umask = os.umask(0o077)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         path.chmod(0o600)
@@ -305,20 +310,30 @@ def verify_importable(python_path: str, *, timeout: float = _IMPORT_CHECK_TIMEOU
     importlib introspection): python_path may name a wholly different
     interpreter/venv than the one currently running ``cadre setup``.
 
-    The subprocess runs with `-P` (Python 3.11+ — this project's floor is
-    `requires-python >=3.11`), which excludes the current working directory
-    (and the script/`-m` directory) from sys.path for a `-c` invocation — so
-    cwd is never on sys.path here, and the check validates `import cadre`
-    purely from python_path's OWN site-packages, independent of the caller's
-    cwd. This closes a real fail-open: without `-P`, running the check from
-    inside a cadre repo clone (e.g. install.sh does `cd $REPO_ROOT` before
-    invoking `cadre setup`) put the repo root on sys.path[0], so `import
-    cadre` resolved the in-tree checkout regardless of whether the RECORDED
-    interpreter had cadre installed at all — defeating the very fail-closed
-    gate this function exists to enforce. Real target hosts (KTD2's
-    load-bearing pip-into-Hermes-venv deployment) have no repo clone present
-    at all, so this changes nothing there; it only closes the false-positive
-    a repo-clone cwd could otherwise produce.
+    The subprocess runs with `-I` (isolated mode, Python 3.11+ — this
+    project's floor is `requires-python >=3.11`). `-I` implies `-P` (excludes
+    the current working directory and the script/`-m` directory from
+    sys.path for a `-c` invocation) plus `-E` (ignore `PYTHONPATH`/`PYTHON*`
+    env vars) plus `-s` (skip the user site-packages directory) — so the
+    check validates `import cadre` purely from python_path's OWN (system)
+    site-packages, independent of the caller's cwd, an attacker- or
+    dev-shell-set `PYTHONPATH`, and any user-site install. This closes two
+    real fail-opens: (1) without `-P`, running the check from inside a cadre
+    repo clone (e.g. install.sh does `cd $REPO_ROOT` before invoking `cadre
+    setup`) put the repo root on sys.path[0], so `import cadre` resolved the
+    in-tree checkout regardless of whether the RECORDED interpreter had
+    cadre installed at all; (2) `-P` alone does NOT ignore `PYTHONPATH` — a
+    `PYTHONPATH` entry containing a planted `cadre/` package (attacker-
+    controlled, or just a stale dev-shell var) could satisfy the import for
+    an interpreter that does not have cadre installed at all. Both defeat
+    the very fail-closed gate this function exists to enforce. Real target
+    hosts (KTD2's load-bearing pip-into-Hermes-venv deployment) have no repo
+    clone present and no reason to carry a cadre-shaped `PYTHONPATH`, so `-I`
+    changes nothing there; it only closes the false-positives a repo-clone
+    cwd or an inherited `PYTHONPATH` could otherwise produce. A pip-installed
+    cadre still resolves fine under `-I`: it lives in the interpreter's own
+    (system) site-packages, which `-I` continues to honor — only cwd,
+    PYTHONPATH/PYTHONHOME, and the user-site directory are excluded.
 
     Never raises: a missing/non-executable python_path, a crash, or a timeout
     all resolve to False (fail closed) — same posture as the seeding helpers.
@@ -334,7 +349,7 @@ def verify_importable(python_path: str, *, timeout: float = _IMPORT_CHECK_TIMEOU
     """
     try:
         result = subprocess.run(
-            [python_path, "-P", "-c", "import cadre"],
+            [python_path, "-I", "-c", "import cadre"],
             capture_output=True,
             timeout=timeout,
         )

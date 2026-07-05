@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -151,10 +152,31 @@ def setup_command(
          needed (unlike scripts/resolve_venv.py's bootstrap-time resolver,
          which runs BEFORE cadre is installed anywhere).
 
-    Before any write, verifies `import cadre` resolves under the recorded
-    Python (provision.verify_importable, a subprocess check) and fails closed
-    — clear message, non-zero exit, nothing written, not even ~/.cadre itself —
-    if it does not. Only on success does it scaffold + seed + write config:
+    Before any write, this gates (in order) on:
+      1. Resolving a bare/relative recorded_python to an absolute path via
+         `shutil.which` — a bare command name is PATH-unstable (verify-time
+         PATH here vs skill-run-time PATH later can resolve two different
+         binaries), so pin it now. An unresolvable name is left as-is;
+         verify_importable below then fails closed on it as usual.
+      2. Rejecting a recorded_python containing a newline, carriage return, or
+         NUL byte. The C2 config contract is ONE line
+         (`CADRE_HERMES_PYTHON=<path>\\n`) read by the skill via
+         `grep -E '^CADRE_HERMES_PYTHON=' | cut -d= -f2-`, which sees only the
+         FIRST line — a smuggled control character could pass the real
+         execve-based check in step 3 yet leave the skill running a
+         different, unverified path. Rejected before any subprocess runs.
+      3. `import cadre` resolving under the recorded Python
+         (provision.verify_importable, a subprocess check) — fails closed
+         with a clear message, non-zero exit, nothing written (not even
+         ~/.cadre itself), if it does not.
+      4. ~/.cadre (if it already exists) being a real, owner-only-writable
+         directory — not a symlink, and not group/other-writable. No MAC
+         protects its contents, so a tampered control directory would
+         otherwise have fleets/config/palette written straight through it
+         (mirrors the persona-pool / approval-token directory posture,
+         cadre.approval._parent_is_safe).
+
+    Only once all four pass does it scaffold + seed + write config:
     ensure_cadre_dirs() -> seed_starter_fleets() -> seed_personas() ->
     seed_palette_candidates() -> write_config(). Idempotent overall (each step
     preserves existing operator edits; write_config overwrites the single
@@ -166,7 +188,8 @@ def setup_command(
 
     Returns:
         (exit_code, message) — 0 and a confirmation on success; 1 and a clear
-        error (naming the recorded path) on the KTD11 fail-closed path.
+        error (naming the recorded path where relevant) on any fail-closed
+        path above.
     """
     if env is None:
         env = os.environ
@@ -178,6 +201,34 @@ def setup_command(
     else:
         recorded_python = sys.executable
 
+    # C3: a bare/relative interpreter name is PATH-/cwd-unstable — resolve it to
+    # an absolute path now so the value verified below is the same value later
+    # recorded and later run (the skill runs from a different cwd). A bare name
+    # resolves via PATH (shutil.which); a relative path WITH a directory
+    # component (e.g. `.venv/bin/python`) which returns unchanged, so abspath it
+    # against the current cwd. abspath (not realpath) — a venv python is often a
+    # symlink whose link path is load-bearing; do not resolve it away.
+    # sys.executable and an expanduser'd absolute path already satisfy isabs.
+    if not os.path.isabs(recorded_python):
+        recorded_python = shutil.which(recorded_python) or recorded_python
+        # A relative path WITH a directory component (e.g. `.venv/bin/python`,
+        # which shutil.which returns unchanged) is still cwd-relative — abspath
+        # it so the recorded value doesn't depend on the skill's later cwd. A
+        # bare PATH name that which could not resolve has no directory part;
+        # leave it as-is (verify_importable then fails closed on it) rather than
+        # abspath a PATH-name into a nonsensical cwd path.
+        if not os.path.isabs(recorded_python) and os.sep in recorded_python:
+            recorded_python = os.path.abspath(recorded_python)
+
+    # C4: reject a newline/CR/NUL BEFORE verify_importable's subprocess ever
+    # runs — see the docstring's step 2. No side effect on a hostile value.
+    if any(ch in recorded_python for ch in ("\n", "\r", "\x00")):
+        return (
+            1,
+            "error: invalid interpreter path (contains a newline or control "
+            "character) — refusing to verify or record it. Nothing was written.",
+        )
+
     if not provision.verify_importable(recorded_python):
         return (
             1,
@@ -186,6 +237,22 @@ def setup_command(
             f'  {recorded_python} -m pip install --force-reinstall --no-deps '
             '"git+https://github.com/jarodtaylor/cadre@<ref>"\n'
             "then re-run `cadre setup`. Nothing was written. See docs/RUNBOOK.md.",
+        )
+
+    # C5a: refuse a pre-planted symlinked or group/other-writable ~/.cadre
+    # BEFORE any write — see the docstring's step 4.
+    cadre_home = Path("~/.cadre").expanduser()
+    if cadre_home.is_symlink():
+        return (
+            1,
+            f"error: {cadre_home} is a symlink — refusing (possible tampering); "
+            "remove it and re-run. Nothing was written.",
+        )
+    if cadre_home.exists() and (cadre_home.stat().st_mode & 0o022):
+        return (
+            1,
+            f"error: {cadre_home} is group/other-writable — run `chmod 700 "
+            f"{cadre_home}` and re-run. Nothing was written.",
         )
 
     try:

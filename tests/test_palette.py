@@ -11,12 +11,15 @@ Test-first: these tests define the contract; the implementation must satisfy the
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -163,6 +166,63 @@ class TestWritePalettePermissions(unittest.TestCase):
         records = make_records(ok_pairs=[("xai", "grok-4.3")])
         verify_palette.write_palette(records, ["web"], out)
         self.assertTrue(out.exists())
+
+
+class TestWritePaletteSymlinkGuard(unittest.TestCase):
+    """C5b: write_palette refuses to follow a symlink planted at the
+    destination (O_NOFOLLOW) — matches provision.write_config /
+    _seed_files / approval.write_approval's same guard."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_symlinked_destination_not_written_through(self):
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        out = self.tmp / "palette.yaml"
+        out.symlink_to(sentinel)
+
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        with self.assertRaises(OSError):
+            verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(out.is_symlink(), "the symlink itself must be untouched, not replaced")
+
+
+class TestVerifyPaletteMainOSErrorDegrade(unittest.TestCase):
+    """verify_palette.main() degrades a write_palette OSError to a clean exit 1,
+    never a raw traceback — the main()-level consequence of C5b's O_NOFOLLOW,
+    which now raises OSError when ~/.cadre/palette.yaml is a planted symlink
+    (main previously caught only ValueError)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_symlinked_palette_path_degrades_to_exit_1_no_traceback(self):
+        candidates = self.tmp / "palette-candidates.yaml"
+        candidates.write_text(
+            "candidates:\n  - provider: xai\n    model: grok-4.3\ntoolsets: [web]\n",
+            encoding="utf-8",
+        )
+        # A symlink planted at the palette output -> write_palette's O_NOFOLLOW raises OSError.
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        palette = self.tmp / "palette.yaml"
+        palette.symlink_to(sentinel)
+
+        ok_records = make_records(ok_pairs=[("xai", "grok-4.3")])
+        with patch.object(verify_palette, "_DEFAULT_CANDIDATES_PATH", candidates), \
+             patch.object(verify_palette, "_DEFAULT_PALETTE_PATH", palette), \
+             patch.object(verify_palette, "verify_candidates", return_value=ok_records), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = verify_palette.main()  # must NOT raise
+
+        self.assertEqual(code, 1)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(palette.is_symlink())
 
 
 class TestWritePaletteToolsetFiltering(unittest.TestCase):
