@@ -2,15 +2,17 @@
 
 Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across whatever models you have — Grok, Gemini, Claude, GPT, OpenRouter, or local — each a specialist with its own model and toolset, then **synthesize** them into one grounded, attributed result, **collect** their independent findings side by side, or have an independent model **judge** each one. Run the lanes in parallel, or as a **sequential chain** where each stage audits the last. Built on [Hermes](https://hermes-agent.nousresearch.com)'s `AIAgent` library.
 
-> **Status: building in public.** Shipped and **dogfooded live** on a Hermes host: the engine, run-capture, live per-lane progress, the agent-run handoff, cross-model **review fleets** (code-review + doc-review), a **sequential research-brief chain**, and **iterative debate and critique-revise fleets** — across `synthesize`, `collect`, and `judge` convergence and **parallel**, **sequential**, and **iterative** topology. A Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
+> **Status: `v0.1.0` — building in public.** The engine, run capture, live per-lane progress, cross-model review fleets, sequential and iterative (debate / critique-revise) topologies, and the agent-run handoff are all shipped and **dogfooded live** on a Hermes host — a Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
 
 ## Why
 
-**Where it came from.** I build Hermes agents. When one needs to spread work across subagents — review its own plan, validate a diff, research something — Hermes's `delegate_task` can't vary the model: every subagent runs the one default (or a single configured delegate model for *all* of them). Cadre fixes that. Spin up an ephemeral fleet where each specialist is its own provider and model — no full Hermes profile, workspace, or memory required, just a YAML fleet.
+You're running a Hermes agent, and it needs to spread work across helpers — review its own plan, validate a diff, research a question from several angles. Hermes can delegate to subagents, but they all run the **same** model. So you get parallelism without diversity: five takes from one point of view.
 
-The primitive is general: **any fleet you can describe in config**, not a fixed menu. We pre-bake a few to get you started — a research swarm, a code-review swarm, and a docs-review swarm — and the aim is harness/runtime-agnostic, so you run your fleets wherever your agents live (Hermes today; more runtimes as reach).
+Cadre fixes that. You describe a **fleet** in a YAML file — a handful of specialists, each its own provider, model, and toolset — and Cadre runs them, then combines their output into one report that **attributes each claim to the model that surfaced it**. No extra Hermes profile, workspace, or memory to set up; just a fleet file.
 
-A single-vendor runtime can only fan a task out across one provider's own tiers. Cadre routes the right subtask to the right *provider* — real-time social from Grok, broad web from a fast model, deep analysis from a strong one, a contrarian read from another — then synthesizes one report that **attributes each claim to the model that surfaced it**. Decomposing a task into specialist lenses is what drives coverage; running those lenses across *diverse* models adds independent cross-checking and resilience, and surfaces what any single model's blind spots miss. See [STRATEGY.md](STRATEGY.md).
+Why bother with different models? Decomposing a task into specialist lenses is what drives coverage; running those lenses across *diverse* models adds independent cross-checking and resilience, and surfaces what any single model's blind spots miss. A single-vendor runtime can only fan out across one provider's own tiers — Cadre routes real-time social to Grok, broad web to a fast model, deep analysis to a strong one, a contrarian read to another. See [STRATEGY.md](STRATEGY.md).
+
+The primitive is general: **any fleet you can describe in config**, not a fixed menu. A few come pre-baked to get you started — a research swarm, a code-review swarm, a docs-review swarm — and the aim is runtime-agnostic, so you run your fleets wherever your agents live (Hermes today; more runtimes as reach).
 
 ## How it works
 
@@ -44,39 +46,95 @@ flowchart LR
     WR --> R2["grounded brief<br/>attributed, chain-audited"]
 ```
 
-All model calls are isolated behind one thin adapter over Hermes's `AIAgent` (`cadre/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each model call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`.
+Every model call is isolated behind one thin adapter over Hermes's `AIAgent` (`cadre/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`. Every run is **captured** to `~/.cadre/runs/<timestamp-slug>/` — per-specialist markdown, the synthesis, and a JSON manifest (per-lane outcome, elapsed, toolset, timed-out; run-level status + active profile) — so a run is auditable after the fact.
 
-Every run is **captured** to `~/.cadre/runs/<timestamp-slug>/` — per-specialist markdown, the synthesis, and a JSON manifest (per-lane outcome, elapsed, toolset, timed-out; run-level synth status + active profile) — so a run is auditable after the fact.
+## What running it looks like
 
-## Using it with a Hermes agent (the agent-run handoff)
+On a provisioned Hermes host, one command runs a fleet:
 
-A Hermes agent can run Cadre conversationally through the discoverable **`cadre-fleet` skill**: pick a curated fleet or compose one from a host-verified palette, **preview the actual parsed fleet for a human okay**, run it, and weave back the grounded, attributed result.
-
-Two files do two different jobs:
-
-| File | Role | Who writes it |
-|---|---|---|
-| `~/.cadre/palette.yaml` | The **menu** — `(provider, model)` pairs verified to resolve on *this* host, plus the safe toolsets the profile declares | Generated by install from `palette-candidates.yaml` you edit |
-| `~/.cadre/fleets/<name>.yaml` | The **recipe** — which specialists (role + model + toolset) and synthesizer make up a fleet, composed from the menu | You or the agent |
-
-```mermaid
-flowchart LR
-    subgraph Install["one-time install (per host)"]
-        C["palette-candidates.yaml<br/>you edit — the menu"] -->|"verify live"| P["palette.yaml<br/>verified models + safe tools"]
-    end
-    subgraph Runtime["a Hermes agent, per task"]
-        F["~/.cadre/fleets/&lt;name&gt;.yaml<br/>the fleet"] --> V["run.py --preview"]
-        V --> H{"human okays?"}
-        H -->|"yes"| RUN["run.py --task ..."]
-        RUN --> ENG["engine: fan-out → synthesize"]
-        ENG --> W["weave back<br/>attributed + run folder"]
-    end
-    P -. "compose from" .-> F
+```bash
+"$PYBIN" -m cadre.cli run ~/.cadre/fleets/research-swarm.yaml \
+    --task "What are the current best practices for prompt-caching with the Anthropic API?"
 ```
 
-The **preview is the operative control**: it renders mechanically from the parsed `FleetConfig` (the synthesizer, `allow_privileged_tools`, the synthesis prompt, and every lane) and exits without making a model call — so a human approves *what actually runs*, not the agent's paraphrase. Safe toolsets still read untrusted content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk; see `cadre/data/skill/SKILL.md` and `docs/RUNBOOK.md`.
+It streams live per-lane progress to stderr, then prints the result to stdout — one attributed report, a provenance block, and a pointer to the captured run folder:
 
-## Quick start (development)
+```
+=== research-swarm — synthesized result ===
+… one grounded report — each claim tagged to the specialist (role + model) that
+  surfaced it, sources preserved, cross-model conflicts called out …
+
+--- provenance ---
+[ok  ] social   (xai-oauth/grok-4.3)
+[ok  ] web      (openrouter/google/gemini-3-flash)
+[ok  ] analysis (openrouter/anthropic/claude-sonnet-4.6)
+
+Run folder: ~/.cadre/runs/2026-07-05-…-what-are-the-current-best-practices/
+```
+
+The report stays alone on stdout (pipe it, capture it); the `[cadre]` progress breadcrumbs go to stderr.
+
+## Run it on your Hermes host
+
+You need a host with `hermes-agent` installed and at least two providers authenticated (≥1 non-Anthropic). **No repo clone required** — `cadre` installs from git as a self-contained package. The five steps:
+
+**1. Find the Python that runs Hermes.** Cadre installs into the *same* interpreter that runs `run_agent` (it's the only one that can import both). The path varies by install; the common root-Linux location:
+
+```bash
+PYBIN=/usr/local/lib/hermes-agent/venv/bin/python
+"$PYBIN" -c "import run_agent; print('Hermes venv OK')"   # confirms it's the right one
+```
+
+If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK.md) shows how to locate your venv (non-root, Termux, Docker, and custom installs differ).
+
+**2. Install `cadre` into it** — pin the release tag:
+
+```bash
+"$PYBIN" -m pip install --force-reinstall --no-deps "git+https://github.com/jarodtaylor/cadre@v0.1.0"
+```
+
+`--no-deps` keeps cadre from touching Hermes's own dependency pins (the Hermes venv already carries `pyyaml`, cadre's only runtime dep); `--force-reinstall` matters on upgrades — pip no-ops an unchanged version otherwise. A **bare `pip install cadre` grabs a different, unrelated package on PyPI** — always use the git URL. (RUNBOOK covers the rare pyyaml exception.)
+
+**3. Provision `~/.cadre`:**
+
+```bash
+"$PYBIN" -m cadre.cli setup
+```
+
+Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review personas, and a `palette-candidates.yaml` from the installed package (no repo reads), recording your Hermes Python to `~/.cadre/config`.
+
+**4. Verify your palette.** Edit `~/.cadre/palette-candidates.yaml` down to the `(provider, model)` pairs you've actually authenticated, then verify them live:
+
+```bash
+"$PYBIN" -m cadre.cli verify-palette
+```
+
+This makes a real call per candidate and writes the ones that resolve to `~/.cadre/palette.yaml` — your verified menu. (The seeded candidates are examples; a pair that isn't authenticated on your host is skipped, which is normal.)
+
+**5. Edit a fleet, then run it.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml` before running it:
+
+```bash
+# edit ~/.cadre/fleets/research-swarm.yaml → set each lane's provider/model to a verified pair
+"$PYBIN" -m cadre.cli run ~/.cadre/fleets/research-swarm.yaml --task "<your real question>"
+```
+
+That's it — you get the attributed report shown above, captured under `~/.cadre/runs/`.
+
+> **One thing that bites:** a fleet runs under **one** Hermes profile, and a `web`/`x_search` lane only draws live data if *that profile* holds the tool credentials — otherwise the lane silently answers from training knowledge, no error. If a run comes back oddly ungrounded, that's almost always it. [`docs/RUNBOOK.md`](docs/RUNBOOK.md) is the full checklist — profiles, tool creds, timeouts, and the silent-failure modes to watch.
+
+## Use it from a Hermes agent
+
+Beyond the direct CLI, a Hermes agent can run Cadre conversationally through the discoverable **`cadre-fleet` skill** — pick or compose a fleet, **preview the actual parsed fleet for a human okay**, run it, and weave back the attributed result. Install the skill from the package:
+
+```bash
+HERMES_SKILLS_DIR=/path/to/hermes/skills "$PYBIN" -m cadre.cli install-skill
+```
+
+The agent then composes fleets drawing only from the host-verified `~/.cadre/palette.yaml`, and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+## Develop / contribute
+
+The engine imports and the full suite passes **without** `hermes-agent` (the adapter lazy-imports it; tests use fakes), so you can work on everything but a live run on a dev machine:
 
 ```bash
 python3.11 -m venv .venv          # Python >=3.11,<3.14
@@ -85,30 +143,11 @@ python3.11 -m venv .venv          # Python >=3.11,<3.14
 .venv/bin/python -m cadre.cli validate cadre/data/fleets/research-swarm.example.yaml
 ```
 
-Repo-present, these run with no install — the top-level `cadre` package imports
-from the working directory. The engine imports and the suite passes **without**
-`hermes-agent` (the adapter lazy-imports it; tests use fakes).
-
-## Installing `cadre`
-
-```bash
-pip install "git+https://github.com/jarodtaylor/cadre@<ref>"   # pin a tag or commit
-```
-
-A bare `pip install cadre` grabs a different, unrelated package on PyPI — always
-install from the git URL above until `cadre` publishes under its own name. On a
-Hermes host, install into the **Hermes venv Python** (the interpreter that runs
-`run_agent`) — see `docs/RUNBOOK.md` for the full install → provision → verify →
-run checklist, including the `cadre setup` / `cadre verify-palette` / `cadre
-install-skill` verbs and the agent-run handoff's `cadre/data/skill/`.
-
-## Running live
-
-Running a fleet for real needs a Hermes host with `hermes-agent` installed and providers authenticated. `docs/RUNBOOK.md` is the ordered checklist: install → `cadre setup` (provisions `~/.cadre`, auto-seeding all seven starter fleets from the installed package) → `cadre verify-palette` → edit a seeded fleet's provider/model strings → preview → run. Never commit API keys or tokens; credentials live in Hermes auth/env.
+With the repo present these run with no install — the top-level `cadre` package imports from the working directory. [AGENTS.md](AGENTS.md) orients AI agents working in the repo.
 
 ## Roadmap
 
-v0 — the engine, run-capture, and the Hermes **agent-run handoff** — is shipped and dogfooded live. v1 is organized into four tracks (filter the issues by their `track:` label, or see the [**v1 milestone**](https://github.com/jarodtaylor/cadre/milestone/1)):
+v0 — the engine, run capture, and the Hermes **agent-run handoff** — is shipped and dogfooded live, and `v0.1.0` closes the v1 milestone (packaging, the real `cadre` CLI, the topology and convergence primitives, and the defensive trust-safety pass). Work is organized into four tracks (filter issues by their `track:` label, or see the [**v1 milestone**](https://github.com/jarodtaylor/cadre/milestone/1)):
 
 - **Operator & agent experience** (`track: operator-dx`) — runs that feel alive and trustworthy.
 - **Fleet library & primitives** (`track: fleet-library`) — batteries-included fleets + new primitives.
@@ -122,8 +161,7 @@ See [STRATEGY.md](STRATEGY.md) for the full direction.
 - **[CONCEPTS.md](CONCEPTS.md)** — shared vocabulary (fleet, specialist, synthesizer, verified palette, fleet library, fleet preview, and the topology × convergence shape model).
 - **[SECURITY.md](SECURITY.md)** — what the defensive hardening protects against (display spoofing, forged judge markers, install seeding) and what stays a bounded residual (semantic prompt injection). Cadre is not "injection-proof" — this says plainly what is and isn't defended.
 - **[STRATEGY.md](STRATEGY.md)** — the product's target problem, approach, and tracks of work.
-- **[AGENTS.md](AGENTS.md)** — orientation for AI agents working in this repo.
-- **`docs/RUNBOOK.md`** — deploy, install, and the agent-run usage loop.
+- **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)** — the full deploy, install, and agent-run usage checklist.
 
 ## License
 
