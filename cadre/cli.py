@@ -130,7 +130,7 @@ def run_command(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="fleet", description="Run provider-neutral agent fleets.")
+    parser = argparse.ArgumentParser(prog="cadre", description="Run provider-neutral agent fleets.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_validate = sub.add_parser("validate", help="Validate a fleet spec")

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cadre"
+version = "0.1.0"
+description = "Provider-neutral engine for ephemeral, multi-model agent fleets."
+readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "Jarod Taylor" },
+]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "pyyaml>=6.0",
+]
+
+# hermes-agent is required ONLY on the machine that runs fleets live (the
+# Hermes host — e.g. the VPS / Mac Mini), not for building, testing, or the
+# dev CLI. It is git-distributed (not on PyPI), so it is documented-optional
+# here, not a declared dependency or extra: cadre.model_client imports it
+# lazily (only when constructing a live agent), so this package and its full
+# test suite import and run without it installed (R4).
+
+[project.scripts]
+cadre = "cadre.cli:main"
+
+[tool.hatch.build.targets.wheel]
+# Flat layout (KTD1): the `cadre` package lives at the repo root, not under
+# src/. The test suite imports it from the working directory with no install
+# — a src-layout would break that — so the wheel target points at it directly.
+packages = ["cadre"]
+
+# Package-data inclusion for cadre/data/** (starter fleets, personas, palette
+# example, and the Hermes skill) lands in U3, once that directory exists.
