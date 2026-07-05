@@ -67,6 +67,34 @@ def _venv_bin(venv_dir: Path, name: str) -> str:
     return str(venv_dir / "bin" / name)
 
 
+def _run_or_skip(
+    cmd: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: float,
+    launch_context: str,
+    exit_context: str,
+) -> subprocess.CompletedProcess:
+    """Run cmd capturing output; raise SkipTest (never fail) if it can't launch,
+    times out, or exits nonzero — returning the completed process on success.
+
+    The class's whole point is a REAL wheel build + install; when the toolchain or
+    network isn't available (offline dev), each setup step SKIPS loudly — the
+    captured output folded into the reason — rather than red-failing the suite, so
+    a missing prerequisite reads as a skip and only a genuine packaging regression
+    (caught by the test methods, not here) is a failure."""
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise unittest.SkipTest(f"{launch_context}: {exc}") from None
+    if proc.returncode != 0:
+        raise unittest.SkipTest(
+            f"{exit_context} -- exit {proc.returncode}:\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+    return proc
+
+
 class TestDecoupling(unittest.TestCase):
     """KTD7: `import cadre`, the `cadre` console command, the shipped skill
     run.py, and `cadre setup` all work off a REAL pip-installed wheel with the
@@ -85,28 +113,19 @@ class TestDecoupling(unittest.TestCase):
         # the hatchling build backend (declared in [build-system] requires) on
         # its own via PEP 517 build isolation, so no separate `build` package
         # install is needed here.
-        try:
-            build = subprocess.run(
-                [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(wheel_dir)],
-                cwd=str(_REPO_ROOT),
-                capture_output=True,
-                text=True,
-                timeout=_WHEEL_BUILD_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise unittest.SkipTest(
-                f"pip wheel timed out after {_WHEEL_BUILD_TIMEOUT_S}s building the cadre "
-                f"wheel -- no network to fetch the hatchling build backend? ({exc})"
-            ) from None
-        except OSError as exc:
-            raise unittest.SkipTest(f"could not invoke `pip wheel` at all: {exc}") from None
-
-        if build.returncode != 0:
-            raise unittest.SkipTest(
+        build = _run_or_skip(
+            [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(wheel_dir)],
+            cwd=str(_REPO_ROOT),
+            timeout=_WHEEL_BUILD_TIMEOUT_S,
+            launch_context=(
+                "could not build the cadre wheel (`pip wheel` timed out or failed to "
+                "launch -- no network to fetch the hatchling build backend?)"
+            ),
+            exit_context=(
                 "`pip wheel . --no-deps` failed building the cadre wheel (no network to "
-                f"fetch the hatchling build backend, or a packaging error) -- exit "
-                f"{build.returncode}:\n--- stdout ---\n{build.stdout}\n--- stderr ---\n{build.stderr}"
-            )
+                "fetch the hatchling build backend, or a packaging error)"
+            ),
+        )
 
         wheels = sorted(wheel_dir.glob("cadre-*.whl"))
         if not wheels:
@@ -118,43 +137,26 @@ class TestDecoupling(unittest.TestCase):
 
         # A throwaway venv, then install the built wheel into it.
         venv_dir = workdir / "venv"
-        try:
-            venv_create = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir)],
-                capture_output=True,
-                text=True,
-                timeout=_VENV_CREATE_TIMEOUT_S,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            raise unittest.SkipTest(f"could not create a throwaway venv: {exc}") from None
-        if venv_create.returncode != 0:
-            raise unittest.SkipTest(
-                f"venv creation failed -- exit {venv_create.returncode}:\n"
-                f"--- stdout ---\n{venv_create.stdout}\n--- stderr ---\n{venv_create.stderr}"
-            )
-
+        _run_or_skip(
+            [sys.executable, "-m", "venv", str(venv_dir)],
+            timeout=_VENV_CREATE_TIMEOUT_S,
+            launch_context="could not create a throwaway venv",
+            exit_context="venv creation failed",
+        )
         venv_python = _venv_bin(venv_dir, "python")
 
         # Deliberately NOT --no-deps here (unlike the wheel build above): pyyaml
         # is a real runtime dependency (R4) -- cadre.config imports it at module
         # level -- so `cadre validate` below needs it actually installed.
-        try:
-            install = subprocess.run(
-                [venv_python, "-m", "pip", "install", str(wheel_path)],
-                capture_output=True,
-                text=True,
-                timeout=_WHEEL_INSTALL_TIMEOUT_S,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            raise unittest.SkipTest(
-                f"pip install of the built wheel into the throwaway venv failed to run "
-                f"(no network to fetch pyyaml?): {exc}"
-            ) from None
-        if install.returncode != 0:
-            raise unittest.SkipTest(
-                f"pip install of the built cadre wheel failed -- exit {install.returncode}:\n"
-                f"--- stdout ---\n{install.stdout}\n--- stderr ---\n{install.stderr}"
-            )
+        _run_or_skip(
+            [venv_python, "-m", "pip", "install", str(wheel_path)],
+            timeout=_WHEEL_INSTALL_TIMEOUT_S,
+            launch_context=(
+                "pip install of the built wheel into the throwaway venv failed to run "
+                "(no network to fetch pyyaml?)"
+            ),
+            exit_context="pip install of the built cadre wheel failed",
+        )
 
         cls.venv_python = venv_python
         cls.venv_cadre = _venv_bin(venv_dir, "cadre")
