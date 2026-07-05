@@ -1,10 +1,20 @@
-#!/usr/bin/env python
-"""U1 verification spike — confirm AIAgent provider/model resolution + failure mode,
-then write the confirmed pairs to ~/.cadre/palette.yaml.
+"""cadre/verify_palette.py — verify AIAgent provider/model resolution against
+this host, then write the confirmed pairs to ~/.cadre/palette.yaml.
 
-RUNS ON THE HERMES HOST with the Hermes venv Python:
+Caller-layer module (KTD4). Moved unchanged from
+``spikes/verify_aiagent_providers.py`` during the U5 packaging pass
+(docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md): an installed-package
+module imports ``cadre.config`` natively, so the spike's repo-relative
+``sys.path`` bootstrap is gone, and ``SAFE_TOOLSETS`` is now a top-level import
+instead of a lazy one (only ``_agent``'s ``run_agent`` import stays lazy — that
+dependency is host-only). Invoked via the installed console command:
 
-    ~/.hermes/hermes-agent/venv/bin/python spikes/verify_aiagent_providers.py
+    cadre verify-palette
+
+RUNS ON THE HERMES HOST with the Hermes venv Python (the interpreter cadre was
+pip-installed into — the load-bearing KTD2 install target):
+
+    ~/.hermes/hermes-agent/venv/bin/python -m cadre.cli verify-palette
 
 ---
 
@@ -22,8 +32,10 @@ RUNS ON THE HERMES HOST with the Hermes venv Python:
 
 ## One-time host workflow
 
-1. Edit CANDIDATES (or ~/.cadre/palette-candidates.yaml) with your real strings.
-2. Run this spike via the Hermes venv — verifies + writes ~/.cadre/palette.yaml.
+1. `cadre setup` seeds ~/.cadre/palette-candidates.yaml from the installed
+   package (or edit PROVIDERS in this file) with your real strings.
+2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
+   ~/.cadre/palette.yaml.
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -41,22 +53,13 @@ import contextlib
 import io
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-# When run as a standalone script (`python spikes/verify_aiagent_providers.py` —
-# how install.sh invokes it), Python puts spikes/ on sys.path[0], NOT the repo
-# root, so write_palette's lazy `from cadre.config import ...` fails with
-# ModuleNotFoundError. Insert the repo root so it resolves whether run as a script
-# or imported. Mirrors skills/cadre-fleet/run.py. (Dev tests never hit this: they
-# run via `python -m unittest` from the repo root, which is already on sys.path.)
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from cadre.config import SAFE_TOOLSETS
 
 # Default candidates file path (operator edits once after install seeds it).
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
@@ -239,10 +242,6 @@ def write_palette(
     Raises:
         ValueError: If there are no ``ok=True`` records (nothing to write).
     """
-    # Import here to keep the lazy-import discipline consistent with _agent,
-    # and so this module stays importable on the dev box without cadre.
-    from cadre.config import SAFE_TOOLSETS  # noqa: PLC0415
-
     # Validate BEFORE any side effects — zero ok records → don't write anything.
     ok_records = [r for r in records if r.ok]
     if not ok_records:
@@ -334,9 +333,10 @@ def main() -> int:
     if not candidates:
         print(
             "No candidates found. Either:\n"
-            "  • Edit PROVIDERS in this file, or\n"
-            f"  • Populate {candidates_path} with a 'candidates' list\n"
-            "  (Run the install script to seed it from fleets/palette.example.yaml)"
+            f"  • Populate {candidates_path} with a 'candidates' list — run "
+            "`cadre setup` to seed it from the installed package, or\n"
+            "  • Edit PROVIDERS in this file (a dev/source-checkout shortcut; "
+            "not durable across a package reinstall/upgrade)"
         )
         return 1
 

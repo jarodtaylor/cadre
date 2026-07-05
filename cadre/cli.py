@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from cadre import provision
+from cadre import provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.file_input import MAX_FILE_BYTES, compose
@@ -239,11 +239,25 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    sub.add_parser(
+        "verify-palette",
+        help=(
+            "Verify authenticated (provider, model) candidates against this host "
+            "and write ~/.cadre/palette.yaml (host-only, live — makes real model calls)"
+        ),
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "validate":
         code, out = validate_command(args.spec)
     elif args.cmd == "setup":
         code, out = setup_command(args.venv_python)
+    elif args.cmd == "verify-palette":
+        # verify_palette.main() streams its own live per-candidate progress lines
+        # directly to stdout as it runs (unlike validate/setup's single end-of-call
+        # message) — so it owns its own printing; propagate its exit code as-is
+        # rather than forcing it through the (code, out); print(out) shape below.
+        return verify_palette.main()
     else:
         # A real run needs at least one of --task / --doc. Explicit exit-2 usage
         # error (not argparse's required-flag error, since --task is now optional).

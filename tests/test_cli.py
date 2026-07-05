@@ -2263,5 +2263,30 @@ class TestSetupCommandCLIWiring(unittest.TestCase):
         self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
 
 
+# ---------------------------------------------------------------------------
+# U5: `cadre verify-palette` — a thin dispatch onto cadre.verify_palette.main(),
+# which owns its own live-progress printing and exit code (unlike validate/setup's
+# (code, out) shape). The dispatch test patches main() so it never triggers a real
+# host verification pass; verify_palette's own logic is covered by test_palette.py.
+# (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyPaletteCommandCLIWiring(unittest.TestCase):
+    """`cadre verify-palette` is reachable through cli.main()'s argparse dispatch
+    and propagates cadre.verify_palette.main()'s exit code verbatim."""
+
+    def test_main_verify_palette_subcommand_calls_verify_palette_main(self):
+        with patch("cadre.verify_palette.main", return_value=0) as fake_main:
+            code = cli_main(["verify-palette"])
+        fake_main.assert_called_once_with()
+        self.assertEqual(code, 0)
+
+    def test_main_verify_palette_propagates_nonzero_exit(self):
+        with patch("cadre.verify_palette.main", return_value=1):
+            code = cli_main(["verify-palette"])
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

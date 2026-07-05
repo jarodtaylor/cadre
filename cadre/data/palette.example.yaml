@@ -5,11 +5,11 @@
 # This file documents TWO schemas:
 #
 #   1. The CANDIDATE SEED (below) — what the operator edits.
-#      Copy to ~/.cadre/palette-candidates.yaml (the install seeds this for you),
+#      Copy to ~/.cadre/palette-candidates.yaml (`cadre setup` seeds this for you),
 #      edit to match the providers you've authenticated in this Hermes profile,
 #      then run the verify step:
 #
-#          ~/.hermes/hermes-agent/venv/bin/python spikes/verify_aiagent_providers.py
+#          ~/.hermes/hermes-agent/venv/bin/python -m cadre.cli verify-palette
 #
 #      Verification keeps only the (provider, model) pairs that actually resolve
 #      and respond on this host, then writes them to ~/.cadre/palette.yaml.
@@ -44,8 +44,8 @@ toolsets: [web, search, x_search, vision]
 # ===========================================================================
 #
 # The file ~/.cadre/palette.yaml is produced by write_palette() in
-# spikes/verify_aiagent_providers.py after a successful verify run.
-# Its schema (owner-only 0o600, never edited by hand):
+# cadre/verify_palette.py (invoked via `cadre verify-palette`) after a
+# successful verify run. Its schema (owner-only 0o600, never edited by hand):
 #
 #   generated_at: "2026-06-18T14:30:00.123456"   # ISO-8601 stamp
 #   models:

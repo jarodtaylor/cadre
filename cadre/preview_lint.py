@@ -314,7 +314,7 @@ def render_preview_warnings(
             # approval surface (the same invariant render.py enforces for CADRE_RUN_DIR
             # paths in breadcrumbs).
             f"palette validation skipped — no palette at {_sanitize(str(resolved_path))}; "
-            "run `spikes/verify_aiagent_providers.py write_palette` to generate one"
+            "run `cadre verify-palette` to generate one"
         )
         # U6: if focus_warnings, prepend a ⚠ block for focus-lint even without a palette.
         if focus_warnings:

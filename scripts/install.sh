@@ -69,9 +69,11 @@ if [ "$CANDIDATES_PRE_EXISTED" -eq 0 ]; then
 fi
 
 # Second run (operator has had a chance to edit candidates): verify + write palette.
-# U5 will convert this to `"$PYBIN" -m cadre.cli verify-palette`.
+# Verifies candidates against this host and writes ~/.cadre/palette.yaml from the
+# installed package (no repo-tree reads) — replacing the now-retired repo-resident
+# verification spike (U5).
 echo "Running palette verification (requires Hermes host + authenticated providers)..."
-if "$PYBIN" spikes/verify_aiagent_providers.py; then
+if "$PYBIN" -m cadre.cli verify-palette; then
     echo "[OK] palette written to ~/.cadre/palette.yaml"
 else
     echo "palette verify failed — fix candidates or provider auth, then re-run." >&2
