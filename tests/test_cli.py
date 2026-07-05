@@ -17,7 +17,7 @@ import yaml
 
 from cadre.approval import consume_approval, surface_digest, write_approval
 from cadre.capture import _slugify, resolve_run_dir, resolved_hermes_home
-from cadre.cli import main as cli_main, run_command, validate_command
+from cadre.cli import main as cli_main, run_command, setup_command, validate_command
 from cadre.config import FleetConfig
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
@@ -2018,6 +2018,249 @@ class TestSkillDocFlag(unittest.TestCase):
         self.assertIn(str(binf), buf.getvalue())
         fake_client_cls.assert_not_called()
         mock_prepare.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# U4: `cadre setup` — provisions ~/.cadre from the installed package, KTD11
+# fail-closed on a recorded Python that can't `import cadre`.
+# (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md)
+# ---------------------------------------------------------------------------
+
+
+def _make_stub_python(test_case, exit_code):
+    """Write a tiny always-<exit_code> executable; return its path.
+
+    A shell stub (not a real python) simulates the OUTCOME of "a recorded
+    interpreter that can/can't import cadre" without depending on cwd/sys.path
+    subtlety around what a real broken venv would resolve to on this machine —
+    see cadre.provision.verify_importable's own docstring for why the real
+    subprocess check inherits cwd rather than forcing a neutral one.
+    """
+    tmp = tempfile.mkdtemp()
+    test_case.addCleanup(shutil.rmtree, tmp)
+    stub = Path(tmp) / "fake-python"
+    stub.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+    stub.chmod(0o700)
+    return str(stub)
+
+
+class TestSetupCommandCleanHome(unittest.TestCase):
+    """cadre setup against a clean tmp $HOME seeds everything from package data."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_seeds_fleets_personas_palette_and_config(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        cadre_home = Path(self.tmp) / ".cadre"
+        fleets = list((cadre_home / "fleets").glob("*.yaml"))
+        personas = list((cadre_home / "personas").glob("*.md"))
+        self.assertEqual(len(fleets), 7, f"expected 7 starter fleets, got {[f.name for f in fleets]}")
+        self.assertEqual(len(personas), 5, f"expected 5 personas, got {[p.name for p in personas]}")
+        self.assertTrue((cadre_home / "palette-candidates.yaml").exists())
+        self.assertTrue((cadre_home / "config").exists())
+
+    def test_config_line_is_exact_and_records_sys_executable(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
+
+    def test_returns_zero_and_confirms_home_in_message(self):
+        code, out = setup_command(None)
+        self.assertEqual(code, 0)
+        self.assertIn(str(Path(self.tmp) / ".cadre"), out)
+
+
+class TestSetupCommandKTD11FailClosed(unittest.TestCase):
+    """A recorded Python that cannot `import cadre` fails setup closed — nothing written."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_non_importing_python_exits_nonzero(self):
+        stub = _make_stub_python(self, 1)
+        code, out = setup_command(stub)
+        self.assertNotEqual(code, 0)
+        self.assertIn(stub, out)
+
+    def test_non_importing_python_writes_no_config(self):
+        stub = _make_stub_python(self, 1)
+        setup_command(stub)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertFalse(config_path.exists())
+
+    def test_non_importing_python_seeds_nothing_not_even_the_home_dir(self):
+        """The import-check runs BEFORE ensure_cadre_dirs — fail-fast with nothing
+        partial (KTD11): not a single directory gets created."""
+        stub = _make_stub_python(self, 1)
+        setup_command(stub)
+        cadre_home = Path(self.tmp) / ".cadre"
+        self.assertFalse(cadre_home.exists())
+
+    def test_importing_python_succeeds(self):
+        """The mirror case: a stub that DOES exit 0 (simulating a python that can
+        import cadre) is accepted and recorded verbatim."""
+        stub = _make_stub_python(self, 0)
+        code, out = setup_command(stub)
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+
+class TestSetupCommandPythonPrecedence(unittest.TestCase):
+    """--venv-python arg > CADRE_HERMES_PYTHON env > sys.executable (KTD11)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def _config_value(self):
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
+        return line.split("=", 1)[1]
+
+    def test_records_sys_executable_by_default(self):
+        code, out = setup_command(None, env={})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+    def test_arg_beats_env(self):
+        code, out = setup_command(sys.executable, env={"CADRE_HERMES_PYTHON": "/should/not/be/used"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+    def test_env_used_when_no_arg(self):
+        code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": sys.executable})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._config_value(), sys.executable)
+
+
+class TestSetupCommandExpanduser(unittest.TestCase):
+    """A literal ~-relative --venv-python is expanduser'd before use (not an absolute tmp path)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_tilde_venv_python_is_expanduser_before_verify_and_record(self):
+        """A stub placed under the (patched) $HOME, referenced via '~/bin/...', both
+        verifies correctly (expanduser happens before the subprocess check) and is
+        recorded as the expanded absolute path (not the literal '~/...' string)."""
+        stub_dir = Path(self.tmp) / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "fake-python"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+
+        code, out = setup_command("~/bin/fake-python")
+        self.assertEqual(code, 0, out)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+
+class TestSetupCommandSymlinkGuard(unittest.TestCase):
+    """cadre setup end-to-end: a pre-planted symlinked ~/.cadre/fleets is refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_symlinked_fleets_dir_not_seeded_through(self):
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700, parents=True)
+        elsewhere = Path(self.tmp) / "attacker-target"
+        elsewhere.mkdir(mode=0o700)
+        (cadre_home / "fleets").symlink_to(elsewhere, target_is_directory=True)
+
+        code, out = setup_command(None)
+
+        # Seeding degrades (warn-and-skip), never crashes — setup still succeeds
+        # overall (config gets written; the other seeds proceed normally).
+        self.assertEqual(code, 0, out)
+        # Nothing was written through the attacker's symlink target.
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertTrue((cadre_home / "fleets").is_symlink())
+
+
+class TestSetupCommandIdempotent(unittest.TestCase):
+    """A second cadre setup run preserves operator edits; config stays grep|cut-parseable."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_second_run_preserves_operator_edited_fleet(self):
+        setup_command(None)
+        cadre_home = Path(self.tmp) / ".cadre"
+        edited = cadre_home / "fleets" / "research-swarm.yaml"
+        edited.write_text("OPERATOR EDIT", encoding="utf-8")
+
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(edited.read_text(encoding="utf-8"), "OPERATOR EDIT")
+
+    def test_second_run_config_line_still_grep_cut_parses(self):
+        setup_command(None)
+        setup_command(None)  # second run
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        content = config_path.read_text(encoding="utf-8")
+        # Mirror the C2 shell contract: grep -E '^CADRE_HERMES_PYTHON=' | cut -d= -f2-
+        line = next(ln for ln in content.splitlines() if ln.startswith("CADRE_HERMES_PYTHON="))
+        value = line.split("=", 1)[1]
+        self.assertEqual(value, sys.executable)
+        self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
+
+
+class TestSetupCommandCLIWiring(unittest.TestCase):
+    """`cadre setup` is reachable through cli.main()'s argparse dispatch."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+
+    def test_main_setup_subcommand_provisions_and_prints_result(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(["setup"])
+        self.assertEqual(code, 0)
+        self.assertTrue((Path(self.tmp) / ".cadre" / "config").exists())
+        self.assertIn(str(Path(self.tmp) / ".cadre"), buf.getvalue())
+
+    def test_main_setup_venv_python_flag_is_wired(self):
+        stub = _make_stub_python(self, 0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(["setup", "--venv-python", stub])
+        self.assertEqual(code, 0)
+        config_path = Path(self.tmp) / ".cadre" / "config"
+        self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
 
 
 if __name__ == "__main__":

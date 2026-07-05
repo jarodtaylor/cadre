@@ -1,22 +1,24 @@
-"""resolve_venv.py — Resolve the Hermes venv Python path, scaffold ~/.cadre, and record it.
+"""resolve_venv.py — Resolve the Hermes venv Python path.
 
-This script is the ONLY unit-tested piece of the U4 install. resolve_venv()
-itself is pure stdlib, no cadre import needed; the two seed_* functions below
-source starter data from the installed/repo ``cadre`` package (package data
-under ``cadre/data/``, via ``cadre.resources``), so this module inserts the
-repo root onto sys.path when run standalone — mirroring
-``spikes/verify_aiagent_providers.py`` — so ``import cadre`` resolves whether
-this file is executed as a script (how install.sh invokes it,
-``python3 scripts/resolve_venv.py``, which puts scripts/ on sys.path[0], NOT
-the repo root) or loaded by the test suite (already on sys.path via
-``python -m unittest`` from the repo root).
+This script does ONE thing: figure out which Python interpreter is the
+Hermes venv's, and print its path to stdout. It is pure stdlib — no ``cadre``
+import, no repo-relative sys.path bootstrap needed, so it works standalone
+even before ``cadre`` is installed anywhere.
 
-Five exported functions:
+Scaffolding ``~/.cadre``, seeding starter fleets/personas/palette-candidates,
+and writing ``~/.cadre/config`` all moved to ``cadre.provision`` / the
+``cadre setup`` console command (U4,
+docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md) — this script is
+purely the bootstrap step install.sh uses to find $PYBIN *before* installing
+and provisioning cadre into it:
+
+    PYBIN="$(python3 scripts/resolve_venv.py)"
+    "$PYBIN" -m pip install --force-reinstall --no-deps .
+    "$PYBIN" -m cadre.cli setup
+
+Two exported names:
   resolve_venv(override, *, probe_paths, env)  — pure resolver, no I/O
-  ensure_cadre_dirs(home)                       — owner-only dir scaffolding
-  write_config(python_path, config_path)        — owner-only config writer
-  seed_starter_fleets(cadre_home)               — idempotent fleet seeding, never raises
-  seed_personas(cadre_home)                     — idempotent persona seeding, never raises
+  KNOWN_PROBE_PATHS                            — default probe list
 
 main(argv) — argparse entry; prints ONLY the resolved python path to stdout;
              all diagnostics go to stderr. Designed for:
@@ -29,21 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Callable
 from pathlib import Path
-
-# When run as a standalone script (`python3 scripts/resolve_venv.py` — how
-# install.sh invokes it), Python puts scripts/ on sys.path[0], NOT the repo
-# root, so the `cadre.resources` import below (needed to source starter data)
-# would fail with ModuleNotFoundError. Insert the repo root so it resolves
-# whether run as a script or imported. Mirrors skills/cadre-fleet/run.py and
-# spikes/verify_aiagent_providers.py. (Dev tests never hit this: they run via
-# `python -m unittest` from the repo root, which is already on sys.path.)
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from cadre.resources import fleets_dir, personas_dir  # noqa: E402
 
 # Known Hermes venv python paths, probed in order when no override is given.
 # Root-Linux install first (VPS); user-local install second.
@@ -51,155 +39,6 @@ KNOWN_PROBE_PATHS = [
     "/usr/local/lib/hermes-agent/venv/bin/python",
     "~/.hermes/hermes-agent/venv/bin/python",
 ]
-
-# Explicit allowlist — NEVER glob fleets/*.yaml: palette.example.yaml lives there
-# and is not a fleet (it would break FleetConfig.load if seeded as a fleet).
-_STARTER_FLEETS = (
-    "research-swarm.example.yaml",
-    "code-review.example.yaml",
-    "doc-review.example.yaml",
-    "review-scoring.example.yaml",
-    "research-brief.example.yaml",
-    "debate.example.yaml",
-    "critique-revise.example.yaml",
-)
-
-# Explicit allowlist of persona files to seed. Personas have no .example infix —
-# names copy unchanged (coherence-reviewer.md → coherence-reviewer.md).
-_STARTER_PERSONAS = (
-    "coherence-reviewer.md",
-    "feasibility-reviewer.md",
-    "scope-guardian-reviewer.md",
-    "product-reviewer.md",
-    "adversarial-document-reviewer.md",
-)
-
-
-def _seed_files(
-    src_dir: Path,
-    dest_dir: Path,
-    names: tuple[str, ...],
-    dest_name_fn: Callable[[str], str],
-) -> None:
-    """Seed a set of files from src_dir into dest_dir, owner-only and idempotent.
-
-    Shared implementation for seed_starter_fleets and seed_personas. The two
-    callers differ only in their source dir, dest dir, file list, and the
-    dest-name transform (fleet strips ``.example`` infix; personas copy as-is).
-
-    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
-    Owner-only: dest_dir is created 0o700 and each file written 0o600 under umask 0o077.
-    Never raises: all I/O errors are caught, warned to stderr, and skipped.
-    Never writes to stdout: all messages go to sys.stderr.
-
-    Args:
-        src_dir: Directory containing the source files.
-        dest_dir: Destination directory (created 0o700 if absent).
-        names: Ordered tuple of source filenames to seed.
-        dest_name_fn: Maps a source filename to its destination filename.
-    """
-    old_umask = os.umask(0o077)
-    try:
-        # Directory-level symlink guard (#5, R7): the per-file O_NOFOLLOW below
-        # refuses a symlinked *file*, but mkdir(exist_ok=True) silently succeeds
-        # through a symlinked *directory* — an attacker-planted ~/.cadre/fleets ->
-        # /elsewhere would then receive our seeds. Reject a symlinked dest_dir
-        # before writing (lstat does not follow the link). Degrade like the
-        # create-failure branch: warn and skip, never crash the install.
-        if dest_dir.is_symlink():
-            print(
-                f"[cadre] warning: refusing to seed into {dest_dir}: it is a symlink "
-                "(possible tampering); remove it and re-run to seed.",
-                file=sys.stderr,
-            )
-            return
-        try:
-            dest_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        except OSError as exc:
-            print(f"[cadre] warning: could not create {dest_dir}: {exc}", file=sys.stderr)
-            return
-
-        for name in names:
-            dest_name = dest_name_fn(name)
-            src = src_dir / name
-            dest = dest_dir / dest_name
-            try:
-                content = src.read_text(encoding="utf-8")
-                # Atomic preserve-existing: O_EXCL fails if the destination already exists,
-                # closing the TOCTOU window a separate exists()-then-open had (which could
-                # truncate an operator-edited file); O_NOFOLLOW refuses to follow a symlink
-                # planted at the destination. Mirrors capture.prepare_run_dir's atomic
-                # reservation idiom.
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-                fd = os.open(str(dest), flags, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(content)
-                dest.chmod(0o600)
-                print(f"[cadre] seeded {dest_name}", file=sys.stderr)
-            except FileExistsError:
-                # Destination already exists (a regular file or a symlink) — preserve it.
-                print(f"[cadre] {dest_name}: exists — preserved", file=sys.stderr)
-            except (OSError, UnicodeDecodeError) as exc:
-                # UnicodeDecodeError (a non-UTF-8 source) is not an OSError subclass; catch it
-                # too so the never-raises contract holds. ELOOP from O_NOFOLLOW on a symlink
-                # also lands here — warned and skipped, never followed.
-                # Best-effort remove a partially-written destination so the next install
-                # does not preserve a corrupt file (the write failed mid-stream).
-                try:
-                    os.unlink(dest)
-                except OSError:
-                    pass
-                print(f"[cadre] warning: could not seed {dest_name}: {exc}", file=sys.stderr)
-                continue
-    finally:
-        os.umask(old_umask)
-
-
-def seed_starter_fleets(cadre_home: Path) -> None:
-    """Copy starter fleets from the installed cadre package to <cadre_home>/fleets/.
-
-    Source data lives at ``cadre/data/fleets/`` (package data, resolved via
-    ``cadre.resources.fleets_dir()`` — the same helper in dev/repo-root and
-    installed/wheel contexts). Each source file has a ``.example`` infix that
-    is stripped on copy (e.g. ``research-swarm.example.yaml`` → ``research-swarm.yaml``).
-
-    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
-    Owner-only: the fleets dir is created 0o700 and each file written 0o600 under umask 0o077.
-    Never raises: all I/O errors are caught, warned to stderr, and skipped.
-    Never writes to stdout: all messages go to sys.stderr.
-
-    Args:
-        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
-    """
-    _seed_files(
-        src_dir=fleets_dir(),
-        dest_dir=cadre_home / "fleets",
-        names=_STARTER_FLEETS,
-        dest_name_fn=lambda name: name.replace(".example.yaml", ".yaml"),
-    )
-
-
-def seed_personas(cadre_home: Path) -> None:
-    """Copy persona files from the installed cadre package to <cadre_home>/personas/.
-
-    Source data lives at ``cadre/data/personas/`` (package data, resolved via
-    ``cadre.resources.personas_dir()``). Personas have no ``.example`` infix —
-    names copy unchanged (e.g. ``coherence-reviewer.md`` → ``coherence-reviewer.md``).
-
-    Idempotent: existing destination files are NOT overwritten (operator edits preserved).
-    Owner-only: the personas dir is created 0o700 and each file written 0o600 under umask 0o077.
-    Never raises: all I/O errors are caught, warned to stderr, and skipped.
-    Never writes to stdout: all messages go to sys.stderr.
-
-    Args:
-        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
-    """
-    _seed_files(
-        src_dir=personas_dir(),
-        dest_dir=cadre_home / "personas",
-        names=_STARTER_PERSONAS,
-        dest_name_fn=lambda name: name,
-    )
 
 
 def resolve_venv(
@@ -267,70 +106,8 @@ def resolve_venv(
     )
 
 
-def ensure_cadre_dirs(home: str = "~/.cadre") -> Path:
-    """Create <home> and <home>/fleets owner-only (0o700) under umask(0o077).
-
-    Mirrors capture.prepare_run_dir's umask discipline so every created
-    directory component is owner-only from creation — no momentary 0o755.
-    Idempotent: safe to call multiple times.
-
-    Args:
-        home: Root of the ~/.cadre control dir. Defaults to "~/.cadre".
-
-    Returns:
-        The resolved home Path (expanduser'd).
-    """
-    home_path = Path(home).expanduser()
-    old_umask = os.umask(0o077)
-    try:
-        home_path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (home_path / "fleets").mkdir(mode=0o700, parents=True, exist_ok=True)
-        (home_path / "personas").mkdir(mode=0o700, parents=True, exist_ok=True)
-    finally:
-        os.umask(old_umask)
-    return home_path
-
-
-def write_config(
-    python_path: str,
-    config_path: str = "~/.cadre/config",
-) -> None:
-    """Write CADRE_HERMES_PYTHON=<python_path> to config_path, owner-only 0o600.
-
-    Writes a single line: ``CADRE_HERMES_PYTHON=<python_path>\\n``
-
-    Uses the capture._write idiom (os.open with O_CREAT/O_TRUNC at mode 0o600,
-    then explicit chmod) so the file is owner-only at creation — never the
-    momentary 0o644 a write-then-chmod leaves under a default umask.
-
-    Idempotent: overwrites on re-run (single-key file, O_TRUNC).
-
-    The locked config contract (C2): the skill reads this via:
-        PYBIN="${CADRE_HERMES_PYTHON:-$(grep -E '^CADRE_HERMES_PYTHON=' ~/.cadre/config | cut -d= -f2-)}"
-    so the line MUST match exactly:
-        CADRE_HERMES_PYTHON=<path>\\n
-    No quotes around the path, no trailing spaces.
-
-    Args:
-        python_path: The resolved Hermes venv Python path to record.
-        config_path: Destination config file path. Defaults to "~/.cadre/config".
-    """
-    path = Path(config_path).expanduser()
-    content = f"CADRE_HERMES_PYTHON={python_path}\n"
-
-    old_umask = os.umask(0o077)
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        path.chmod(0o600)
-    finally:
-        os.umask(old_umask)
-
-
 def main(argv: list[str] | None = None) -> int:
-    """Resolve the Hermes venv python, scaffold ~/.cadre dirs, and write config.
+    """Resolve the Hermes venv python and print it to stdout.
 
     Prints ONLY the resolved python path to STDOUT (bare path, no trailing
     newline from print — but print adds one, which is fine; the shell's
@@ -343,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     Returns 0 on success; 1 with a stderr message on resolution failure.
     """
     parser = argparse.ArgumentParser(
-        description="Resolve the Hermes venv Python, scaffold ~/.cadre, and record the path.",
+        description="Resolve the Hermes venv Python and print its path.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -363,18 +140,6 @@ def main(argv: list[str] | None = None) -> int:
         python_path = resolve_venv(override=args.venv_python)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    # Scaffold dirs and write config; diagnostics to stderr.
-    try:
-        home = ensure_cadre_dirs()
-        print(f"scaffolded {home}", file=sys.stderr)
-        seed_starter_fleets(home)
-        seed_personas(home)
-        write_config(python_path)
-        print(f"wrote ~/.cadre/config: CADRE_HERMES_PYTHON={python_path}", file=sys.stderr)
-    except OSError as exc:
-        print(f"error scaffolding ~/.cadre: {exc}", file=sys.stderr)
         return 1
 
     # ONLY the resolved path goes to stdout (captured by install.sh).

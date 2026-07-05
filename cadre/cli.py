@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 from pathlib import Path
 
+from cadre import provision
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.file_input import MAX_FILE_BYTES, compose
@@ -129,6 +131,73 @@ def run_command(
     return exit_code, output
 
 
+def setup_command(
+    venv_python: str | None = None,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Provision ~/.cadre from the installed cadre package (KTD11 fail-closed).
+
+    Resolves the Hermes Python to RECORD, precedence:
+      1. venv_python (e.g. --venv-python), expanduser'd.
+      2. env['CADRE_HERMES_PYTHON'] (env defaults to os.environ), expanduser'd.
+      3. sys.executable — when `cadre setup` runs as the installed console
+         script inside the target venv (the load-bearing KTD2 install target),
+         sys.executable IS that venv's authoritative Python; no probe list
+         needed (unlike scripts/resolve_venv.py's bootstrap-time resolver,
+         which runs BEFORE cadre is installed anywhere).
+
+    Before any write, verifies `import cadre` resolves under the recorded
+    Python (provision.verify_importable, a subprocess check) and fails closed
+    — clear message, non-zero exit, nothing written, not even ~/.cadre itself —
+    if it does not. Only on success does it scaffold + seed + write config:
+    ensure_cadre_dirs() -> seed_starter_fleets() -> seed_personas() ->
+    seed_palette_candidates() -> write_config(). Idempotent overall (each step
+    preserves existing operator edits; write_config overwrites the single
+    config line every run).
+
+    Args:
+        venv_python: Explicit Hermes Python path (highest precedence).
+        env: Mapping to use instead of os.environ. Defaults to os.environ.
+
+    Returns:
+        (exit_code, message) — 0 and a confirmation on success; 1 and a clear
+        error (naming the recorded path) on the KTD11 fail-closed path.
+    """
+    if env is None:
+        env = os.environ
+
+    if venv_python is not None:
+        recorded_python = str(Path(venv_python).expanduser())
+    elif env.get("CADRE_HERMES_PYTHON"):
+        recorded_python = str(Path(env["CADRE_HERMES_PYTHON"]).expanduser())
+    else:
+        recorded_python = sys.executable
+
+    if not provision.verify_importable(recorded_python):
+        return (
+            1,
+            f"error: `import cadre` does not resolve under {recorded_python}\n"
+            "Install cadre into that interpreter first, e.g.:\n"
+            f"  {recorded_python} -m pip install --force-reinstall --no-deps <cadre source>\n"
+            "then re-run `cadre setup`. Nothing was written.",
+        )
+
+    home = provision.ensure_cadre_dirs()
+    provision.seed_starter_fleets(home)
+    provision.seed_personas(home)
+    provision.seed_palette_candidates(home)
+    provision.write_config(recorded_python)
+
+    return (
+        0,
+        f"Provisioned {home} from the installed cadre package.\n"
+        f"Recorded Hermes Python: {recorded_python}\n"
+        "Next: edit ~/.cadre/palette-candidates.yaml for your authenticated providers, "
+        "then run `cadre verify-palette`.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cadre", description="Run provider-neutral agent fleets.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -159,9 +228,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable run capture (no folder written to disk)",
     )
 
+    p_setup = sub.add_parser("setup", help="Provision ~/.cadre from the installed package")
+    p_setup.add_argument(
+        "--venv-python",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Hermes Python to record in ~/.cadre/config (highest precedence; "
+            "overrides CADRE_HERMES_PYTHON env and the sys.executable default)"
+        ),
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "validate":
         code, out = validate_command(args.spec)
+    elif args.cmd == "setup":
+        code, out = setup_command(args.venv_python)
     else:
         # A real run needs at least one of --task / --doc. Explicit exit-2 usage
         # error (not argparse's required-flag error, since --task is now optional).
