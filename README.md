@@ -91,7 +91,7 @@ The report stays alone on stdout (pipe it, capture it); the `[cadre]` progress b
 
 You need a host with `hermes-agent` installed and at least one provider authenticated — Cadre's multi-model value shows with two or more across different vendors, but a single-provider fleet runs fine. **No repo clone required** — `cadre` installs from git as a self-contained package. The five steps:
 
-**1. Find the Python that runs Hermes.** Cadre installs into the *same* interpreter that runs `run_agent` (it's the only one that can import both). The path varies by install; the common root-Linux location:
+**1. Find the Python that runs Hermes.** Cadre runs *inside* Hermes — it calls Hermes's own code to reach your models — so it installs into the **same Python environment Hermes uses**, not your system Python. (Like a VS Code extension: it installs *into VS Code*, not just "onto your computer." You almost certainly have Python — this is about using the *right* one.) That Python's path varies by install; the common root-Linux location:
 
 ```bash
 PYBIN=/usr/local/lib/hermes-agent/venv/bin/python
@@ -107,6 +107,8 @@ If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK
 ```
 
 `--no-deps` keeps cadre from touching Hermes's own dependency pins; `--force-reinstall` matters on upgrades — pip no-ops an unchanged version otherwise. cadre's only runtime dependency is `pyyaml`, which the Hermes venv already carries — but if yours somehow doesn't, run `"$PYBIN" -m pip install "pyyaml>=6.0"` first, since a `cadre` command errors at import without it. A **bare `pip install cadre` grabs a different, unrelated package on PyPI** — always use the git URL.
+
+> **Tip — type less.** The install also puts a `cadre` command *in that venv*. The steps below use `"$PYBIN" -m cadre.cli …` because it works in any shell with zero extra setup. If you'd rather just type `cadre …` (e.g. `cadre run …`), activate the venv for this session — `source "$(dirname "$PYBIN")"/activate` — or add that `bin` directory to your `PATH` to make it stick.
 
 **3. Provision `~/.cadre`:**
 
