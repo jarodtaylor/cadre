@@ -59,7 +59,7 @@ flowchart LR
     WR --> R2["grounded brief<br/>attributed, chain-audited"]
 ```
 
-Every model call is isolated behind one thin adapter over Hermes's `AIAgent` (`cadre/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`. Every run is **captured** to `~/.cadre/runs/<timestamp-slug>/` — per-specialist markdown, the synthesis, and a JSON manifest (per-lane outcome, elapsed, toolset, timed-out; run-level status + active profile) — so a run is auditable after the fact.
+Every model call is isolated behind one thin adapter over Hermes's `AIAgent` (`cadre/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) gets only non-privileged tools from the `SAFE_TOOLSETS` allowlist — read/search/analyze, content generation, and internal reasoning/planning — and **never** system access (terminal, file, browser, code execution) unless a fleet explicitly opts into `allow_privileged_tools: true`. Every run is **captured** to `~/.cadre/runs/<timestamp-slug>/` — per-specialist markdown, the synthesis, and a JSON manifest (per-lane outcome, elapsed, toolset, timed-out; run-level status + active profile) — so a run is auditable after the fact.
 
 ## What running it looks like
 
@@ -106,7 +106,7 @@ If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK
 "$PYBIN" -m pip install --force-reinstall --no-deps "git+https://github.com/jarodtaylor/cadre@v0.1.0"
 ```
 
-`--no-deps` keeps cadre from touching Hermes's own dependency pins (the Hermes venv already carries `pyyaml`, cadre's only runtime dep); `--force-reinstall` matters on upgrades — pip no-ops an unchanged version otherwise. A **bare `pip install cadre` grabs a different, unrelated package on PyPI** — always use the git URL. (RUNBOOK covers the rare pyyaml exception.)
+`--no-deps` keeps cadre from touching Hermes's own dependency pins; `--force-reinstall` matters on upgrades — pip no-ops an unchanged version otherwise. cadre's only runtime dependency is `pyyaml`, which the Hermes venv already carries — but if yours somehow doesn't, run `"$PYBIN" -m pip install "pyyaml>=6.0"` first, since a `cadre` command errors at import without it. A **bare `pip install cadre` grabs a different, unrelated package on PyPI** — always use the git URL.
 
 **3. Provision `~/.cadre`:**
 
@@ -143,7 +143,7 @@ Beyond the direct CLI, a Hermes agent can run Cadre conversationally through the
 HERMES_SKILLS_DIR=/path/to/hermes/skills "$PYBIN" -m cadre.cli install-skill
 ```
 
-The agent then composes fleets drawing only from the host-verified `~/.cadre/palette.yaml`, and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. A fleet that opts into privileged tools (`allow_privileged_tools: true`) is approved with `--approve-privileged` in place of the plain preview — the preview okay alone won't authorize privileged execution. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+The agent composes fleets from the host-verified `~/.cadre/palette.yaml` (the preview flags off-palette picks as advisory warnings — guidance, not a hard runtime gate), and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. A fleet that opts into privileged tools (`allow_privileged_tools: true`) is approved with `--approve-privileged` in place of the plain preview — the preview okay alone won't authorize privileged execution. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Develop / contribute
 
