@@ -4,6 +4,19 @@ Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across
 
 > **Status: `v0.1.0` — building in public.** The engine, run capture, live per-lane progress, cross-model review fleets, sequential and iterative (debate / critique-revise) topologies, and the agent-run handoff are all shipped and **dogfooded live** on a Hermes host — a Hermes agent has driven a four-model fleet end-to-end (preview → human okay → grounded, attributed result). Early and evolving — expect APIs to change.
 
+## Quickstart
+
+On a Hermes host, install `cadre` into the Hermes venv and run a fleet — no repo clone required. (`$PYBIN` is the Python that runs Hermes; the [full walkthrough](#install-and-run-it-on-your-hermes-host) below covers finding it and editing your palette + fleet.)
+
+```bash
+"$PYBIN" -m pip install --force-reinstall --no-deps "git+https://github.com/jarodtaylor/cadre@v0.1.0"
+"$PYBIN" -m cadre.cli setup           # provision ~/.cadre from the package
+"$PYBIN" -m cadre.cli verify-palette  # after editing ~/.cadre/palette-candidates.yaml to your models
+"$PYBIN" -m cadre.cli run ~/.cadre/fleets/research-swarm.yaml --task "<your question>"   # after setting the fleet's models
+```
+
+Prefer to understand it first? Read on — [how it works](#how-it-works), then the [full host walkthrough](#install-and-run-it-on-your-hermes-host).
+
 ## Why
 
 You're running a Hermes agent, and it needs to spread work across helpers — review its own plan, validate a diff, research a question from several angles. Hermes can delegate to subagents, but they all run the **same** model. So you get parallelism without diversity: five takes from one point of view.
