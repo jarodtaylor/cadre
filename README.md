@@ -44,7 +44,7 @@ flowchart LR
     WR --> R2["grounded brief<br/>attributed, chain-audited"]
 ```
 
-All model calls are isolated behind one thin adapter over Hermes's `AIAgent` (`fleet_engine/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each model call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`.
+All model calls are isolated behind one thin adapter over Hermes's `AIAgent` (`cadre/model_client.py`), so the engine **runs and tests without Hermes installed** — the rest of the suite uses fakes. Each model call is bounded by a wall-clock backstop, and the toolset gate is a **fail-closed allowlist**: a specialist (which may read untrusted web content) only gets read/search/analyze tools unless a fleet explicitly opts into `allow_privileged_tools: true`.
 
 Every run is **captured** to `~/.cadre/runs/<timestamp-slug>/` — per-specialist markdown, the synthesis, and a JSON manifest (per-lane outcome, elapsed, toolset, timed-out; run-level synth status + active profile) — so a run is auditable after the fact.
 
@@ -74,7 +74,7 @@ flowchart LR
     P -. "compose from" .-> F
 ```
 
-The **preview is the operative control**: it renders mechanically from the parsed `FleetConfig` (the synthesizer, `allow_privileged_tools`, the synthesis prompt, and every lane) and exits without making a model call — so a human approves *what actually runs*, not the agent's paraphrase. Safe toolsets still read untrusted content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk; see `skills/cadre-fleet/SKILL.md` and `docs/RUNBOOK.md`.
+The **preview is the operative control**: it renders mechanically from the parsed `FleetConfig` (the synthesizer, `allow_privileged_tools`, the synthesis prompt, and every lane) and exits without making a model call — so a human approves *what actually runs*, not the agent's paraphrase. Safe toolsets still read untrusted content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk; see `cadre/data/skill/SKILL.md` and `docs/RUNBOOK.md`.
 
 ## Quick start (development)
 
@@ -82,15 +82,29 @@ The **preview is the operative control**: it renders mechanically from the parse
 python3.11 -m venv .venv          # Python >=3.11,<3.14
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tests                                   # run the suite
-.venv/bin/python -m fleet_engine.cli validate fleets/research-swarm.example.yaml
-.venv/bin/python skills/cadre-fleet/run.py --fleet fleets/research-swarm.example.yaml --preview  # render a fleet, no model calls
+.venv/bin/python -m cadre.cli validate cadre/data/fleets/research-swarm.example.yaml
 ```
 
-The engine imports and the suite passes **without** `hermes-agent` (the adapter lazy-imports it; tests use fakes).
+Repo-present, these run with no install — the top-level `cadre` package imports
+from the working directory. The engine imports and the suite passes **without**
+`hermes-agent` (the adapter lazy-imports it; tests use fakes).
+
+## Installing `cadre`
+
+```bash
+pip install "git+https://github.com/jarodtaylor/cadre@<ref>"   # pin a tag or commit
+```
+
+A bare `pip install cadre` grabs a different, unrelated package on PyPI — always
+install from the git URL above until `cadre` publishes under its own name. On a
+Hermes host, install into the **Hermes venv Python** (the interpreter that runs
+`run_agent`) — see `docs/RUNBOOK.md` for the full install → provision → verify →
+run checklist, including the `cadre setup` / `cadre verify-palette` / `cadre
+install-skill` verbs and the agent-run handoff's `cadre/data/skill/`.
 
 ## Running live
 
-Running a fleet for real needs a Hermes host with `hermes-agent` installed and providers authenticated. `docs/RUNBOOK.md` is the ordered checklist: install → verify the palette → compose a fleet → preview → run. The repo's `fleets/*.example.yaml` are **templates** — copy one into `~/.cadre/fleets/` and set your host-verified strings. Never commit API keys or tokens; credentials live in Hermes auth/env.
+Running a fleet for real needs a Hermes host with `hermes-agent` installed and providers authenticated. `docs/RUNBOOK.md` is the ordered checklist: install → `cadre setup` (provisions `~/.cadre`, auto-seeding all seven starter fleets from the installed package) → `cadre verify-palette` → edit a seeded fleet's provider/model strings → preview → run. Never commit API keys or tokens; credentials live in Hermes auth/env.
 
 ## Roadmap
 

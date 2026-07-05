@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # scripts/install.sh — one-time Cadre host setup
 #
+# This is the repo-present convenience wrapper: it installs cadre from THIS
+# checkout (`pip install .` below), for when you already have — or want — a
+# clone on the host (e.g. to iterate on unreleased changes, or run the test
+# suite for extra confidence). A clone is not required to install cadre at
+# all: on a clone-less host, run the same verbs directly against the git URL
+# instead of step 3's `pip install .` — see docs/RUNBOOK.md. Either way,
+# NEVER `pip install cadre` bare: that is a different, unrelated package on
+# PyPI. Install from this checkout (`.`) or from the git URL.
+#
 # This script handles MECHANICAL scaffolding only:
 #   - Resolve the Hermes venv Python
 #   - pip install cadre into it, then run `cadre setup`: scaffold ~/.cadre,

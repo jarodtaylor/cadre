@@ -1,22 +1,9 @@
 # Fleet examples
 
-These are **examples**, not runnable fleets. Copy one into your host fleet
-library to use it:
-
-```bash
-cp fleets/research-swarm.example.yaml ~/.cadre/fleets/research-swarm.yaml
-cp fleets/research-brief.example.yaml ~/.cadre/fleets/research-brief.yaml
-cp fleets/code-review.example.yaml ~/.cadre/fleets/code-review.yaml
-cp fleets/doc-review.example.yaml ~/.cadre/fleets/doc-review.yaml
-cp fleets/review-scoring.example.yaml ~/.cadre/fleets/review-scoring.yaml
-cp fleets/debate.example.yaml ~/.cadre/fleets/debate.yaml
-cp fleets/critique-revise.example.yaml ~/.cadre/fleets/critique-revise.yaml
-# then set provider/model strings to your host-verified values (see ~/.cadre/palette.yaml)
-```
-
-All seven starter fleets are seeded into `~/.cadre/fleets/` at install (stripping
-`.example` from the filename) so they are ready to configure without copying
-manually.
+These files are **examples**, shipped as package data under `cadre/data/fleets/`.
+`cadre setup` seeds all seven into `~/.cadre/fleets/` automatically (stripping
+`.example` from the filename) — no copying needed. Open one there and set
+provider/model strings to your host-verified values (see `~/.cadre/palette.yaml`).
 
 ---
 
@@ -281,13 +268,13 @@ ranking to you; `judge` preserves signal and adds the calibrated perspective.
 
 ## `palette.example.yaml` — candidate-seed / palette template
 
-The install seeds `~/.cadre/palette-candidates.yaml` from this file. Edit it
-to match the providers you've authenticated in your Hermes profile, then run
-the verify step:
+`cadre setup` seeds `~/.cadre/palette-candidates.yaml` from this file (a sibling
+of the fleets above, under `cadre/data/`). Edit it to match the providers you've
+authenticated in your Hermes profile, then run the verify step:
 
 ```bash
 PYBIN="${CADRE_HERMES_PYTHON:-$(grep -E '^CADRE_HERMES_PYTHON=' ~/.cadre/config | cut -d= -f2-)}"
-"$PYBIN" spikes/verify_aiagent_providers.py
+"$PYBIN" -m cadre.cli verify-palette
 ```
 
 Verification keeps only the `(provider, model)` pairs that actually resolve on

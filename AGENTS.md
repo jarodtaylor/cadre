@@ -36,7 +36,7 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 ## Dev vs runtime split
 
 - **This repo runs and tests fully WITHOUT `hermes-agent`.** The adapter
-  (`fleet_engine/model_client.py`) lazy‑imports `run_agent` only when constructing a
+  (`cadre/model_client.py`) lazy‑imports `run_agent` only when constructing a
   live agent; every test uses a fake/stub. So the engine imports and the suite passes
   on a plain machine.
 - **Dev machine:** use the project venv — `.venv` (Python **3.11**). System Python may
@@ -48,11 +48,15 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 
 ```bash
 .venv/bin/python -m unittest discover -s tests                       # full suite (stdlib unittest)
-.venv/bin/python -m fleet_engine.cli validate fleets/research-swarm.example.yaml
-.venv/bin/python skills/cadre-fleet/run.py --fleet fleets/research-swarm.example.yaml --preview  # render parsed fleet, no model calls (dev-safe)
-.venv/bin/python -m fleet_engine.cli run <spec.yaml> --task "…"       # needs hermes-agent (host)
-.venv/bin/python -m fleet_engine.cli run <spec.yaml> --doc plan.md --task "Review this PLAN"  # --doc reads a file into the task (repeatable; either --task or --doc)
+.venv/bin/python -m cadre.cli validate cadre/data/fleets/research-swarm.example.yaml
+.venv/bin/python -m cadre.cli run <spec.yaml> --task "…"       # needs hermes-agent (host)
+.venv/bin/python -m cadre.cli run <spec.yaml> --doc plan.md --task "Review this PLAN"  # --doc reads a file into the task (repeatable; either --task or --doc)
 ```
+
+Repo-present, these run with no install (the top-level `cadre` package imports from
+the working directory — R9). The installed `cadre` command (`pip install .` or the
+git URL — see `docs/RUNBOOK.md`) exposes the same `validate`/`run` behavior as a
+console script, plus `setup`/`verify-palette`/`install-skill` for host provisioning.
 
 ## Conventions
 
@@ -64,14 +68,16 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   - `model_client.py` is the **only** module aware of `AIAgent` (the isolation seam,
     lazy import). The engine holds **no** `AIAgent` knowledge and **no** fleet‑domain strings.
   - The config toolset gate is a **fail‑closed allowlist** (`SAFE_TOOLSETS` in
-    `fleet_engine/config.py`); anything not safe needs `allow_privileged_tools: true`.
+    `cadre/config.py`); anything not safe needs `allow_privileged_tools: true`.
     Do not regress it to a denylist.
   - The engine bounds every model call with a daemon‑thread wall‑clock backstop
     (`call_timeout`); see the module docstring for why it's daemon threads, not
     `ThreadPoolExecutor`, and why it's a backstop over AIAgent's own request timeout.
-  - **Agent-run handoff:** `skills/cadre-fleet/` is the runtime surface a Hermes agent
-    invokes (select a curated fleet from `~/.cadre/fleets/`, or compose one only from
-    the verified `~/.cadre/palette.yaml`). The runner's `--preview` (`render_fleet_preview`)
+  - **Agent-run handoff:** the `cadre-fleet` skill (source `cadre/data/skill/`,
+    materialized into a Hermes skills directory by `cadre install-skill`) is the
+    runtime surface a Hermes agent invokes (select a curated fleet from
+    `~/.cadre/fleets/`, or compose one only from the verified `~/.cadre/palette.yaml`).
+    The runner's `--preview` (`render_fleet_preview`)
     renders the **parsed** `FleetConfig` and is the load-bearing human-okay control — the
     human approves what runs, not the agent's paraphrase. **Do not relax preview-always**
     without the deferred security pass: safe toolsets still read untrusted web content,
@@ -142,7 +148,7 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   is set by the engine at the `run_fleet` return point and surfaced in render + manifest;
   it never affects `status`.
 - **Judge‑specific seams:** the engine returns the judge's raw text in `result.judge`
-  and stays pure (no parsing). `fleet_engine/judge_grade.py` (caller‑layer) parses it
+  and stays pure (no parsing). `cadre/judge_grade.py` (caller‑layer) parses it
   into per-lane structure (`{role, model, grade, rationale}`, plus `ungraded` lanes and
   `parsed_ok`). **Prompt↔parser label contract (nonce-bound, #5):** `_judge_prompt`
   labels each surviving specialist by its exact `role` string plus a per-run marker
@@ -155,17 +161,17 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
   Partial coverage exits 0; only a judge error/timeout or total specialist failure exits
   1. The judge passes `toolset=[]` explicitly — the `[]`-vs-`None` invariant applies
   (never `None`, which enables every tool over untrusted specialist text).
-- **Preview/validate is a trust surface:** `fleet_engine/preview_lint.py` (palette +
+- **Preview/validate is a trust surface:** `cadre/preview_lint.py` (palette +
   focus‑grounding validation) is caller‑layer — imported only by `run.py`/`cli.py`,
   never by the engine — and warns, never blocks. Every fleet‑controlled string printed
   by any preview/validate surface (the rendered fleet, the lint warnings, the validate
-  summary) goes through `fleet_engine.text_safety.sanitize` (the public chokepoint since
+  summary) goes through `cadre.text_safety.sanitize` (the public chokepoint since
   #5/#23; `render._sanitize` is now a compat alias): the preview is the human‑okay control
   and must not be spoofable by terminal escapes in a tampered fleet. **Since #5 the same
   `sanitize` also covers model *output* — specialist text, synthesis/judge bodies, error
   strings, and model-derived `manifest.json` fields — on both the terminal and on-disk
   capture surfaces; only `--doc`/prompt *input* content stays raw (below).**
-- **Caller‑side file input (`--doc`):** `fleet_engine/file_input.py` is caller‑layer —
+- **Caller‑side file input (`--doc`):** `cadre/file_input.py` is caller‑layer —
   imported only by `run.py`/`cli.py`, never by the engine (`TestEngineIsolation` guards
   both directions). `compose(task, docs)` reads each `--doc PATH` and appends it to the
   task as a labeled `=== FILE: <path> ===` block; the engine still receives only the
@@ -180,8 +186,10 @@ there is the wrong fix (it is host-only and needs auth). Read the vendored
 
 ## Repo layout for reviewers
 
-**Committed (the product):** `fleet_engine/`, `tests/`, `fleets/`, `skills/`,
-`spikes/`, `docs/reference/`, `docs/RUNBOOK.md`, `STRATEGY.md`, `README.md`,
+**Committed (the product):** `cadre/` (the package — including its shipped data
+under `cadre/data/`: starter fleets, personas, palette example, and the
+`cadre-fleet` skill source), `pyproject.toml`, `tests/`, `spikes/`,
+`docs/reference/`, `docs/RUNBOOK.md`, `STRATEGY.md`, `README.md`,
 `requirements*.txt`, this file. Also committed, as contributor knowledge:
 **`docs/solutions/`** — documented solutions to past problems (bugs, patterns,
 conventions), by category with YAML frontmatter (`module`, `tags`, `problem_type`),

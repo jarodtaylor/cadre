@@ -4,9 +4,9 @@ This is the no-Hermes entry surface — it enables the baseline gut-check and
 dogfooding. Rendering lives in ``cadre.render``, shared with the skill.
 Usage:
 
-    python -m cadre.cli validate fleets/research-swarm.yaml
-    python -m cadre.cli run fleets/research-swarm.yaml --task "..."
-    python -m cadre.cli run fleets/research-swarm.yaml --task "..." --no-capture
+    python -m cadre.cli validate cadre/data/fleets/research-swarm.example.yaml
+    python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..."
+    python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..." --no-capture
 """
 
 from __future__ import annotations
