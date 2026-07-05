@@ -2152,27 +2152,27 @@ class TestSetupCommandNewlineRejection(unittest.TestCase):
 
     def test_newline_rejected_before_verify_importable_runs(self):
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command("/tmp/py\nsuffix")
+            code, out = setup_command("/nonexistent/py\nsuffix")
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
         self.assertIn("newline", out.lower())
 
     def test_newline_writes_no_config(self):
         with patch("cadre.provision.verify_importable"):
-            setup_command("/tmp/py\nsuffix")
+            setup_command("/nonexistent/py\nsuffix")
         config_path = Path(self.tmp) / ".cadre" / "config"
         self.assertFalse(config_path.exists())
 
     def test_carriage_return_rejected(self):
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command("/tmp/py\rsuffix")
+            code, out = setup_command("/nonexistent/py\rsuffix")
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
         self.assertIn("control character", out.lower())
 
     def test_nul_byte_rejected(self):
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command("/tmp/py\x00suffix")
+            code, out = setup_command("/nonexistent/py\x00suffix")
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
 
@@ -2180,7 +2180,7 @@ class TestSetupCommandNewlineRejection(unittest.TestCase):
         """The check applies regardless of which precedence branch (arg vs
         CADRE_HERMES_PYTHON env) produced recorded_python."""
         with patch("cadre.provision.verify_importable") as mock_verify:
-            code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": "/tmp/py\nsuffix"})
+            code, out = setup_command(None, env={"CADRE_HERMES_PYTHON": "/nonexistent/py\nsuffix"})
         mock_verify.assert_not_called()
         self.assertEqual(code, 1)
 

@@ -142,10 +142,17 @@ class TestDecoupling(unittest.TestCase):
 
         wheels = sorted(wheel_dir.glob("cadre-*.whl"))
         if not wheels:
-            raise unittest.SkipTest(
+            # Match _run_or_skip's exact CI-fail-loud contract (CodeRabbit CR5):
+            # `pip wheel` exiting 0 but producing no artifact is a real packaging
+            # failure, not a missing-toolchain/offline-dev condition — under CI
+            # this must fail loudly (RuntimeError), not skip-and-show-green.
+            reason = (
                 f"`pip wheel` exited 0 but produced no cadre-*.whl in {wheel_dir} -- "
                 f"stdout:\n{build.stdout}"
             )
+            if os.environ.get("CI"):
+                raise RuntimeError(reason)
+            raise unittest.SkipTest(reason)
         wheel_path = wheels[0]
 
         # A throwaway venv, then install the built wheel into it.

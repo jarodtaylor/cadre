@@ -130,6 +130,33 @@ class TestWriteConfig(unittest.TestCase):
         self.assertTrue(config_path.is_symlink(), "the symlink itself must be untouched, not replaced")
 
 
+class TestWriteConfigParentSafety(unittest.TestCase):
+    """CR2 (CodeRabbit, Major/Security): write_config refuses to write into a
+    group/other-writable (or foreign-owned) parent directory — mirrors
+    approval.write_approval / verify_palette.write_palette's same guard
+    (approval._parent_is_safe). Defense-in-depth: setup_command's C5a already
+    guards ~/.cadre before calling write_config, but write_config must enforce
+    it uniformly with the repo's other hardened writers."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_group_writable_parent_refused(self):
+        # Create the parent FIRST with the bad mode: write_config's
+        # mkdir(exist_ok=True) tightens a freshly-CREATED dir to 0o700 but does
+        # NOT downgrade a pre-existing one, so the loose mode must predate the
+        # call for this test to actually exercise the guard.
+        d = Path(self.tmp) / "loose"
+        d.mkdir(mode=0o770)
+        os.chmod(d, 0o770)  # chmod after mkdir — mkdir's mode arg is umask-affected
+
+        config_path = d / "config"
+        with self.assertRaises(OSError):
+            provision.write_config("/some/python", str(config_path))
+        self.assertFalse(config_path.exists(), "no file should be written into an unsafe parent")
+
+
 class TestEnsureCadreDirs(unittest.TestCase):
     """ensure_cadre_dirs creates owner-only dirs idempotently."""
 

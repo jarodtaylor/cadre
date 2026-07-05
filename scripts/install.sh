@@ -102,11 +102,19 @@ fi
 # symlink — no repo path involved, so it survives the clone moving or being
 # deleted (R14/R15) and a same-Python in-place `cadre` upgrade (R16). It reads
 # HERMES_SKILLS_DIR itself when no --skills-dir is given.
+#
+# SKILL_INSTALL_FAILED tracks an actual install-skill failure (CodeRabbit CR3)
+# so the script's final exit code reflects it — the else branch below used to
+# only warn to stderr while the script still exited 0, hiding a real failure
+# behind an apparently-clean run. Left 0 when HERMES_SKILLS_DIR is unset:
+# that's "not attempted", not a failure.
+SKILL_INSTALL_FAILED=0
 if [ -n "${HERMES_SKILLS_DIR:-}" ]; then
     if "$PYBIN" -m cadre.cli install-skill; then
         echo "[OK] installed cadre-fleet skill"
     else
         echo "install-skill failed — see the message above; the skill was not installed." >&2
+        SKILL_INSTALL_FAILED=1
     fi
 else
     echo ""
@@ -124,3 +132,8 @@ echo "  2. Confirm install and runtime use the SAME Hermes profile."
 echo "  3. Starter fleets are already seeded under ~/.cadre/fleets/ — edit one"
 echo "     and set the provider/model strings from ~/.cadre/palette.yaml."
 echo "  See docs/RUNBOOK.md — 'Install & provisioning' for the full checklist."
+
+# Non-zero if step 5's install-skill actually ran and failed — the operator
+# gets the footer above AND a clear failure signal (CodeRabbit CR3), instead
+# of a silent exit 0 that reads as a fully clean run.
+exit "$SKILL_INSTALL_FAILED"

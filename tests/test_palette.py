@@ -191,6 +191,34 @@ class TestWritePaletteSymlinkGuard(unittest.TestCase):
         self.assertTrue(out.is_symlink(), "the symlink itself must be untouched, not replaced")
 
 
+class TestWritePaletteParentSafety(unittest.TestCase):
+    """CR1 (CodeRabbit, Major/Security): write_palette refuses to write into a
+    group/other-writable (or foreign-owned) parent directory — mirrors
+    approval.write_approval / install_skill.install_skill's same guard
+    (approval._parent_is_safe). A loose/foreign-owned ~/.cadre (pre-existing,
+    or on a shared host) must not be silently trusted just because the leaf
+    write is O_NOFOLLOW-guarded."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_group_writable_parent_refused(self):
+        # Create the parent FIRST with the bad mode: write_palette's
+        # mkdir(exist_ok=True) tightens a freshly-CREATED dir to 0o700 but does
+        # NOT downgrade a pre-existing one, so the loose mode must predate the
+        # call for this test to actually exercise the guard.
+        d = self.tmp / "loose"
+        d.mkdir(mode=0o770)
+        os.chmod(d, 0o770)  # chmod after mkdir — mkdir's mode arg is umask-affected
+
+        records = make_records(ok_pairs=SAFE_PAIRS)
+        out = d / "palette.yaml"
+        with self.assertRaises(OSError):
+            verify_palette.write_palette(records, SAFE_TOOLSETS_SAMPLE, out)
+        self.assertFalse(out.exists(), "no file should be written into an unsafe parent")
+
+
 class TestVerifyPaletteMainOSErrorDegrade(unittest.TestCase):
     """verify_palette.main() degrades a write_palette OSError to a clean exit 1,
     never a raw traceback — the main()-level consequence of C5b's O_NOFOLLOW,

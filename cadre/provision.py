@@ -30,6 +30,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from cadre.approval import _parent_is_safe
 from cadre.resources import fleets_dir, palette_example_path, personas_dir
 
 # Explicit allowlist — NEVER glob fleets/*.yaml: palette.example.yaml lives there
@@ -271,7 +272,11 @@ def write_config(
     O_NOFOLLOW on top of that idiom (capture._write itself omits it) so a
     symlink planted at config_path is refused (OSError) rather than followed
     and written through — matching the repo's other hardened writers
-    (approval.write_approval, provision._seed_files's per-file guard).
+    (approval.write_approval, provision._seed_files's per-file guard). Also
+    raises OSError if config_path's parent directory is not owned by the
+    current user or is group/other-writable (``approval._parent_is_safe``) —
+    a loose parent would let another user replant the config even though the
+    leaf write is O_NOFOLLOW-guarded.
 
     Idempotent: overwrites on re-run (single-key file, O_TRUNC).
 
@@ -291,6 +296,24 @@ def write_config(
     old_umask = os.umask(0o077)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        # Refuse to write into a group/other-writable (or foreign-owned) parent
+        # (CodeRabbit, Major/Security) — mirrors approval.write_approval /
+        # verify_palette.write_palette / install_skill.install_skill's same guard.
+        # mkdir(exist_ok=True) tightens a freshly-created dir to 0o700 but will NOT
+        # downgrade a pre-existing loose one, and O_NOFOLLOW below only stops a
+        # symlink AT config_path — it does not protect against a loose parent a
+        # co-resident user could replant through. Check AFTER mkdir so a
+        # just-created dir passes by construction and only a pre-existing loose
+        # dir is refused. Defense-in-depth: setup_command's C5a already guards
+        # ~/.cadre before calling write_config, but this makes all three writers
+        # (write_approval, write_config, write_palette) uniformly enforce it.
+        if not _parent_is_safe(str(path.parent)):
+            raise OSError(
+                f"{path.parent} is unsafe — it must be owned by you and not "
+                "group/other-writable. Fix it, then re-run."
+            )
+
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(path), flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:

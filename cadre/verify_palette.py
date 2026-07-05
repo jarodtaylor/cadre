@@ -59,6 +59,7 @@ from pathlib import Path
 
 import yaml
 
+from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
 
 # Default candidates file path (operator edits once after install seeds it).
@@ -241,6 +242,9 @@ def write_palette(
 
     Raises:
         ValueError: If there are no ``ok=True`` records (nothing to write).
+        OSError: If ``path``'s parent directory is a symlink, is not owned by
+            the current user, or is group/other-writable (``_parent_is_safe``);
+            or if ``path`` itself is a symlink (``O_NOFOLLOW``).
     """
     # Validate BEFORE any side effects — zero ok records → don't write anything.
     ok_records = [r for r in records if r.ok]
@@ -280,6 +284,20 @@ def write_palette(
     old_umask = os.umask(0o077)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        # Refuse to write into a group/other-writable (or foreign-owned) parent
+        # (CodeRabbit, Major/Security) — mirrors approval.write_approval /
+        # install_skill.install_skill's same guard. mkdir(exist_ok=True) tightens a
+        # freshly-created dir to 0o700 but will NOT downgrade a pre-existing loose
+        # one, and O_NOFOLLOW below only stops a symlink AT palette.yaml — it does
+        # not protect against a loose parent a co-resident user could replant
+        # through. Check AFTER mkdir so a just-created dir passes by construction
+        # and only a pre-existing loose dir is refused.
+        if not _parent_is_safe(str(path.parent)):
+            raise OSError(
+                f"{path.parent} is unsafe — it must be owned by you and not "
+                "group/other-writable. Fix it, then re-run."
+            )
 
         # Write owner-only at creation — never the momentary 0o644 a write-then-chmod
         # leaves under a default umask (mirrors capture._write exactly). O_NOFOLLOW
