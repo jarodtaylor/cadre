@@ -74,7 +74,7 @@ Run folder: ~/.cadre/runs/2026-07-05-…-what-are-the-current-best-practices/
 
 The report stays alone on stdout (pipe it, capture it); the `[cadre]` progress breadcrumbs go to stderr.
 
-## Run it on your Hermes host
+## Install and run it on your Hermes host
 
 You need a host with `hermes-agent` installed and at least one provider authenticated — Cadre's multi-model value shows with two or more across different vendors, but a single-provider fleet runs fine. **No repo clone required** — `cadre` installs from git as a self-contained package. The five steps:
 
