@@ -116,7 +116,7 @@ If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK
 "$PYBIN" -m cadre.cli setup
 ```
 
-Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review personas, and a `palette-candidates.yaml` from the installed package (no repo reads), recording your Hermes Python to `~/.cadre/config`.
+Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review **personas** (reusable, richer specialist definitions that fleets like `doc-review` use in place of an inline `focus` — see [CONCEPTS.md](CONCEPTS.md)), and a `palette-candidates.yaml` from the installed package (no repo reads), recording your Hermes Python to `~/.cadre/config`.
 
 **4. Verify your palette.** Edit `~/.cadre/palette-candidates.yaml` down to the `(provider, model)` pairs you've actually authenticated, then verify them live:
 
@@ -126,10 +126,11 @@ Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review p
 
 This makes a real call per candidate and writes the ones that resolve to `~/.cadre/palette.yaml` — your verified menu. (The seeded candidates are examples; a pair that isn't authenticated on your host is skipped, which is normal.)
 
-**5. Edit a fleet, then run it.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml` before running it:
+**5. Edit a fleet, validate it, then run.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml`, then `validate` before you run. Validate checks the YAML and flags any model that isn't in your palette, so a typo or a stray tab fails *there* — for free — instead of mid-run after a call's already been spent:
 
 ```bash
 # edit ~/.cadre/fleets/research-swarm.yaml → set each lane's provider/model to a verified pair
+"$PYBIN" -m cadre.cli validate ~/.cadre/fleets/research-swarm.yaml           # free preflight: YAML + off-palette check
 "$PYBIN" -m cadre.cli run ~/.cadre/fleets/research-swarm.yaml --task "<your real question>"
 ```
 

@@ -31,7 +31,7 @@ candidates:
   - provider: openrouter
     model: google/gemini-3-flash
   - provider: openrouter
-    model: anthropic/claude-opus-4.8   # valid but bills at API rates (synth candidate)
+    model: anthropic/claude-opus-4.8   # example synthesizer candidate (replace with a verified pair)
 
 # Safe toolsets to record as available for this profile. Must be a subset of
 # Cadre's SAFE_TOOLSETS (cadre/config.py); the writer drops any non-safe
