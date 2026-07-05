@@ -1,8 +1,8 @@
 """cadre/verify_palette.py — verify AIAgent provider/model resolution against
 this host, then write the confirmed pairs to ~/.cadre/palette.yaml.
 
-Caller-layer module (KTD4). Moved unchanged from
-``spikes/verify_aiagent_providers.py`` during the U5 packaging pass
+Caller-layer module (KTD4). Moved unchanged from the retired host-verify
+spike during the U5 packaging pass
 (docs/plans/2026-07-04-003-feat-package-as-cadre-plan.md): an installed-package
 module imports ``cadre.config`` natively, so the spike's repo-relative
 ``sys.path`` bootstrap is gone, and ``SAFE_TOOLSETS`` is now a top-level import

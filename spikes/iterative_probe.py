@@ -54,9 +54,14 @@ import argparse
 import sys
 from pathlib import Path
 
-# Run-as-script path fix (mirrors spikes/verify_aiagent_providers.py): Python puts
-# spikes/ on sys.path[0], not the repo root, so the cadre imports below fail
-# without this. Harmless when imported.
+# Run-as-script path fix: Python puts spikes/ on sys.path[0] (the script's own
+# directory), not the repo root or cwd, so the cadre imports below fail unless
+# cadre happens to be pip-installed into the interpreter running this script.
+# Inserting the repo root keeps both documented invocations above working
+# whether or not cadre is installed; harmless when it is (this only adds a
+# path, it does not shadow an installed cadre unless a stray cadre/ sits under
+# spikes/, which it does not) and harmless when this file is imported as a
+# module rather than run as a script.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
