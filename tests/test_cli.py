@@ -2228,15 +2228,22 @@ class TestSkillDocFlag(unittest.TestCase):
 
     def test_preview_with_doc_shows_path_and_makes_no_model_call(self):
         """Covers AE4 + R7: --preview --doc shows the --doc path AND makes zero
-        model calls / zero capture side-effects."""
+        model calls / zero capture side-effects.
+
+        CADRE_APPROVAL_PATH must be pinned like this class's other tests: a
+        doc-only preview COMPOSES a task and therefore MINTS — unpinned, it
+        wrote the token to the real ~/.cadre/approval (hermeticity leak,
+        caught during #61 U5)."""
         doc = self._doc("preview.md", "PREVIEW_DOC_BODY")
         fake_client_cls = MagicMock()
         mock_prepare = MagicMock()
         buf = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
-            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
-                with contextlib.redirect_stdout(buf):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(buf):
+                        code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
         self.assertEqual(code, 0)
         self.assertIn(doc, buf.getvalue(), "the --doc path appears in the preview (R7)")
         fake_client_cls.assert_not_called()
@@ -2289,10 +2296,14 @@ class TestSkillDocFlag(unittest.TestCase):
         fake_client_cls = MagicMock()
         mock_prepare = MagicMock()
         buf = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
-            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
-                with contextlib.redirect_stdout(buf):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
+        # Pin the approval path: a readable-doc preview MINTS (same hermeticity
+        # leak class as test_preview_with_doc_shows_path_and_makes_no_model_call).
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(buf):
+                        code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
         out = buf.getvalue()
         self.assertEqual(code, 0)
         self.assertIn(str(big), out)
