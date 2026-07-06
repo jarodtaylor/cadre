@@ -57,8 +57,9 @@ def resolve_palette_path(path: str | Path | None = None) -> Optional[Path]:
 
     Resolution order mirrors ``load_palette``: explicit ``path`` -> ``CADRE_PALETTE``
     env -> ``DEFAULT_PALETTE_PATH``. The #62 preflight gate uses this to tell
-    "no palette present" (degrade open) apart from "present but malformed" (fail
-    closed) when ``load_palette`` returns ``None`` — a distinction ``load_palette``
+    "no palette present" (refused with a get-a-palette remedy since the #61
+    flip) apart from "present but malformed" (refused as a broken palette)
+    when ``load_palette`` returns ``None`` — a distinction ``load_palette``
     itself deliberately collapses to a single ``None``.
     """
     if path is None:
@@ -74,8 +75,9 @@ def resolve_palette_path(path: str | Path | None = None) -> Optional[Path]:
         return None
     # A NUL byte survives Path()/expanduser() but raises ValueError at every
     # filesystem op (read_text/exists/stat). Reject it here so both load_palette
-    # and the preflight stat treat it as unresolvable (degrade open) rather than
-    # crashing at the point of use.
+    # and the preflight stat treat it as unresolvable (handled as the absent
+    # case, path clause omitted from the refusal) rather than crashing at the
+    # point of use.
     if "\x00" in str(resolved):
         return None
     return resolved

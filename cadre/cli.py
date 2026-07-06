@@ -101,9 +101,9 @@ def run_command(
         return ExitCode.ERROR, f"Fleet spec not found: {path}"
 
     # #62 preflight-refuse (R4): refuse an off-palette model BEFORE any spend —
-    # before prepare_run_dir, before run_with_progress. A palette-absent or
-    # malformed host degrades open (see preflight_refusal), so this never
-    # blocks a fleet with nothing to check it against.
+    # before prepare_run_dir, before run_with_progress. An absent or malformed
+    # palette ALSO refuses (fail closed; absent flipped by #61) — the refusal
+    # text names the host-appropriate fix (see preflight_refusal).
     refusal = preflight_refusal(cfg)
     if refusal is not None:
         return ExitCode.PREFLIGHT_REFUSE, refusal
