@@ -8,7 +8,8 @@ they exercise the full runner, not just this module.
 
 Coverage:
 - preflight_refusal: off-palette specialist / synthesizer / judge → refusal;
-  all on-palette → None; palette absent/malformed → None (degrade-open);
+  all on-palette → None; palette absent → None (degrade-open); present-but-
+  malformed → refusal (fail closed);
   off-palette toolset only → None (tight-scope guard, models only);
   control/bidi bytes in role/model → refusal renders inertly (sanitized);
   CADRE_PALETTE env resolution when no palette_path is given.
@@ -237,27 +238,35 @@ class TestPreflightRefusalAllOnPalette(_PreflightTestBase):
         self.assertIsNone(preflight_refusal(cfg, palette_path=path))
 
 
-class TestPreflightRefusalNoPalette(_PreflightTestBase):
-    """Palette absent or malformed → degrade-open (proceed), matching the preview posture."""
+class TestPreflightRefusalMissingVsMalformedPalette(_PreflightTestBase):
+    """A genuinely-ABSENT palette degrades open (proceed); a PRESENT-but-malformed
+    one fails CLOSED with a refusal — a broken palette must not silently disable
+    the #62 spend-gate (Codex adversarial review)."""
 
     def test_absent_palette_proceeds(self):
-        missing = self.tmp / "no_palette.yaml"
+        missing = self.tmp / "no_palette.yaml"  # never written -> genuinely absent
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
         self.assertIsNone(preflight_refusal(cfg, palette_path=missing))
 
-    def test_malformed_palette_proceeds(self):
+    def test_present_but_malformed_palette_refuses(self):
+        """A palette file that EXISTS but is unparseable YAML fails closed."""
         bad = self.tmp / "bad.yaml"
         bad.write_text("not: valid: yaml: [\n", encoding="utf-8")
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        self.assertIsNone(preflight_refusal(cfg, palette_path=bad))
+        refusal = preflight_refusal(cfg, palette_path=bad)
+        self.assertIsNotNone(refusal)
+        self.assertIn("could not be read", refusal)
 
-    def test_structurally_invalid_palette_proceeds(self):
-        """A palette missing the required models/toolsets keys → load_palette
-        returns None → preflight degrades open, same as a missing file."""
+    def test_present_but_structurally_invalid_palette_refuses(self):
+        """A palette that EXISTS but is missing the required models/toolsets keys
+        (load_palette -> None while the file is present) fails closed — even a
+        model that WOULD be on-palette can't be verified against a broken file."""
         bad = self.tmp / "no_keys.yaml"
         bad.write_text("generated_at: 'x'\n", encoding="utf-8")
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        self.assertIsNone(preflight_refusal(cfg, palette_path=bad))
+        refusal = preflight_refusal(cfg, palette_path=bad)
+        self.assertIsNotNone(refusal)
+        self.assertIn("could not be read", refusal)
 
     def test_cadre_palette_env_used_when_no_param(self):
         """CADRE_PALETTE env is honored when palette_path is not given (matches

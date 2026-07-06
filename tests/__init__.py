@@ -11,16 +11,19 @@ dozens of real-run tests on a provisioned/dogfood host while CI (a fresh
 container with no ``~/.cadre``) stays green.
 
 Force ``CADRE_PALETTE`` at a guaranteed-absent path so ``load_palette`` returns
-``None`` and preflight degrades OPEN (no palette -> proceed) across the whole
-suite, keeping it hermetic regardless of the host. The parent directory does not
-exist, so the file cannot either. Tests that exercise the preflight gate set
-``CADRE_PALETTE`` to a real palette explicitly via ``patch.dict`` (scoped, and
-restored to this absent default afterwards).
+``None`` and the preflight gate sees no palette (degrade OPEN -> proceed) across
+the whole suite, keeping it hermetic regardless of the host. The path is a
+subdirectory of THIS package directory that the suite never creates, so the file
+cannot exist. It is deliberately ``__file__``-relative rather than under
+``tempfile.gettempdir()`` — the latter is resolved at import time and can raise
+in a constrained sandbox with no usable temp dir, which would fail the whole
+suite to import. Tests that exercise the preflight gate set ``CADRE_PALETTE`` to
+a real palette explicitly via ``patch.dict`` (scoped, and restored to this absent
+default afterwards).
 """
 
 import os
-import tempfile
 
 os.environ["CADRE_PALETTE"] = os.path.join(
-    tempfile.gettempdir(), "cadre-hermetic-tests-nonexistent-dir", "palette.yaml"
+    os.path.dirname(__file__), "__nonexistent_hermetic_palette__", "palette.yaml"
 )

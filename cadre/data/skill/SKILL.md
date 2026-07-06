@@ -228,12 +228,17 @@ records the full result, provenance, and timings).
 `status_to_exit` mapping, and the manifest's top-level `status` comes from that
 same `FleetStatus` — so the exit code and the manifest `status` can't
 disagree). **A run completed** — relay the report per below:
-- **`0` (`SUCCESS`):** full usable output — every specialist ran and
-  convergence (synthesis/judge) succeeded.
-- **`3` (`DEGRADED`):** usable but partial — every specialist ran, but
-  convergence failed. Relay it as partial, never as full.
-- **`4` (`FAILED`):** every specialist failed; convergence never ran. No
-  usable output.
+- **`0` (`SUCCESS`):** full usable output — convergence (synthesis/judge)
+  succeeded over the surviving specialists.
+- **`3` (`DEGRADED`):** usable but partial — specialists survived but
+  convergence failed, OR (in `sequential`/`iterative` topology) the chain broke
+  mid-way and downstream lanes were `skipped`. Relay it as partial, never as
+  full. Do **not** assume every specialist ran — read `lanes[].skipped` /
+  `lanes[].reason` (and `topology`) to see which lanes actually executed.
+- **`4` (`FAILED`):** no usable output; convergence never ran. In `parallel`
+  every specialist failed; in `sequential`/`iterative` the *first* lane failed
+  and the rest were `skipped`. Again, read `lanes[].skipped` / `lanes[].reason`
+  rather than assuming all lanes were attempted.
 
 **No run occurred** — the printed message is the whole output, nothing to read
 back:

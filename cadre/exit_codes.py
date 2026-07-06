@@ -32,12 +32,15 @@ class ExitCode(IntEnum):
                         runner this one code also covers the approval gate and
                         run-dir failures, not only a bad fleet config.
     USAGE            — a CLI usage error: neither --task nor --doc was given.
-    DEGRADED         — the run produced a usable but partial result: every
-                        specialist ran, but the convergence step (synthesis or
-                        judge) failed (FleetStatus.DEGRADED). A distinct
-                        non-zero code so an agent can tell "partial" from
-                        "clean success" without reading the manifest.
-    FAILED           — every specialist failed; convergence never ran
+    DEGRADED         — a usable but partial result: specialists survived but
+                        the convergence step (synthesis/judge) failed, OR a
+                        sequential/iterative chain broke mid-way leaving
+                        downstream lanes skipped (FleetStatus.DEGRADED). A
+                        distinct non-zero code so an agent can tell "partial"
+                        from "clean success" without reading the manifest.
+    FAILED           — no usable output; convergence never ran. In parallel
+                        every specialist failed; in sequential/iterative the
+                        first lane failed and the rest were skipped
                         (FleetStatus.FAILED).
     PREFLIGHT_REFUSE — the #62 preflight gate refused an off-palette fleet
                         before any model call. Distinct from ERROR because a

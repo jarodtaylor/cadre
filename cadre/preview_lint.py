@@ -51,10 +51,37 @@ class Palette:
 # ---------------------------------------------------------------------------
 
 
+def resolve_palette_path(path: str | Path | None = None) -> Optional[Path]:
+    """Return the filesystem ``Path`` ``load_palette`` would read, or ``None`` if
+    the path itself is unresolvable (a NUL byte or a non-str/Path).
+
+    Resolution order mirrors ``load_palette``: explicit ``path`` -> ``CADRE_PALETTE``
+    env -> ``DEFAULT_PALETTE_PATH``. The #62 preflight gate uses this to tell
+    "no palette present" (degrade open) apart from "present but malformed" (fail
+    closed) when ``load_palette`` returns ``None`` — a distinction ``load_palette``
+    itself deliberately collapses to a single ``None``.
+    """
+    if path is None:
+        env = os.getenv("CADRE_PALETTE")
+        path = env if env else DEFAULT_PALETTE_PATH
+    try:
+        resolved = Path(path).expanduser()
+    except (ValueError, TypeError):
+        # A non-str/Path, or a path expanduser rejects — unresolvable.
+        return None
+    # A NUL byte survives Path()/expanduser() but raises ValueError at every
+    # filesystem op (read_text/exists/stat). Reject it here so both load_palette
+    # and the preflight stat treat it as unresolvable (degrade open) rather than
+    # crashing at the point of use.
+    if "\x00" in str(resolved):
+        return None
+    return resolved
+
+
 def load_palette(path: str | Path | None = None) -> Optional[Palette]:
     """Load and parse the host palette YAML.
 
-    Path resolution order:
+    Path resolution order (see ``resolve_palette_path``):
     1. ``path`` parameter (explicit injection — used by tests and CI).
     2. ``CADRE_PALETTE`` env var, if set (dev-host testability seam, mirrors
        ``CADRE_RUN_DIR`` in ``capture.py``).
@@ -68,18 +95,21 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
     - Any malformed entry in ``models`` (partial/garbage palette → None, not
       a partial result, so a corrupted palette degrades cleanly rather than
       producing a confusingly incomplete check).
-    """
-    if path is None:
-        env = os.getenv("CADRE_PALETTE")
-        path = env if env else DEFAULT_PALETTE_PATH
 
+    Because a *missing* and a *present-but-malformed* palette both collapse to
+    ``None`` here, a caller that must distinguish them (the #62 preflight gate)
+    stats ``resolve_palette_path(path)`` when this returns ``None``.
+    """
+    resolved = resolve_palette_path(path)
+    if resolved is None:
+        return None
     try:
-        # Path()/expanduser() can raise ValueError (an embedded NUL byte in the path) or
-        # TypeError (a non-str/Path) — both must degrade to None, not crash, to honor the
-        # never-raises contract. read_text adds OSError (missing/unreadable) and
-        # UnicodeDecodeError (a non-UTF-8 / binary palette, NOT an OSError subclass).
-        raw = Path(path).expanduser().read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        # read_text can raise OSError (missing/unreadable), UnicodeDecodeError
+        # (a non-UTF-8 / binary palette, NOT an OSError subclass), or ValueError
+        # (a NUL byte that slipped past resolve_palette_path) — all degrade to
+        # None, honoring the never-raises contract.
+        raw = resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
 
     try:
