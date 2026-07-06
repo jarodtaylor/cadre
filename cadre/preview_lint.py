@@ -66,8 +66,11 @@ def resolve_palette_path(path: str | Path | None = None) -> Optional[Path]:
         path = env if env else DEFAULT_PALETTE_PATH
     try:
         resolved = Path(path).expanduser()
-    except (ValueError, TypeError):
-        # A non-str/Path, or a path expanduser rejects — unresolvable.
+    except (ValueError, TypeError, RuntimeError):
+        # A non-str/Path, or an unresolvable home dir. RuntimeError is the
+        # container case: Path.expanduser() raises it when the path starts with
+        # ``~`` and HOME is unset (the default ``~/.cadre/palette.yaml``) — treat
+        # it as unresolvable and degrade cleanly rather than crashing.
         return None
     # A NUL byte survives Path()/expanduser() but raises ValueError at every
     # filesystem op (read_text/exists/stat). Reject it here so both load_palette

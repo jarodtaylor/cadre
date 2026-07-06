@@ -1877,7 +1877,7 @@ class TestRunCommandPreflightRefuse(unittest.TestCase):
         missing = self.tmp / "no_palette.yaml"
         client = FakeClient({"synthesizer": ("ok", "SYNTH OK")})
         with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}):
-            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+            code, _out = run_command(EXAMPLE, "task", client=client, capture=False)
         self.assertEqual(code, 0)
         self.assertEqual(len(client.calls), 4)
 

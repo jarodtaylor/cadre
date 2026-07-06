@@ -350,10 +350,10 @@ class TestPreflightRefusalSanitized(_PreflightTestBase):
     def test_bidi_bytes_in_provider_stripped_from_refusal(self):
         path = _write_palette(self.tmp, models=[], toolsets=["web"])
         cfg = _make_config()
-        cfg.specialists[0].provider = "xai‮-evil"  # RLO bidi override
+        cfg.specialists[0].provider = "xai\u202e-evil"  # RLO bidi override
         refusal = preflight_refusal(cfg, palette_path=path)
         self.assertIsNotNone(refusal)
-        self.assertNotIn("‮", refusal)
+        self.assertNotIn("\u202e", refusal)
 
     def test_newline_in_model_cannot_forge_a_line(self):
         path = _write_palette(self.tmp, models=[], toolsets=["web"])

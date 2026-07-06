@@ -339,6 +339,16 @@ class TestLoadPalettePathResolution(unittest.TestCase):
             result = load_palette(None)
         self.assertIsNone(result)
 
+    def test_expanduser_runtimeerror_degrades_to_none(self):
+        """Path.expanduser() raises RuntimeError when the path starts with ~ and
+        HOME is unset (a container case) — resolve_palette_path and load_palette
+        must degrade to None, not crash (CodeRabbit review)."""
+        from cadre.preview_lint import resolve_palette_path
+
+        with patch.object(Path, "expanduser", side_effect=RuntimeError("home unresolvable")):
+            self.assertIsNone(resolve_palette_path("~/.cadre/palette.yaml"))
+            self.assertIsNone(load_palette("~/.cadre/palette.yaml"))
+
     def test_explicit_param_takes_priority_over_env(self):
         """Explicit path param beats CADRE_PALETTE env."""
         env_path = _write_palette(self.tmp, models=[{"provider": "env", "model": "env-model"}], toolsets=["web"])

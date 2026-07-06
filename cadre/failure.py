@@ -38,10 +38,14 @@ class FailureReason(str, Enum):
     TIMEOUT      — the engine's outer wall-clock backstop fired on a wedged call.
     SKIPPED      — a sequential-chain lane the engine never ran because an
                    upstream lane failed.
-    EMPTY_OUTPUT — the model call returned None/empty/whitespace text. This is
-                   the PRIMARY runtime failure reason: AIAgent returns None (it
-                   does not raise) on a dead, unauthorized, or unresolvable
-                   model, so most real failures land here, not on MODEL_ERROR.
+    EMPTY_OUTPUT — the model call returned None/empty/whitespace text. Cadre's
+                   contract: no usable output is a failure. In practice this is
+                   the PRIMARY runtime failure reason, because AIAgent was
+                   observed (U1 live spike, 2026-06-17) to return None rather
+                   than raise on a dead, unauthorized, or unresolvable model —
+                   so most real failures land here, not on MODEL_ERROR. (If a
+                   future AIAgent version raised instead, they'd surface as
+                   MODEL_ERROR; the taxonomy holds, only the distribution shifts.)
     MODEL_ERROR  — the model call raised an exception; the raw exception text
                    still lives in AgentResult.error alongside this reason.
     """
