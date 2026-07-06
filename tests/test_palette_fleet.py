@@ -344,6 +344,28 @@ class TestWritePaletteFleetSymlinkGuard(unittest.TestCase):
         self.assertIn("warning", buf.getvalue().lower())
 
 
+class TestWritePaletteFleetBuildFailureNeverRaises(unittest.TestCase):
+    """The never-raises contract must hold when RENDERING fails, not just the
+    write (review catch): build_fleet_yaml raising (e.g. resolved_hermes_home's
+    expanduser with HOME unset) degrades to the same stderr warning, and a
+    prior file is left untouched."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_build_failure_warns_and_leaves_prior_file_untouched(self):
+        target = self.tmp / "palette-fleet.yaml"
+        target.write_text("PRIOR CONTENT", encoding="utf-8")
+        buf = io.StringIO()
+        with patch.object(
+            palette_fleet, "build_fleet_yaml", side_effect=RuntimeError("HOME unset")
+        ), contextlib.redirect_stderr(buf):
+            palette_fleet.write_palette_fleet(_records(*SAFE_PAIRS), path=target)
+        self.assertIn("warning", buf.getvalue().lower())
+        self.assertEqual(target.read_text(encoding="utf-8"), "PRIOR CONTENT")
+
+
 class TestWritePaletteFleetParentSafety(unittest.TestCase):
     """Mirrors TestWritePaletteParentSafety (test_palette.py) — refuses a
     group/other-writable (or foreign-owned) parent directory."""

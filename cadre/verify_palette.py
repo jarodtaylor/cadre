@@ -58,6 +58,7 @@ import contextlib
 import io
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -425,6 +426,35 @@ def _verifying_banner(to_verify: list[tuple[str, str]], total: int) -> str:
     )
 
 
+def _pairs_dropping_from_palette(
+    palette_path: Path, to_verify: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Previously-verified pairs that will VANISH if this pass rewrites the palette.
+
+    ``write_palette`` rewrites ``palette.yaml`` from this pass's records only —
+    it never merges the prior palette (verified-truth-per-cycle). So any pair
+    on the EXISTING palette that is not in ``to_verify`` silently drops, and a
+    fleet composed from it starts refusing at preflight (the cross-model
+    review's cascade catch: the #61 default cap makes this reachable on a
+    plain re-verify). Tolerant read — an absent/unreadable/malformed existing
+    palette returns [] (nothing to warn about; the malformed case is already
+    preflight's business, not this disclosure's).
+    """
+    try:
+        data = yaml.safe_load(palette_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        return []
+    existing: set[tuple[str, str]] = set()
+    for entry in data["models"]:
+        if isinstance(entry, dict):
+            provider, model = entry.get("provider"), entry.get("model")
+            if isinstance(provider, str) and isinstance(model, str):
+                existing.add((provider, model))
+    return sorted(existing - set(to_verify))
+
+
 def main(all_candidates: bool = False) -> int:
     """Verify candidates against this host and write the palette (R5, R6).
 
@@ -464,6 +494,23 @@ def main(all_candidates: bool = False) -> int:
 
     total = len(candidates)
     to_verify = candidates if all_candidates else _cap_candidates(candidates)
+
+    # Pre-spend disclosure #2 (cross-model cascade catch): a re-verify rewrites
+    # the palette from THIS pass only, so previously-verified pairs outside
+    # this pass drop — and fleets composed from them start refusing. Warn
+    # loudly BEFORE the first paid call so the operator can abort/widen.
+    dropping = _pairs_dropping_from_palette(palette_path, to_verify)
+    if dropping:
+        shown = ", ".join(f"{_sanitize(p)}/{_sanitize(m)}" for p, m in dropping)
+        print(
+            f"[cadre] warning: {len(dropping)} previously-verified pair(s) are NOT "
+            f"in this verify pass and will DROP from the palette: {shown}\n"
+            "  The palette is rewritten from this pass only. To keep them: pass "
+            "--all, or add them back to ~/.cadre/palette-candidates.yaml first. "
+            "Fleets composed from dropped pairs will be refused at preflight.",
+            file=sys.stderr,
+        )
+
     print(_verifying_banner(to_verify, total))
     records = verify_candidates(to_verify)
 

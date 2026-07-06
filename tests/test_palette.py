@@ -821,6 +821,85 @@ class TestVerifyPaletteMainCapsByDefault(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("No candidates found.", out.getvalue())
 
+    def test_dropped_pairs_warning_lists_vanishing_pairs_before_spend(self):
+        """Cross-model cascade catch: a re-verify rewrites the palette from
+        THIS pass only, so previously-verified pairs outside the pass DROP —
+        the pre-spend stderr warning must name them, before any verify call."""
+        self._write_candidates(
+            [("xai", "grok-4.3"), ("xai", "grok-4.3-mini"), ("xai", "grok-4.3-extra")]
+        )
+        # Existing palette carries a pair the capped pass (first 2) won't verify.
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": [
+                        {"provider": "xai", "model": "grok-4.3"},
+                        {"provider": "xai", "model": "grok-4.3-extra"},
+                    ],
+                    "toolsets": ["web"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _code, out, _calls = self._run_main()
+        warning = err.getvalue()
+        self.assertIn("will DROP from the palette", warning)
+        self.assertIn("xai/grok-4.3-extra", warning)
+        self.assertNotIn("xai/grok-4.3-mini", warning)  # not previously verified
+        # Disclosure fires before the first paid call (stdout marker ordering:
+        # the banner precedes VERIFY_CALL_MARKER, and the warning was emitted
+        # during the same pre-spend window — main() returned with it present).
+        self.assertIn("VERIFY_CALL_MARKER", out)
+
+    def test_no_dropped_pairs_warning_without_existing_palette(self):
+        self._write_candidates([("xai", "grok-4.3")])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._run_main()
+        self.assertNotIn("DROP", err.getvalue())
+
+    def test_no_dropped_pairs_warning_when_pass_covers_palette(self):
+        self._write_candidates([("xai", "grok-4.3")])
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {"models": [{"provider": "xai", "model": "grok-4.3"}], "toolsets": []}
+            ),
+            encoding="utf-8",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._run_main()
+        self.assertNotIn("DROP", err.getvalue())
+
+    def test_malformed_existing_palette_skips_warning_without_crash(self):
+        self._write_candidates([("xai", "grok-4.3")])
+        self.palette_path.write_text("models: [unterminated\n", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _out, _calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertNotIn("DROP", err.getvalue())
+
+    def test_dropped_pairs_warning_sanitizes_hostile_strings(self):
+        self._write_candidates([("xai", "grok-4.3")])
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": [{"provider": "xai", "model": "evil\x1b[31mmodel"}],
+                    "toolsets": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._run_main()
+        warning = err.getvalue()
+        self.assertIn("will DROP", warning)
+        self.assertNotIn("\x1b", warning)
+
     def test_capped_banner_sanitizes_hostile_candidate_strings(self):
         """KTD9: discovered candidate strings are untrusted display input — a
         control byte in a kept candidate must render defanged in the banner

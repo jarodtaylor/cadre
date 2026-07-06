@@ -17,6 +17,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from cadre.approval import (
@@ -395,6 +396,47 @@ class TestApprovalTokenParentDirPermissions(unittest.TestCase):
         token = consume_approval(path=tok)
         self.assertIsNotNone(token)
         self.assertEqual(token.digest, "digest-y")
+
+
+class TestWriteOwnerOnlyPartialFileCleanup(unittest.TestCase):
+    """#61 review catch (adversarial): in exclusive (create-only) mode, a write
+    failure AFTER the O_EXCL creation must not leave a partial file — a later
+    create-only caller would read it as "exists — preserved" forever, silently
+    defeating every future seeding attempt. Non-exclusive mode is unchanged
+    (the file pre-existed; unlinking it would destroy operator data)."""
+
+    def setUp(self):
+        import tempfile as _tempfile
+
+        self._tmp = _tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "candidates.yaml"
+
+    def _failing_fdopen(self, *a, **k):
+        # Close the raw fd (so the test leaks nothing), then fail like an
+        # I/O error at write time would.
+        os.close(a[0])
+        raise OSError(28, "No space left on device")
+
+    def test_exclusive_write_failure_unlinks_partial(self):
+        from cadre.approval import _write_owner_only
+
+        with patch("cadre.approval.os.fdopen", side_effect=self._failing_fdopen):
+            with self.assertRaises(OSError):
+                _write_owner_only(self.path, "content", exclusive=True)
+        self.assertFalse(
+            self.path.exists(),
+            "a failed exclusive write must not leave a partial file behind",
+        )
+
+    def test_non_exclusive_write_failure_keeps_existing_file(self):
+        from cadre.approval import _write_owner_only
+
+        self.path.write_text("PRIOR", encoding="utf-8")
+        with patch("cadre.approval.os.fdopen", side_effect=self._failing_fdopen):
+            with self.assertRaises(OSError):
+                _write_owner_only(self.path, "content", exclusive=False)
+        self.assertTrue(self.path.exists(), "non-exclusive mode must never unlink")
 
 
 if __name__ == "__main__":

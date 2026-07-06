@@ -236,12 +236,16 @@ def write_palette_fleet(records: list[VerifyRecord], path: str | Path | None = N
         _notice_insufficient(len(lanes), target)
         return
 
-    content = build_fleet_yaml(lanes)
     try:
+        # Build INSIDE the guard: the never-raises contract must also hold if
+        # rendering fails (e.g. resolved_hermes_home's expanduser raising with
+        # HOME unset) — not just on a write error. Broad catch is the
+        # contract, mirroring provision's seeding functions.
+        content = build_fleet_yaml(lanes)
         # Canonical owner-only posture (approval._write_owner_only, KTD6):
         # tightened umask, 0o700 parent, _parent_is_safe, O_NOFOLLOW, 0600.
         _write_owner_only(target, content)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — never-raises contract (docstring)
         print(f"[cadre] warning: could not write palette fleet to {target}: {exc}", file=sys.stderr)
         return
 

@@ -587,6 +587,26 @@ class TestSeedOrDiscoverPaletteCandidates(unittest.TestCase):
         self.cadre_home.mkdir(mode=0o700)
         self.candidates_path = self.cadre_home / "palette-candidates.yaml"
 
+    def test_create_only_file_exists_race_prints_preserved_no_placeholder(self):
+        """The FileExistsError branch fires only on the race between the
+        exists() pre-check and the O_EXCL open (review catch: previously
+        reachable only via that race, so untested). Force it directly: the
+        pre-check must see no file, then write_candidates raises
+        FileExistsError → "preserved" message, and the placeholder seeding is
+        NOT invoked (unlike the sibling OSError branch)."""
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", return_value=_fake_discovery_result()
+        ), unittest.mock.patch.object(
+            provision, "write_candidates", side_effect=FileExistsError(17, "exists")
+        ), unittest.mock.patch.object(
+            provision, "seed_palette_candidates"
+        ) as fake_placeholder:
+            with contextlib.redirect_stderr(stderr_buf):
+                provision.seed_or_discover_palette_candidates(self.cadre_home)
+        self.assertIn("exists — preserved", stderr_buf.getvalue())
+        fake_placeholder.assert_not_called()
+
     def test_existing_file_preserved_even_when_discovery_succeeds(self):
         """Test scenario 1 / AE6's setup-preserves half: an operator-edited
         file survives, byte-identical, even though discovery has fresh

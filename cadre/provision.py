@@ -316,7 +316,8 @@ def seed_or_discover_palette_candidates(cadre_home: Path) -> None:
     except OSError as exc:
         print(
             f"[cadre] warning: could not write discovered candidates to {path} "
-            f"({exc}). Seeding the placeholder palette-candidates.yaml instead.",
+            f"({_sanitize(str(exc))}). Seeding the placeholder "
+            "palette-candidates.yaml instead.",
             file=sys.stderr,
         )
         seed_palette_candidates(cadre_home)

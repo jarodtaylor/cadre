@@ -729,6 +729,28 @@ class TestDiscoverMainImportFailure(unittest.TestCase):
             discover.main()
         self.assertFalse(self.candidates_path.exists())
 
+    def test_write_failure_exits_1_with_sanitized_message(self):
+        """main()'s `except OSError` branch (write_candidates failing inside
+        the CLI entrypoint) — previously untested (review catch): exit 1 and
+        a sanitized 'Cannot write' line, never a traceback."""
+        out = io.StringIO()
+        fake_result = discover.DiscoveryResult(
+            providers=[discover.DiscoveredProvider(provider="xai", models=["grok-4.3"])],
+            hermes_home="/tmp/profile",
+        )
+        with patch.object(discover, "discover_candidates", return_value=fake_result), \
+             patch.object(discover, "write_candidates",
+                          side_effect=OSError("disk\x1b[31m full")), \
+             patch.object(discover, "_DEFAULT_CANDIDATES_PATH", self.candidates_path), \
+             contextlib.redirect_stdout(out), \
+             contextlib.redirect_stderr(io.StringIO()):
+            code = discover.main()
+        self.assertEqual(code, 1)
+        printed = out.getvalue()
+        self.assertIn("Cannot write", printed)
+        self.assertIn("disk", printed)
+        self.assertNotIn("\x1b", printed)
+
     def test_failure_message_renders_sanitized(self):
         """KTD9: DiscoveryError text can embed payload-derived strings (slugs,
         entry reprs, hermes exception text) — main()'s failure sink must
@@ -745,6 +767,48 @@ class TestDiscoverMainImportFailure(unittest.TestCase):
         printed = out.getvalue()
         self.assertNotIn("\x1b", printed)
         self.assertIn("drifted", printed)  # surrounding text still renders
+
+
+class TestFetchInventorySuccessPath(unittest.TestCase):
+    """_fetch_inventory's happy path via a fake hermes_cli.inventory module:
+    the exact call arguments are load-bearing — probe_custom_providers=False
+    is the documented zero-spend guarantee and picker_hints=True is the
+    verified payload shape (review catch: previously only the ImportError
+    branch was exercised, so a silent flag regression would ride to the paid
+    host dogfood unnoticed)."""
+
+    def test_calls_build_models_payload_with_pinned_flags(self):
+        import types
+
+        recorded = {}
+        sentinel_ctx = object()
+        sentinel_payload = {"providers": []}
+
+        inv = types.ModuleType("hermes_cli.inventory")
+
+        def load_picker_context():
+            recorded["ctx_called"] = True
+            return sentinel_ctx
+
+        def build_models_payload(ctx, **kwargs):
+            recorded["ctx"] = ctx
+            recorded["kwargs"] = kwargs
+            return sentinel_payload
+
+        inv.load_picker_context = load_picker_context
+        inv.build_models_payload = build_models_payload
+        pkg = types.ModuleType("hermes_cli")
+        pkg.inventory = inv
+
+        with patch.dict(sys.modules, {"hermes_cli": pkg, "hermes_cli.inventory": inv}):
+            payload = discover._fetch_inventory()
+
+        self.assertIs(payload, sentinel_payload)
+        self.assertIs(recorded["ctx"], sentinel_ctx)
+        self.assertEqual(
+            recorded["kwargs"],
+            {"probe_custom_providers": False, "picker_hints": True},
+        )
 
 
 if __name__ == "__main__":

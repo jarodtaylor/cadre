@@ -25,6 +25,7 @@ present-but-undeletable token is refused rather than honored (fail-closed).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -151,9 +152,20 @@ def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> N
         create_or_truncate = os.O_EXCL if exclusive else os.O_TRUNC
         flags = os.O_WRONLY | os.O_CREAT | create_or_truncate | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(path), flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        path.chmod(0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            path.chmod(0o600)
+        except OSError:
+            if exclusive:
+                # O_EXCL succeeded, so WE created this file — a failed write
+                # (disk full, I/O error) must not leave a partial file behind:
+                # create-only callers would read it as "exists — preserved"
+                # forever, silently defeating every future seeding attempt.
+                # Best-effort; the original error is what the caller needs.
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            raise
     finally:
         os.umask(old_umask)
 

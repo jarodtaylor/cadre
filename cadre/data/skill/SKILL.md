@@ -215,6 +215,20 @@ host, or hand-edit `~/.cadre/palette-candidates.yaml` then `cadre
 verify-palette` otherwise. This gate never fires for an off-palette *toolset*
 (that stays the advisory warning from step 2).
 
+**What you may do yourself about that refusal, and what you must not:**
+
+- You MAY run `cadre discover` yourself when the refusal names it. It is free
+  and read-only — no model call, no spend, no state destroyed beyond
+  regenerating the discovery-owned candidates file — and it self-verifies:
+  if Hermes's surface is not actually available it fails closed with the
+  manual fallback. Then re-preview and continue.
+- You MUST NOT run `cadre verify-palette` yourself. It makes real, paid model
+  calls (one per verified candidate) and sits OUTSIDE the preview-bound
+  approval gate — the same reason you never treat a plain preview as approval
+  for a privileged fleet. Surface the remedy to the human verbatim and let
+  them run the paid step; a capped run is ~2 calls per provider, `--all` can
+  be dozens.
+
 Use `--doc PATH` (repeatable) to read a file's contents into the task — the
 "name the plan, no pasting" path, with the doc-review fleet as the primary
 consumer. Preview with the same `--task`/`--doc` flags first (step 2) — this
