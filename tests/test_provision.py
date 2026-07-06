@@ -572,13 +572,7 @@ class TestSeedPaletteCandidates(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _fake_discovery_result(provider="xai-oauth", models=("grok-4.3",), hermes_home="/tmp/profile"):
-    from cadre.discover import DiscoveredProvider, DiscoveryResult
-
-    return DiscoveryResult(
-        providers=[DiscoveredProvider(provider=provider, models=list(models))],
-        hermes_home=hermes_home,
-    )
+from tests.palette_fixtures import fake_discovery_result as _fake_discovery_result
 
 
 class TestSeedOrDiscoverPaletteCandidates(unittest.TestCase):

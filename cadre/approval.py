@@ -114,6 +114,50 @@ def _parent_is_safe(parent: str) -> bool:
     return True
 
 
+def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> None:
+    """Write ``content`` to ``path`` with the repo's canonical owner-only posture.
+
+    The shared write tail of the #61 writers (``discover.write_candidates``,
+    ``palette_fleet``'s fleet writer): tightened umask, an owner-only-created
+    parent, the ``_parent_is_safe`` refusal of a foreign-owned or
+    group/other-writable pre-existing parent, and ``O_NOFOLLOW`` so a symlink
+    planted at ``path`` is refused rather than written through. The earlier
+    writers (``write_approval`` above, ``verify_palette.write_palette``,
+    ``provision.write_config``/``_seed_files``) hand-roll the same sequence
+    with per-site error types/messages and predate this helper; unifying them
+    is a deliberate non-goal here (behavior-preserving passes don't rewrite
+    shipped trust-surface code).
+
+    ``exclusive=True`` swaps ``O_TRUNC`` for ``O_EXCL``: the ``open()`` itself
+    becomes the atomic existence check, raising ``FileExistsError`` rather
+    than truncating a file (or following a symlink) already there.
+
+    Raises:
+        OSError: the parent is unsafe, or ``path`` is a symlink
+            (``O_NOFOLLOW``'s ELOOP); ``FileExistsError`` (a subclass) when
+            ``exclusive`` and ``path`` already exists.
+    """
+    old_umask = os.umask(0o077)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Check AFTER mkdir: a freshly-created dir is 0o700 by construction;
+        # only a PRE-EXISTING loose parent is refused (mkdir(exist_ok=True)
+        # will not tighten one).
+        if not _parent_is_safe(str(path.parent)):
+            raise OSError(
+                f"{path.parent} is unsafe — it must be owned by you and not "
+                "group/other-writable. Fix it, then re-run."
+            )
+        create_or_truncate = os.O_EXCL if exclusive else os.O_TRUNC
+        flags = os.O_WRONLY | os.O_CREAT | create_or_truncate | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        path.chmod(0o600)
+    finally:
+        os.umask(old_umask)
+
+
 @dataclasses.dataclass
 class ApprovalToken:
     """A minted, not-yet-consumed approval. TTL is off by default (R3)."""

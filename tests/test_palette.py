@@ -604,17 +604,13 @@ class TestVerifyCandidatesSanitizedStatusLines(unittest.TestCase):
     all untrusted display input — a control byte must render defanged."""
 
     def test_status_lines_strip_hostile_bytes_from_candidate_and_reason(self):
-        import contextlib as ctx
-        import io as _io
-        import unittest.mock as mock
-
-        out = _io.StringIO()
-        with mock.patch.object(verify_palette, "_verify_one") as fake_one:
+        out = io.StringIO()
+        with patch.object(verify_palette, "_verify_one") as fake_one:
             fake_one.side_effect = [
                 (True, "ok"),
                 (False, "boom\x1b[31m reason"),
             ]
-            with ctx.redirect_stdout(out):
+            with contextlib.redirect_stdout(out):
                 verify_palette.verify_candidates(
                     [("xai\x1b[0m", "grok-4.3"), ("openrouter", "bad\x1bmodel")]
                 )

@@ -66,11 +66,9 @@ import yaml
 
 from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
+from cadre.discover import _DEFAULT_CANDIDATES_PATH
 from cadre.palette_fleet import write_palette_fleet
 from cadre.text_safety import sanitize as _sanitize
-
-# Default candidates file path (operator edits once after install seeds it).
-_DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
 
 # Default palette output path.
 _DEFAULT_PALETTE_PATH = Path("~/.cadre/palette.yaml")

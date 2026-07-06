@@ -45,7 +45,6 @@ allowed to flip a successful verify to a nonzero exit. Mirrors
 
 from __future__ import annotations
 
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +52,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from cadre.approval import _parent_is_safe
+from cadre.approval import _write_owner_only
 from cadre.capture import resolved_hermes_home
 from cadre.text_safety import sanitize as _sanitize
 
@@ -207,37 +206,6 @@ def _notice_insufficient(n_verified: int, target: Path) -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
-def _write(content: str, path: Path) -> None:
-    """Write ``content`` to ``path`` as owner-only YAML (0o600).
-
-    Mirrors ``verify_palette.write_palette``'s write tail EXACTLY (KTD6): a
-    tightened umask, an owner-only-created parent directory, the shared
-    ``_parent_is_safe`` guard (refuses a group/other-writable or
-    foreign-owned parent), and ``O_NOFOLLOW`` so a symlink planted at
-    ``path`` is refused rather than written through.
-
-    Raises:
-        OSError: parent directory is unsafe, or ``path`` is a symlink
-            (``O_NOFOLLOW``'s ELOOP). Caught by ``write_palette_fleet``, never
-            propagated to its caller.
-    """
-    old_umask = os.umask(0o077)
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if not _parent_is_safe(str(path.parent)):
-            raise OSError(
-                f"{path.parent} is unsafe — it must be owned by you and not "
-                "group/other-writable. Fix it, then re-run."
-            )
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        path.chmod(0o600)
-    finally:
-        os.umask(old_umask)
-
-
 def write_palette_fleet(records: list[VerifyRecord], path: str | Path | None = None) -> None:
     """Generate the palette smoke-test fleet from verified records (R7/R8).
 
@@ -270,7 +238,9 @@ def write_palette_fleet(records: list[VerifyRecord], path: str | Path | None = N
 
     content = build_fleet_yaml(lanes)
     try:
-        _write(content, target)
+        # Canonical owner-only posture (approval._write_owner_only, KTD6):
+        # tightened umask, 0o700 parent, _parent_is_safe, O_NOFOLLOW, 0600.
+        _write_owner_only(target, content)
     except OSError as exc:
         print(f"[cadre] warning: could not write palette fleet to {target}: {exc}", file=sys.stderr)
         return

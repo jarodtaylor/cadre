@@ -345,11 +345,7 @@ class TestDiscoveryErrorNamesFallback(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _one_provider_result(provider="xai-oauth", models=("grok-4.3",), hermes_home="/tmp/profile"):
-    return discover.DiscoveryResult(
-        providers=[discover.DiscoveredProvider(provider=provider, models=list(models))],
-        hermes_home=hermes_home,
-    )
+from tests.palette_fixtures import fake_discovery_result as _one_provider_result
 
 
 class TestWriteCandidatesPermissions(unittest.TestCase):

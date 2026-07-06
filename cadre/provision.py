@@ -282,6 +282,17 @@ def seed_or_discover_palette_candidates(cadre_home: Path) -> None:
     """
     path = cadre_home / "palette-candidates.yaml"
 
+    # An existing file is preserved no matter what discovery would find, so
+    # skip the inventory read entirely (setup is rerun-safe; without this, a
+    # rerun on a provisioned host fetches the whole inventory just to discard
+    # it — and on a host WITHOUT Hermes it printed a misleading "discovery
+    # unavailable" line before the preserved message). This pre-check only
+    # avoids wasted work: the create-only O_EXCL write below still guards the
+    # actual create-vs-exists race for the fresh path.
+    if path.exists():
+        print(f"[cadre] {path.name}: exists — preserved", file=sys.stderr)
+        return
+
     try:
         result = discover_candidates()
     except DiscoveryError as exc:

@@ -36,23 +36,32 @@ from typing import Iterator
 from unittest.mock import patch
 
 from cadre.config import FleetConfig
+from cadre.discover import DiscoveredProvider, DiscoveryResult
+from cadre.preview_lint import Palette, off_palette_model_pairs
 
 
 def _pairs_for_config(cfg: FleetConfig) -> set[tuple[str, str]]:
     """Every (provider, model) pair ``preflight_refusal`` would check for
     ``cfg`` -- specialists, plus the synthesizer/judge ONLY when the
-    convergence mode makes that role model-bearing. Mirrors
-    ``cadre.preview_lint.off_palette_model_pairs``'s own gating exactly (the
-    same source both the #62 gate and the preview warnings share), so a
-    palette built from this set can never leave a real model-bearing role
-    unchecked.
+    convergence mode makes that role model-bearing. Delegates to
+    ``cadre.preview_lint.off_palette_model_pairs`` (the single source both the
+    #62 gate and the preview warnings share) against an EMPTY palette, so
+    every model-bearing pair registers as off-palette -- i.e. the exact
+    declared set, drift-proof by construction.
     """
-    pairs = {(s.provider, s.model) for s in cfg.specialists}
-    if cfg.convergence == "synthesize" and cfg.synthesis is not None:
-        pairs.add((cfg.synthesis.provider, cfg.synthesis.model))
-    if cfg.convergence == "judge" and cfg.judge is not None:
-        pairs.add((cfg.judge.provider, cfg.judge.model))
-    return pairs
+    return {
+        (provider, model)
+        for _role, provider, model in off_palette_model_pairs(cfg, Palette())
+    }
+
+
+def fake_discovery_result(provider="xai-oauth", models=("grok-4.3",), hermes_home="/tmp/profile"):
+    """One-provider ``DiscoveryResult`` builder shared by test_discover.py and
+    test_provision.py (identical twins before consolidation)."""
+    return DiscoveryResult(
+        providers=[DiscoveredProvider(provider=provider, models=list(models))],
+        hermes_home=hermes_home,
+    )
 
 
 def _toolsets_for_config(cfg: FleetConfig) -> set[str]:

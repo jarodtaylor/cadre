@@ -32,11 +32,11 @@ or empty result (R2/R10/KTD2).
 ``discover_candidates`` returns raw typed data only. ``write_candidates`` (U2)
 turns a completed ``DiscoveryResult`` into the on-disk candidates file
 ``verify_palette._load_candidates`` already reads — same ``candidates:``/
-``toolsets:`` schema, no change to that contract. Its write posture mirrors
-``verify_palette.write_palette`` / ``approval.write_approval`` /
-``provision.write_config`` exactly (owner-only, symlink-refusing,
-parent-checked — R13); regenerating an existing file prints a loud stderr
-notice first (R4), since the file is discovery-owned and hand edits are
+``toolsets:`` schema, no change to that contract. Its write posture is the
+canonical owner-only, symlink-refusing, parent-checked one
+(``approval._write_owner_only`` — R13); regenerating an existing file prints
+a loud stderr notice first (R4), since the file is discovery-owned and hand
+edits are
 about to be discarded. ``main`` is the ``cadre discover`` CLI entrypoint:
 fetch, write, report — or degrade to one legible failure line (R6/R10); no
 paid model call anywhere in this module. Discovered provider/model strings
@@ -47,7 +47,6 @@ the YAML file content itself is written verbatim so it round-trips exactly.
 
 from __future__ import annotations
 
-import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,7 +54,7 @@ from pathlib import Path
 
 import yaml
 
-from cadre.approval import _parent_is_safe
+from cadre.approval import _write_owner_only
 from cadre.capture import resolved_hermes_home
 from cadre.resources import palette_example_path
 from cadre.text_safety import sanitize as _sanitize
@@ -211,11 +210,8 @@ def discover_candidates(payload: dict | None = None) -> DiscoveryResult:
 # verify_palette._load_candidates already reads. No change to that schema.
 # ---------------------------------------------------------------------------
 
-# Same location verify_palette._load_candidates reads from (its own
-# _DEFAULT_CANDIDATES_PATH constant). Duplicated here rather than imported —
-# cadre.verify_palette is a concurrently-developed sibling module this unit
-# does not depend on; both sides agreeing on the path is covered by the
-# coupling test in tests/test_discover.py, not a shared import.
+# The single home of the candidates-file location: verify_palette (the
+# reader) imports this constant, so the writer and reader can't drift apart.
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
 
 # Absolute last-resort toolsets if the packaged palette.example.yaml is ever
@@ -395,34 +391,12 @@ def write_candidates(
 
     # Create parent dir owner-only (mirrors write_palette / write_approval /
     # write_config's identical umask discipline).
-    old_umask = os.umask(0o077)
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-        # Refuse a group/other-writable (or foreign-owned) parent —
-        # mkdir(exist_ok=True) tightens a freshly-created dir to 0o700 but
-        # will NOT downgrade a pre-existing loose one. Same guard as
-        # write_palette / write_approval / write_config.
-        if not _parent_is_safe(str(path.parent)):
-            raise OSError(
-                f"{path.parent} is unsafe — it must be owned by you and not "
-                "group/other-writable. Fix it, then re-run."
-            )
-
-        # O_NOFOLLOW: refuse to follow a symlink planted at path, matching
-        # the repo's other hardened writers. Owner-only at creation — never
-        # the momentary 0o644 a write-then-chmod would leave under a default
-        # umask. create_only swaps O_TRUNC for O_EXCL (KTD6): the open()
-        # itself becomes the atomic existence check, raising FileExistsError
-        # rather than truncating a file (or following a symlink) already there.
-        create_or_truncate = os.O_EXCL if create_only else os.O_TRUNC
-        flags = os.O_WRONLY | os.O_CREAT | create_or_truncate | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(path), flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        path.chmod(0o600)
-    finally:
-        os.umask(old_umask)
+    # Canonical owner-only posture (approval._write_owner_only): tightened
+    # umask, 0o700 parent, _parent_is_safe, O_NOFOLLOW, 0600 leaf. create_only
+    # swaps O_TRUNC for O_EXCL (KTD6): the open() itself is the atomic
+    # existence check, raising FileExistsError rather than truncating a file
+    # (or following a symlink) already there.
+    _write_owner_only(path, content, exclusive=create_only)
 
 
 # ---------------------------------------------------------------------------
