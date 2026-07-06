@@ -37,7 +37,10 @@ pip-installed into — the load-bearing KTD2 install target):
 2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
    ~/.cadre/palette.yaml. By default this verifies a capped subset (2 per
    provider, file order) rather than every discovered candidate; pass
-   `--all` to verify everything.
+   `--all` to verify everything. On success (2+ providers verified), it also
+   (re)generates ~/.cadre/fleets/palette-fleet.yaml — a tool-less smoke-test
+   fleet with one lane per verified provider, ready to `cadre run` with zero
+   editing (see cadre/palette_fleet.py).
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -63,6 +66,7 @@ import yaml
 
 from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
+from cadre.palette_fleet import write_palette_fleet
 from cadre.text_safety import sanitize as _sanitize
 
 # Default candidates file path (operator edits once after install seeds it).
@@ -482,6 +486,19 @@ def main(all_candidates: bool = False) -> int:
     skipped = [f"{_sanitize(r.provider)}/{_sanitize(r.model)}" for r in records if not r.ok]
     if skipped:
         print(f"  skipped {len(skipped)}: {', '.join(skipped)}")
+
+    # Bonus artifact (U5, #61): a runnable smoke-test fleet from the just-verified
+    # pairs, written as a sibling "fleets/" dir of wherever palette.yaml just
+    # landed — deliberately derived from palette_path rather than a second
+    # independent ~/.cadre-rooted default: every existing test above reaches
+    # this point only after patching _DEFAULT_PALETTE_PATH to a tmp path, and
+    # deriving from it (instead of a standalone constant no test knows to
+    # patch) keeps those tests hermetic for free, with no changes to them.
+    # write_palette_fleet NEVER raises — a fleet-write failure (or too few
+    # verified providers) warns to stderr but must not flip this successful
+    # verify to a nonzero exit; palette.yaml above is the primary deliverable.
+    fleet_path = palette_path.parent / "fleets" / "palette-fleet.yaml"
+    write_palette_fleet(records, path=fleet_path)
 
     return 0
 
