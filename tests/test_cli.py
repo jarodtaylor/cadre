@@ -2836,18 +2836,27 @@ class TestSetupCommandCLIWiring(unittest.TestCase):
 
 class TestVerifyPaletteCommandCLIWiring(unittest.TestCase):
     """`cadre verify-palette` is reachable through cli.main()'s argparse dispatch
-    and propagates cadre.verify_palette.main()'s exit code verbatim."""
+    and propagates cadre.verify_palette.main()'s exit code verbatim. U4 added
+    the --all flag, threaded through as the all_candidates keyword arg — the
+    default-cap behavior itself lives in verify_palette.main (test_palette.py),
+    not the CLI; this class only proves the argparse wiring."""
 
     def test_main_verify_palette_subcommand_calls_verify_palette_main(self):
         with patch("cadre.verify_palette.main", return_value=0) as fake_main:
             code = cli_main(["verify-palette"])
-        fake_main.assert_called_once_with()
+        fake_main.assert_called_once_with(all_candidates=False)
         self.assertEqual(code, 0)
 
     def test_main_verify_palette_propagates_nonzero_exit(self):
         with patch("cadre.verify_palette.main", return_value=1):
             code = cli_main(["verify-palette"])
         self.assertEqual(code, 1)
+
+    def test_main_verify_palette_all_flag_passes_all_candidates_true(self):
+        with patch("cadre.verify_palette.main", return_value=0) as fake_main:
+            code = cli_main(["verify-palette", "--all"])
+        fake_main.assert_called_once_with(all_candidates=True)
+        self.assertEqual(code, 0)
 
 
 # ---------------------------------------------------------------------------

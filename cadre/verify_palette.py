@@ -35,7 +35,9 @@ pip-installed into — the load-bearing KTD2 install target):
 1. `cadre setup` seeds ~/.cadre/palette-candidates.yaml from the installed
    package (or edit PROVIDERS in this file) with your real strings.
 2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
-   ~/.cadre/palette.yaml.
+   ~/.cadre/palette.yaml. By default this verifies a capped subset (2 per
+   provider, file order) rather than every discovered candidate; pass
+   `--all` to verify everything.
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -61,12 +63,20 @@ import yaml
 
 from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
+from cadre.text_safety import sanitize as _sanitize
 
 # Default candidates file path (operator edits once after install seeds it).
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
 
 # Default palette output path.
 _DEFAULT_PALETTE_PATH = Path("~/.cadre/palette.yaml")
+
+# Default per-provider verify cap (R5): zero-touch discovery (#61) can surface
+# ~70 candidates across a handful of providers; verifying every one before the
+# palette is even usable is 70 paid calls. A named constant (not a bare literal
+# in the function default) so the cap size can't drift out of sync between the
+# actual cap and the banner message that reports it.
+_DEFAULT_PER_PROVIDER_CAP = 2
 
 # ---------------------------------------------------------------------------
 # Candidate pairs to verify on the host.
@@ -134,10 +144,16 @@ def verify_candidates(candidates: list[tuple[str, str]]) -> list[VerifyRecord]:
     records: list[VerifyRecord] = []
     for provider, model in candidates:
         ok, detail = _verify_one(provider, model)
+        # Candidate strings are discovery-sourced (#61) and detail derives from
+        # provider output — both untrusted display input (KTD9): sanitize each
+        # field, never the assembled line.
         if ok:
-            print(f"  ✓ {provider} / {model}")
+            print(f"  ✓ {_sanitize(provider)} / {_sanitize(model)}")
         else:
-            print(f"  ✗ {provider} / {model}  — skipped ({_short_reason(detail)})")
+            print(
+                f"  ✗ {_sanitize(provider)} / {_sanitize(model)}  "
+                f"— skipped ({_sanitize(_short_reason(detail))})"
+            )
         records.append(VerifyRecord(provider=provider, model=model, ok=ok, detail=detail))
     return records
 
@@ -346,7 +362,89 @@ def _load_candidates(candidates_path: Path) -> tuple[list[tuple[str, str]], list
     return PROVIDERS, []
 
 
-def main() -> int:
+def _cap_candidates(
+    candidates: list[tuple[str, str]],
+    per_provider: int = _DEFAULT_PER_PROVIDER_CAP,
+) -> list[tuple[str, str]]:
+    """Order-preserving cap: keep the first ``per_provider`` candidates for each
+    provider, in file order. Pure — no I/O, no printing, no live calls; sits
+    between ``_load_candidates`` and ``verify_candidates`` (R5, KTD4). A
+    provider with fewer than ``per_provider`` candidates is unaffected.
+
+    Args:
+        candidates: (provider, model) pairs, in file order.
+        per_provider: Max candidates to keep per provider.
+
+    Returns:
+        The capped list, preserving the input order.
+    """
+    seen: dict[str, int] = {}
+    capped: list[tuple[str, str]] = []
+    for pair in candidates:
+        provider = pair[0]
+        count = seen.get(provider, 0)
+        if count < per_provider:
+            capped.append(pair)
+            seen[provider] = count + 1
+    return capped
+
+
+def _verifying_banner(to_verify: list[tuple[str, str]], total: int) -> str:
+    """Build the pre-spend disclosure banner printed before the first paid call.
+
+    States the X-of-Y split honestly (KTD4): when nothing was trimmed
+    (``len(to_verify) == total`` — either ``--all`` was passed, or every
+    provider was already at or under the cap), it says "all N" and never
+    mentions the cap or ``--all`` — implying a trim happened when it didn't
+    would be misleading. When capped, it also names exactly which pairs will
+    be verified, so the operator sees the spend commitment up front rather
+    than discovering it call-by-call.
+
+    Discovered candidate strings are untrusted display input (KTD9) — each
+    provider/model piece is routed through the sanitize chokepoint before
+    joining, the same per-field pattern ``cli.py``'s ``validate_command`` uses
+    (sanitize each piece, not the assembled line — a hostile value can't then
+    forge the ``, `` separator into a fake extra pair).
+    """
+    footer = (
+        "Unsupported or unauthenticated ones are skipped (a skip is normal, not\n"
+        "an error). Provider output is hidden; set CADRE_VERIFY_VERBOSE=1 to show it."
+    )
+    if len(to_verify) == total:
+        return f"Verifying all {total} discovered candidate(s) against this host —\n{footer}\n"
+
+    shown = ", ".join(f"{_sanitize(p)} / {_sanitize(m)}" for p, m in to_verify)
+    return (
+        f"Verifying {len(to_verify)} of {total} discovered candidate(s) against this host\n"
+        f"({_DEFAULT_PER_PROVIDER_CAP} per provider by default; pass --all to verify all "
+        f"{total}):\n"
+        f"  {shown}\n\n"
+        f"{footer}\n"
+    )
+
+
+def main(all_candidates: bool = False) -> int:
+    """Verify candidates against this host and write the palette (R5, R6).
+
+    By default, verifies a capped subset (``_DEFAULT_PER_PROVIDER_CAP`` per
+    provider, in file order — ``_cap_candidates``) rather than every
+    discovered candidate: zero-touch discovery (#61) can surface ~70 pairs
+    across a handful of providers, and paying for 70 calls before the palette
+    is even usable is needless spend. Pass ``all_candidates=True`` (the CLI's
+    ``--all`` flag) to verify every discovered candidate instead. Either way,
+    the X-of-Y split (``_verifying_banner``) prints BEFORE the first paid call
+    (``verify_candidates``, below) — the spend commitment is disclosed up
+    front, never discovered call-by-call or after the fact.
+
+    Args:
+        all_candidates: Verify every discovered candidate, bypassing the
+            per-provider cap. Defaults to False (the capped subset).
+
+    Returns:
+        0 on a successful write (at least one candidate verified ok); 1 if
+        there are no candidates to verify, or the palette write itself failed
+        (a clean message is printed either way — never a raw traceback).
+    """
     candidates_path = _DEFAULT_CANDIDATES_PATH.expanduser()
     palette_path = _DEFAULT_PALETTE_PATH.expanduser()
 
@@ -362,12 +460,10 @@ def main() -> int:
         )
         return 1
 
-    print(
-        f"Verifying {len(candidates)} candidate(s) against this host — unsupported or\n"
-        "unauthenticated ones are skipped (a skip is normal, not an error). Provider\n"
-        "output is hidden; set CADRE_VERIFY_VERBOSE=1 to show it.\n"
-    )
-    records = verify_candidates(candidates)
+    total = len(candidates)
+    to_verify = candidates if all_candidates else _cap_candidates(candidates)
+    print(_verifying_banner(to_verify, total))
+    records = verify_candidates(to_verify)
 
     n_ok = sum(1 for r in records if r.ok)
     try:
@@ -381,7 +477,9 @@ def main() -> int:
         return 1
 
     print(f"\n✓ {n_ok} of {len(records)} verified → {palette_path}")
-    skipped = [f"{r.provider}/{r.model}" for r in records if not r.ok]
+    # Same KTD9 rule as verify_candidates' per-candidate lines: discovered
+    # strings render sanitized, per field.
+    skipped = [f"{_sanitize(r.provider)}/{_sanitize(r.model)}" for r in records if not r.ok]
     if skipped:
         print(f"  skipped {len(skipped)}: {', '.join(skipped)}")
 

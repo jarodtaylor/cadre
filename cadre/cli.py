@@ -330,11 +330,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
-    sub.add_parser(
+    p_verify_palette = sub.add_parser(
         "verify-palette",
         help=(
             "Verify authenticated (provider, model) candidates against this host "
             "and write ~/.cadre/palette.yaml (host-only, live — makes real model calls)"
+        ),
+    )
+    p_verify_palette.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help=(
+            "Verify every discovered candidate instead of the default capped "
+            "subset (2 per provider)"
         ),
     )
 
@@ -362,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         # directly to stdout as it runs (unlike validate/setup's single end-of-call
         # message) — so it owns its own printing; propagate its exit code as-is
         # rather than forcing it through the (code, out); print(out) shape below.
-        return verify_palette.main()
+        return verify_palette.main(all_candidates=args.all)
     elif args.cmd == "install-skill":
         code, out = install_skill(args.skills_dir)
     else:

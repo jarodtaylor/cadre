@@ -598,6 +598,32 @@ class TestVerifyCandidatesBlankResponse(unittest.TestCase):
         self.assertEqual(result[0].detail, "empty response")
 
 
+class TestVerifyCandidatesSanitizedStatusLines(unittest.TestCase):
+    """KTD9 sibling-sink: the per-candidate ✓/✗ lines render discovered
+    provider/model strings (and the failure reason mined from provider output),
+    all untrusted display input — a control byte must render defanged."""
+
+    def test_status_lines_strip_hostile_bytes_from_candidate_and_reason(self):
+        import contextlib as ctx
+        import io as _io
+        import unittest.mock as mock
+
+        out = _io.StringIO()
+        with mock.patch.object(verify_palette, "_verify_one") as fake_one:
+            fake_one.side_effect = [
+                (True, "ok"),
+                (False, "boom\x1b[31m reason"),
+            ]
+            with ctx.redirect_stdout(out):
+                verify_palette.verify_candidates(
+                    [("xai\x1b[0m", "grok-4.3"), ("openrouter", "bad\x1bmodel")]
+                )
+        captured = out.getvalue()
+        self.assertNotIn("\x1b", captured)
+        self.assertIn("xai", captured)  # surrounding text still renders
+        self.assertIn("grok-4.3", captured)
+
+
 class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
     """verify_candidates hides a candidate's raw provider output (the scary
     multi-line error AIAgent dumps for an unsupported model) and prints one calm
@@ -645,6 +671,175 @@ class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
 
         self.assertFalse(records[0].ok)
         self.assertIn("not supported", records[0].detail.lower())
+
+
+# ---------------------------------------------------------------------------
+# New tests: default verify cap (2/provider) + --all (U4, #61 zero-touch
+# discovery — docs/plans/2026-07-06-001-feat-palette-auto-discovery-plan.md)
+# ---------------------------------------------------------------------------
+
+
+class TestCapCandidatesPure(unittest.TestCase):
+    """_cap_candidates is a pure, order-preserving per-provider cap (KTD4).
+    No I/O, no printing, no live calls — a plain list-in list-out function."""
+
+    def test_keeps_first_two_per_provider_in_file_order(self):
+        pairs = [
+            ("openrouter", "model-a"),
+            ("openrouter", "model-b"),
+            ("openrouter", "model-c"),
+            ("xai", "grok-4.3"),
+        ]
+        capped = verify_palette._cap_candidates(pairs, per_provider=2)
+        self.assertEqual(
+            capped,
+            [
+                ("openrouter", "model-a"),
+                ("openrouter", "model-b"),
+                ("xai", "grok-4.3"),
+            ],
+        )
+
+    def test_provider_with_one_pair_is_unaffected(self):
+        pairs = [("xai", "grok-4.3")]
+        self.assertEqual(verify_palette._cap_candidates(pairs, per_provider=2), pairs)
+
+    def test_default_per_provider_is_two(self):
+        """Calling without per_provider uses the documented default of 2."""
+        pairs = [("xai", "a"), ("xai", "b"), ("xai", "c")]
+        self.assertEqual(verify_palette._cap_candidates(pairs), [("xai", "a"), ("xai", "b")])
+
+    def test_empty_list_returns_empty_list(self):
+        self.assertEqual(verify_palette._cap_candidates([]), [])
+
+    def test_seven_providers_ten_each_caps_to_fourteen_in_file_order(self):
+        """AE3: ~70 pairs across 7 providers caps to 14 (2 each), file order preserved."""
+        pairs = [(f"provider{p}", f"model{m}") for p in range(7) for m in range(10)]
+        capped = verify_palette._cap_candidates(pairs, per_provider=2)
+        self.assertEqual(len(capped), 14)
+        for p in range(7):
+            provider = f"provider{p}"
+            kept = [pair for pair in capped if pair[0] == provider]
+            self.assertEqual(kept, [(provider, "model0"), (provider, "model1")])
+
+
+class TestVerifyPaletteMainCapsByDefault(unittest.TestCase):
+    """main() caps candidates to 2/provider by default (R5); --all bypasses the
+    cap (R6 — the first paid call still stays inside verify-palette either
+    way). The X-of-Y banner prints BEFORE the first verify_candidates() call."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.candidates_path = self.tmp / "palette-candidates.yaml"
+        self.palette_path = self.tmp / "palette.yaml"
+
+    def _write_candidates(self, pairs, toolsets=None):
+        # Built via yaml.safe_dump (not hand-rolled string interpolation) so a
+        # control character embedded in a candidate string round-trips through
+        # valid YAML rather than corrupting hand-written syntax.
+        data = {
+            "candidates": [{"provider": p, "model": m} for p, m in pairs],
+            "toolsets": toolsets if toolsets is not None else ["web"],
+        }
+        self.candidates_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    def _seventy_pairs(self):
+        return [(f"provider{p}", f"model{m}") for p in range(7) for m in range(10)]
+
+    def _run_main(self, *, all_candidates=False):
+        """Run main() with verify_candidates faked (no live calls); returns
+        (exit_code, captured_stdout, [args each verify_candidates call received])."""
+        calls = []
+
+        def fake_verify(candidates):
+            calls.append(list(candidates))
+            print("VERIFY_CALL_MARKER")  # a stdout marker to order-check against the banner
+            return [
+                verify_palette.VerifyRecord(provider=p, model=m, ok=True) for p, m in candidates
+            ]
+
+        out = io.StringIO()
+        with patch.object(verify_palette, "_DEFAULT_CANDIDATES_PATH", self.candidates_path), \
+             patch.object(verify_palette, "_DEFAULT_PALETTE_PATH", self.palette_path), \
+             patch.object(verify_palette, "verify_candidates", side_effect=fake_verify), \
+             contextlib.redirect_stdout(out):
+            code = verify_palette.main(all_candidates=all_candidates)
+        return code, out.getvalue(), calls
+
+    def test_seventy_pairs_capped_to_fourteen_by_default(self):
+        self._write_candidates(self._seventy_pairs())
+        code, _captured, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1, "verify_candidates must be called exactly once")
+        self.assertEqual(len(calls[0]), 14)
+
+    def test_banner_states_x_of_y_before_any_verify_call(self):
+        self._write_candidates(self._seventy_pairs())
+        _code, captured, _calls = self._run_main()
+        banner_idx = captured.find("14 of 70")
+        marker_idx = captured.find("VERIFY_CALL_MARKER")
+        self.assertNotEqual(banner_idx, -1, captured)
+        self.assertNotEqual(marker_idx, -1, captured)
+        self.assertLess(banner_idx, marker_idx, "the X-of-Y banner must print before any paid call")
+
+    def test_banner_mentions_all_flag_to_widen(self):
+        self._write_candidates(self._seventy_pairs())
+        _code, captured, _calls = self._run_main()
+        self.assertIn("--all", captured)
+        self.assertIn("70", captured)
+
+    def test_all_flag_verifies_every_discovered_pair(self):
+        self._write_candidates(self._seventy_pairs())
+        code, captured, calls = self._run_main(all_candidates=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls[0]), 70)
+        self.assertIn("all 70", captured)
+
+    def test_all_flag_banner_does_not_mention_cap_or_widen_hint(self):
+        """Nothing was trimmed when --all is used — the banner must not
+        misleadingly reference the per-provider cap or a --all widen hint."""
+        self._write_candidates(self._seventy_pairs())
+        _code, captured, _calls = self._run_main(all_candidates=True)
+        self.assertNotIn("--all to verify", captured)
+
+    def test_providers_under_cap_verified_without_cap_message(self):
+        """3 pairs total, none over the per-provider cap -> nothing trimmed;
+        the banner must state 'all N', not a misleading X-of-Y cap message."""
+        self._write_candidates([("xai", "grok-4.3"), ("openrouter", "a"), ("openrouter", "b")])
+        code, captured, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls[0]), 3)
+        self.assertNotIn("--all", captured, "nothing was trimmed; must not imply a cap happened")
+        self.assertIn("all 3", captured)
+
+    def test_zero_candidates_message_unchanged(self):
+        """Regression (test scenario 4): the file-absent path is untouched by
+        the cap change — same message, same exit code, no verify call at all."""
+        missing = self.tmp / "does-not-exist.yaml"
+        out = io.StringIO()
+        with patch.object(verify_palette, "_DEFAULT_CANDIDATES_PATH", missing), \
+             patch.object(verify_palette, "_DEFAULT_PALETTE_PATH", self.palette_path), \
+             contextlib.redirect_stdout(out):
+            code = verify_palette.main()
+        self.assertEqual(code, 1)
+        self.assertIn("No candidates found.", out.getvalue())
+
+    def test_capped_banner_sanitizes_hostile_candidate_strings(self):
+        """KTD9: discovered candidate strings are untrusted display input — a
+        control byte in a kept candidate must render defanged in the banner
+        (mirrors the ESC-stripping pattern used across test_render.py /
+        test_preflight.py / test_capture.py's sanitize tests)."""
+        self._write_candidates(
+            [
+                ("xai", "grok\x1b[31m-evil"),
+                ("xai", "grok-4.3"),
+                ("xai", "grok-4.3-extra"),  # 3rd xai pair -> dropped by the cap
+            ]
+        )
+        _code, captured, _calls = self._run_main()
+        self.assertNotIn("\x1b", captured)
+        self.assertIn("grok", captured)  # the surrounding text still renders
 
 
 if __name__ == "__main__":
