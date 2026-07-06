@@ -288,8 +288,10 @@ def setup_command(
         ExitCode.SUCCESS,
         f"Provisioned {home} from the installed cadre package.\n"
         f"Recorded Hermes Python: {recorded_python}\n"
-        "Next: edit ~/.cadre/palette-candidates.yaml for your authenticated providers, "
-        "then run `cadre verify-palette`.",
+        # Path-neutral next step: the seeding line above (stderr) already said
+        # whether discovery populated real pairs or the placeholder was seeded.
+        "Next: review ~/.cadre/palette-candidates.yaml (auto-discovered from "
+        "Hermes when available — edit only if needed), then run `cadre verify-palette`.",
     )
 
 
