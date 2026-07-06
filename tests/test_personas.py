@@ -680,6 +680,47 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import exit_codes (engine-purity constraint)",
         )
 
+    def test_discover_does_not_import_engine_or_model_client(self):
+        """cadre/discover.py must NOT import engine or model_client (#61, U1).
+
+        discover.py reads Hermes's provider inventory and parses it into typed
+        candidates — caller-layer, same posture as verify_palette.py/preflight.py.
+        It imports cadre.capture (for resolved_hermes_home), which itself imports
+        engine — but that is a transitive dependency of capture.py, not a direct
+        import in discover.py's own source, so it does not trip this AST check.
+        """
+        import cadre.discover as d_mod
+
+        imported = _static_imports(d_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "discover.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "discover.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_discover(self):
+        """cadre/engine.py and model_client.py must NOT import discover (#61, U1)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.discover",
+            imported_engine,
+            "engine.py must not import discover (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.discover",
+            imported_mc,
+            "model_client.py must not import discover (engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).
