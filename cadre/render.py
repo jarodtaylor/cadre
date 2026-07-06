@@ -421,7 +421,9 @@ def render_result(result: FleetResult) -> str:
     # it renders (#5 U2). r.text/synthesis/judge bodies are gutter-framed above
     # (frame_body, GH #45) so a model body cannot render a flush-left look-alike
     # row; the inline r.error/notes fields here are single-line via non-multiline
-    # sanitize, so they cannot open a second row either.
+    # sanitize, so they cannot open a second row either. The FAIL/TIMEOUT reason
+    # token (r.reason.value, #70 U5) is NOT sanitized — like `tag` itself, it is a
+    # closed engine-set enum, never fleet/model-derived text.
     for r in result.specialists:
         if r.skipped:
             tag = "SKIP"
@@ -431,10 +433,12 @@ def render_result(result: FleetResult) -> str:
             suffix = ""
         elif r.timed_out:
             tag = "TIMEOUT"
-            suffix = f": {_sanitize(r.error)}" if r.error else ""
+            reason_tag = f" [{r.reason.value}]" if r.reason is not None else ""
+            suffix = f"{reason_tag}: {_sanitize(r.error)}" if r.error else reason_tag
         else:
             tag = "FAIL"
-            suffix = f": {_sanitize(r.error)}" if r.error else ""
+            reason_tag = f" [{r.reason.value}]" if r.reason is not None else ""
+            suffix = f"{reason_tag}: {_sanitize(r.error)}" if r.error else reason_tag
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")
     if result.notes:
         out.append("\nnotes:")

@@ -475,7 +475,18 @@ def _specialist_md(lane) -> str:  # lane: AgentResult
     elif lane.ok:
         lines += ["## Output", "", _sanitize(lane.text or "", multiline=True)]
     else:
-        lines += ["## Error", "", _sanitize(lane.error or "(no error detail)", multiline=True)]
+        error_section = ["## Error", ""]
+        if lane.reason is not None:
+            # Structured failure reason (#70 U5), named alongside the raw error
+            # text below. lane.reason.value is a fixed lowercase token from the
+            # closed FailureReason enum (engine-set, never fleet/model text), but
+            # this file is a trust surface a consumer reads back, so the
+            # constructed line still goes through _sanitize per this module's
+            # trust-surface rule for anything on a persisted record.
+            error_section.append(_sanitize(f"**Reason:** {lane.reason.value}"))
+            error_section.append("")
+        error_section.append(_sanitize(lane.error or "(no error detail)", multiline=True))
+        lines += error_section
     return "\n".join(lines)
 
 
@@ -631,6 +642,10 @@ def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[d
                 # Model/adapter output — sanitized so a manifest a consumer prints
                 # can't be spoofed (#5 U2); None preserved as JSON null.
                 "error": _sanitize(lane.error, multiline=True) if lane.error else None,
+                # Structured failure reason (#70 U5) — schema parity with the
+                # top-level lanes[] record below (_build_manifest); same
+                # closed-enum/not-sanitized rationale as that field.
+                "reason": lane.reason.value if lane.reason is not None else None,
                 "elapsed_s": lane.elapsed_s,
                 "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
                 "timed_out": lane.timed_out,
@@ -667,6 +682,12 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             # Model/adapter output — sanitized to match the rounds manifest + render
             # (#5 U2); None preserved as JSON null.
             "error": _sanitize(lane.error, multiline=True) if lane.error else None,
+            # Structured failure reason (#70 U5) — the FailureReason enum's string
+            # value, or null on a successful lane. Mirrors how `status` below
+            # serializes its own closed str-Enum (result.status.value): reason is
+            # engine-set from a closed 5-member enum, never fleet/model-derived
+            # text, so — like status — it is NOT run through _sanitize.
+            "reason": lane.reason.value if lane.reason is not None else None,
             "elapsed_s": lane.elapsed_s,
             "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
             "timed_out": lane.timed_out,
