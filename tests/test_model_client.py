@@ -2,7 +2,8 @@ import sys
 import types
 import unittest
 
-from cadre.model_client import ModelClient
+from cadre.failure import FailureReason
+from cadre.model_client import AgentResult, ModelClient
 
 
 class FakeAgent:
@@ -34,6 +35,13 @@ class TestSuccess(unittest.TestCase):
         self.assertEqual((r.role, r.provider, r.model), ("web", "openrouter", "google/gemini-3-flash"))
         self.assertIsNone(r.error)
 
+    def test_successful_call_has_no_reason(self):
+        # The case the __post_init__ not-None guard protects: a successful lane's
+        # reason stays at its None default, and construction must not raise.
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(reply="findings")))
+        r = client.run(role="web", provider="p", model="m", prompt="go")
+        self.assertIsNone(r.reason)
+
     def test_factory_receives_provider_model_toolset(self):
         captured = []
         client = ModelClient(agent_factory=factory_returning(FakeAgent(reply="ok"), captured))
@@ -49,6 +57,7 @@ class TestFailure(unittest.TestCase):
         self.assertIsNone(r.text)
         self.assertIn("RuntimeError", r.error)
         self.assertIn("auth blew up", r.error)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
 
     def test_non_runtimeerror_exception_also_caught(self):
         # The catch-all must handle exception types other than RuntimeError —
@@ -57,6 +66,7 @@ class TestFailure(unittest.TestCase):
         r = client.run(role="web", provider="p", model="m", prompt="go")
         self.assertFalse(r.ok)
         self.assertIn("ValueError", r.error)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
 
     def test_empty_response_is_failure(self):
         for reply in ("", "   ", None):
@@ -64,6 +74,32 @@ class TestFailure(unittest.TestCase):
             r = client.run(role="web", provider="p", model="m", prompt="go")
             self.assertFalse(r.ok, f"reply={reply!r} should be a failure")
             self.assertIn("empty", r.error)
+            self.assertIs(r.reason, FailureReason.EMPTY_OUTPUT, f"reply={reply!r}")
+
+
+class TestAgentResultReasonCoercion(unittest.TestCase):
+    """AgentResult.__post_init__ coerces a raw-string reason, but ONLY when it is
+    not None — unlike FleetStatus.status (never None), reason defaults to None on
+    every successful lane, so an unconditional coerce would raise on every success.
+    """
+
+    def test_string_reason_coerces_to_enum_member(self):
+        r = AgentResult(role="web", provider="p", model="m", ok=False, reason="model_error")
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+
+    def test_none_reason_stays_none(self):
+        r = AgentResult(role="web", provider="p", model="m", ok=True, reason=None)
+        self.assertIsNone(r.reason)
+
+    def test_default_reason_is_none_and_does_not_raise(self):
+        # No reason passed at all — the default must stay None with no ValueError,
+        # which is exactly the case an unconditional coerce would break.
+        r = AgentResult(role="web", provider="p", model="m", ok=True)
+        self.assertIsNone(r.reason)
+
+    def test_enum_member_reason_is_idempotent(self):
+        r = AgentResult(role="web", provider="p", model="m", ok=False, reason=FailureReason.TIMEOUT)
+        self.assertIs(r.reason, FailureReason.TIMEOUT)
 
 
 class TestImportIsolation(unittest.TestCase):

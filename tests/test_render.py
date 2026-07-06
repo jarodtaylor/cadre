@@ -17,6 +17,7 @@ import unittest
 from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from cadre.engine import FleetResult, FleetStatus
 from tests.test_engine import _derive_status
+from cadre.failure import FailureReason
 from cadre.model_client import AgentResult
 from cadre.personas import resolve
 from cadre.progress import (
@@ -62,8 +63,13 @@ def make_lane(
     elapsed_s=1.0,
     toolset=None,
     skipped=False,
+    reason=None,
 ):
-    """Return an AgentResult with sensible defaults; caller overrides what it cares about."""
+    """Return an AgentResult with sensible defaults; caller overrides what it cares about.
+
+    ``reason`` (U5, #70) defaults to None; pass a FailureReason member to
+    exercise the terminal render's reason token on a failed/timed-out lane.
+    """
     return AgentResult(
         role=role,
         provider=provider,
@@ -76,6 +82,7 @@ def make_lane(
         elapsed_s=elapsed_s,
         toolset=toolset if toolset is not None else [],
         skipped=skipped,
+        reason=reason,
     )
 
 
@@ -3166,6 +3173,74 @@ class TestReportGrammarFramingU2(unittest.TestCase):
             self.assertFalse(
                 line.startswith("[ok  ] ghost"), "inline error spawned a fake flush-left row"
             )
+
+
+class TestRenderResultReasonToken(unittest.TestCase):
+    """U5 (#70): a FAIL/TIMEOUT provenance row names the structured `reason`
+    token; ok/SKIP rows and a reason-less failure render byte-identical to the
+    pre-U5 shape (asserted as exact rows, not a loose substring check)."""
+
+    def test_fail_row_shows_reason_token(self):
+        r = make_result(
+            specialists=[make_lane(role="web", ok=False, error="boom",
+                                    reason=FailureReason.MODEL_ERROR)],
+            ok=False,
+        )
+        out = render_result(r)
+        self.assertIn("[FAIL] web (openrouter/web/model) [model_error]: boom", out)
+
+    def test_timeout_row_shows_reason_token(self):
+        r = make_result(
+            specialists=[make_lane(role="social", provider="xai", model="grok",
+                                    ok=False, timed_out=True, error="timed out after 600s",
+                                    reason=FailureReason.TIMEOUT)],
+            ok=False,
+        )
+        out = render_result(r)
+        self.assertIn("[TIMEOUT] social (xai/grok) [timeout]: timed out after 600s", out)
+
+    def test_empty_output_reason_token_shown(self):
+        r = make_result(
+            specialists=[make_lane(role="web", ok=False, error="empty response from model",
+                                    reason=FailureReason.EMPTY_OUTPUT)],
+            ok=False,
+        )
+        out = render_result(r)
+        self.assertIn(
+            "[FAIL] web (openrouter/web/model) [empty_output]: empty response from model", out
+        )
+
+    def test_fail_row_without_reason_matches_pre_u5_shape(self):
+        """A reason-less failure (the pre-U5 shape) renders the exact same row as
+        before — no stray token, no crash."""
+        r = make_result(
+            specialists=[make_lane(role="web", ok=False, error="boom", reason=None)],
+            ok=False,
+        )
+        out = render_result(r)
+        self.assertIn("[FAIL] web (openrouter/web/model): boom", out)
+        self.assertNotIn("[FAIL] web (openrouter/web/model) [", out)
+
+    def test_ok_row_unaffected(self):
+        r = make_result(specialists=[make_lane(role="web", text="findings")], synthesis="s", ok=True)
+        out = render_result(r)
+        self.assertIn("[ok  ] web (openrouter/web/model)", out)
+
+    def test_skip_row_unaffected_by_reason(self):
+        """A skipped lane's reason (SKIPPED) does not leak into the [SKIP] row —
+        the tag itself already conveys it; behavior is unchanged from pre-U5."""
+        r = FleetResult(
+            fleet="chain-fleet",
+            task="t",
+            specialists=[make_lane(role="writer", skipped=True, ok=False,
+                                    reason=FailureReason.SKIPPED)],
+            convergence="collect",
+            topology="sequential",
+            status=FleetStatus.FAILED,
+        )
+        out = render_result(r)
+        skip_lines = [line for line in out.split("\n") if line.startswith("[SKIP]")]
+        self.assertEqual(skip_lines, ["[SKIP] writer (openrouter/web/model)"])
 
 
 if __name__ == "__main__":

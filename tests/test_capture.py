@@ -28,6 +28,7 @@ from cadre.capture import (
 )
 from cadre.config import FleetConfig
 from cadre.engine import FleetResult, FleetStatus, run_fleet
+from cadre.failure import FailureReason
 from cadre.model_client import AgentResult
 from cadre.personas import resolve
 from cadre.progress_runner import run_with_progress
@@ -59,8 +60,13 @@ def _cfg(**overrides):
 
 def _lane(role="web", provider="openrouter", model="google/gemini-3-flash",
           ok=True, text=None, error=None, elapsed_s=1.23,
-          toolset=None, timed_out=False) -> AgentResult:
-    """Build an AgentResult with U1 capture fields populated."""
+          toolset=None, timed_out=False, reason=None) -> AgentResult:
+    """Build an AgentResult with U1 capture fields populated.
+
+    ``reason`` (U5, #70) defaults to None — a caller building a failed lane
+    passes the FailureReason member it wants surfaced; a successful lane never
+    needs one.
+    """
     r = AgentResult(
         role=role,
         provider=provider,
@@ -71,6 +77,7 @@ def _lane(role="web", provider="openrouter", model="google/gemini-3-flash",
         elapsed_s=elapsed_s,
         toolset=list(toolset) if toolset is not None else [],
         timed_out=timed_out,
+        reason=reason,
     )
     return r
 
@@ -204,6 +211,7 @@ class TestManifestSchema(unittest.TestCase):
         self.assertIn("model", lane)
         self.assertIn("ok", lane)
         self.assertIn("error", lane)
+        self.assertIn("reason", lane)
         self.assertIn("elapsed_s", lane)
         self.assertIn("toolset", lane)
         self.assertIn("timed_out", lane)
@@ -1920,17 +1928,23 @@ def _chain_cfg(**overrides):
     return FleetConfig.from_dict(data)
 
 
-def _skipped_lane(role, provider, model) -> AgentResult:
+def _skipped_lane(role, provider, model, *, reason=FailureReason.SKIPPED) -> AgentResult:
     """Build a skipped-lane AgentResult (chain never ran this lane).
 
     Constructed directly — not via _lane() — because _lane's error-defaulting
     sets error=f"{role}-error" for any ok=False lane even when error= is not
     supplied, and a skipped lane must have error=None (no call was made).
     toolset=[] is explicit to satisfy the []-vs-None invariant in _build_manifest.
+
+    ``reason`` defaults to FailureReason.SKIPPED (U5, #70) — matching the
+    engine's unconditional tagging at its skip-construction site (engine.py) —
+    so every existing call site now carries the real production shape without
+    edits; pass ``reason=None`` explicitly to test the pre-U5 shape.
     """
     return AgentResult(
         role=role, provider=provider, model=model,
         ok=False, skipped=True, error=None, elapsed_s=None, toolset=[],
+        reason=reason,
     )
 
 
@@ -2291,15 +2305,19 @@ class TestSaveLaneSubdir(unittest.TestCase):
 
 
 def _iterative_lane(role, *, round_num=1, ok=True, provider="openrouter", model="a/m",
-                    toolset=None) -> AgentResult:
-    """AgentResult for an iterative round lane — toolset defaults to [] (not None)."""
+                    toolset=None, reason=None) -> AgentResult:
+    """AgentResult for an iterative round lane — toolset defaults to [] (not None).
+
+    ``reason`` (U5, #70) defaults to None; pass a FailureReason member for a
+    failed round-lane to exercise the rounds[][] manifest's reason parity.
+    """
     if toolset is None:
         toolset = []
     text = f"{role}-r{round_num}-output" if ok else None
     error = None if ok else f"{role}-r{round_num}-error"
     return AgentResult(
         role=role, provider=provider, model=model, ok=ok,
-        text=text, error=error, elapsed_s=0.5, toolset=toolset,
+        text=text, error=error, elapsed_s=0.5, toolset=toolset, reason=reason,
     )
 
 
@@ -2416,7 +2434,7 @@ class TestIterativeManifest(unittest.TestCase):
     def test_rounds_required_fields_present(self):
         """Each round lane record carries all required fields."""
         required = {
-            "role", "provider", "model", "ok", "error",
+            "role", "provider", "model", "ok", "error", "reason",
             "elapsed_s", "toolset", "timed_out", "file",
         }
         manifest = self._load_manifest()
@@ -2870,6 +2888,146 @@ class TestReportGrammarFramingU3(unittest.TestCase):
         md = _synthesis_md(_result(synthesis="# Report\nbody line"))
         self.assertIn("# Report\nbody line", md)
         self.assertNotIn("│ ", md)
+
+
+# ---------------------------------------------------------------------------
+# Structured failure reason surfaced in manifest + specialist .md (U5, #70)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestReasonField(unittest.TestCase):
+    """Each top-level lanes[] record carries the structured `reason` — the
+    FailureReason enum's string value for a failed lane, null for a success."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _reason_for(self, role, specialists):
+        save_run(_cfg(), _result(specialists=specialists), self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        return next(lane for lane in manifest["lanes"] if lane["role"] == role)["reason"]
+
+    def test_timeout_reason_serialized(self):
+        lanes = [
+            _lane("web", toolset=["web"]),
+            _lane("social", ok=False, error="timed out after 600s", timed_out=True,
+                  toolset=["x_search"], reason=FailureReason.TIMEOUT),
+        ]
+        self.assertEqual(self._reason_for("social", lanes), "timeout")
+
+    def test_empty_output_reason_serialized(self):
+        lanes = [
+            _lane("web", toolset=["web"]),
+            _lane("social", ok=False, error="empty response from model",
+                  toolset=["x_search"], reason=FailureReason.EMPTY_OUTPUT),
+        ]
+        self.assertEqual(self._reason_for("social", lanes), "empty_output")
+
+    def test_model_error_reason_serialized(self):
+        lanes = [
+            _lane("web", toolset=["web"]),
+            _lane("social", ok=False, error="ValueError: boom",
+                  toolset=["x_search"], reason=FailureReason.MODEL_ERROR),
+        ]
+        self.assertEqual(self._reason_for("social", lanes), "model_error")
+
+    def test_successful_lane_reason_is_null(self):
+        lanes = [_lane("web", toolset=["web"]), _lane("social", toolset=["x_search"])]
+        self.assertIsNone(self._reason_for("social", lanes))
+
+    def test_skipped_reason_serialized_in_sequential_manifest(self):
+        """A skipped lane's manifest record carries reason="skipped" too — the
+        sequential-chain shape (_skipped_lane defaults to FailureReason.SKIPPED,
+        matching the engine's own unconditional tagging)."""
+        lanes = [
+            _lane("scout", provider="openrouter", model="s/m", toolset=["web"]),
+            _lane("analyst", provider="xai", model="grok", ok=False,
+                  error="rate-limited", toolset=["web"], reason=FailureReason.MODEL_ERROR),
+            _skipped_lane("writer", "openrouter", "w/m"),
+        ]
+        result = FleetResult(
+            fleet="test-chain", task="research task", specialists=lanes,
+            synthesis=None, synth_ok=None, convergence="collect", topology="sequential",
+            terminal_produced=False, threading_truncated=False, status=FleetStatus.DEGRADED,
+        )
+        save_run(_chain_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        by_role = {lane["role"]: lane["reason"] for lane in manifest["lanes"]}
+        self.assertEqual(by_role["writer"], "skipped")
+        self.assertEqual(by_role["analyst"], "model_error")
+        self.assertIsNone(by_role["scout"])
+
+
+class TestRoundsManifestReasonField(unittest.TestCase):
+    """rounds[][] per-lane records carry `reason` too — schema parity with the
+    top-level lanes[] (the easily-missed KTD5 sink: without this the iterative
+    round transcript would ship one field behind lanes[])."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def test_failed_round_lane_carries_reason(self):
+        round1 = [
+            _iterative_lane("alpha", round_num=1, ok=False, reason=FailureReason.MODEL_ERROR),
+            _iterative_lane("beta", round_num=1),
+        ]
+        result = _iterative_result_for_manifest(rounds=[round1], status=FleetStatus.DEGRADED)
+        save_run(_iterative_cfg_for_manifest(rounds=1), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        round_entry = manifest["rounds"][0]
+        alpha = next(r for r in round_entry if r["role"] == "alpha")
+        beta = next(r for r in round_entry if r["role"] == "beta")
+        self.assertEqual(alpha["reason"], "model_error")
+        self.assertIsNone(beta["reason"])
+
+
+class TestSpecialistMdReasonField(unittest.TestCase):
+    """_specialist_md's ## Error section names the structured reason alongside
+    the raw error text (U5, #70); the Skipped section and success Output section
+    are untouched."""
+
+    def test_error_section_names_reason(self):
+        lane = _lane("social", ok=False, error="ValueError: boom", reason=FailureReason.MODEL_ERROR)
+        md = _specialist_md(lane)
+        self.assertIn("## Error", md)
+        self.assertIn("**Reason:** model_error", md)
+        self.assertIn("ValueError: boom", md)
+
+    def test_timeout_reason_named_in_error_section(self):
+        lane = _lane("social", ok=False, error="timed out after 600s", timed_out=True,
+                     reason=FailureReason.TIMEOUT)
+        md = _specialist_md(lane)
+        self.assertIn("**Reason:** timeout", md)
+
+    def test_error_section_without_reason_matches_pre_u5_shape(self):
+        """A failure built with no reason (the pre-U5 shape) renders the exact
+        same Error section as before — no stray 'Reason' line, no crash."""
+        lane = _lane("social", ok=False, error="boom", reason=None)
+        md = _specialist_md(lane)
+        self.assertEqual(md, "\n".join([
+            "# Specialist: social",
+            "",
+            "- **Provider:** openrouter",
+            "- **Model:** google/gemini-3-flash",
+            "- **OK:** False",
+            "- **Elapsed:** 1.23s",
+            "- **Toolset:** (none)",
+            "",
+            "## Error",
+            "",
+            "boom",
+        ]))
+
+    def test_skipped_lane_error_section_unaffected(self):
+        """A skipped lane (reason=SKIPPED) still renders ## Skipped, unchanged —
+        reason-naming is scoped to the ## Error (real-failure) branch only."""
+        skipped = _skipped_lane("writer", "openrouter", "w/m")
+        md = _specialist_md(skipped)
+        self.assertIn("## Skipped", md)
+        self.assertNotIn("**Reason:**", md)
+        self.assertNotIn("## Error", md)
 
 
 if __name__ == "__main__":

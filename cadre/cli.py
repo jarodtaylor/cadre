@@ -24,10 +24,12 @@ from pathlib import Path
 from cadre import provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
+from cadre.exit_codes import ExitCode, status_to_exit
 from cadre.file_input import MAX_FILE_BYTES, compose
 from cadre.install_skill import install_skill
 from cadre.model_client import ModelClient
 from cadre.personas import default_pool_dir, resolve
+from cadre.preflight import preflight_refusal
 from cadre.preview_lint import render_preview_warnings
 from cadre.progress_runner import run_with_progress
 from cadre.render import render_result
@@ -39,9 +41,9 @@ def validate_command(path: str) -> tuple[int, str]:
         cfg = FleetConfig.load(path)
         resolve(cfg, default_pool_dir())
     except ConfigError as err:
-        return 1, str(err)
+        return ExitCode.ERROR, str(err)
     except FileNotFoundError:
-        return 1, f"Fleet spec not found: {path}"
+        return ExitCode.ERROR, f"Fleet spec not found: {path}"
     # Fleet-controlled fields are _sanitize()d — validate output is a terminal surface,
     # same as the preview, so a tampered fleet must not inject escapes into it.
     lines = [f"OK: {_sanitize(cfg.name)}"]
@@ -64,7 +66,7 @@ def validate_command(path: str) -> tuple[int, str]:
     # unreadable palette yields a "validation skipped" note; validation
     # never causes a non-zero exit code from validate_command.
     lines.append(render_preview_warnings(cfg))
-    return 0, "\n".join(lines)
+    return ExitCode.SUCCESS, "\n".join(lines)
 
 
 def run_command(
@@ -93,9 +95,17 @@ def run_command(
         cfg = FleetConfig.load(path)
         resolve(cfg, default_pool_dir())
     except ConfigError as err:
-        return 1, str(err)
+        return ExitCode.ERROR, str(err)
     except FileNotFoundError:
-        return 1, f"Fleet spec not found: {path}"
+        return ExitCode.ERROR, f"Fleet spec not found: {path}"
+
+    # #62 preflight-refuse (R4): refuse an off-palette model BEFORE any spend —
+    # before prepare_run_dir, before run_with_progress. A palette-absent or
+    # malformed host degrades open (see preflight_refusal), so this never
+    # blocks a fleet with nothing to check it against.
+    refusal = preflight_refusal(cfg)
+    if refusal is not None:
+        return ExitCode.PREFLIGHT_REFUSE, refusal
 
     if capture:
         try:
@@ -105,7 +115,7 @@ def run_command(
             # raised before reassigning it); the OSError carries the attempted
             # path, so don't interpolate run_dir and risk printing "None".
             return (
-                1,
+                ExitCode.ERROR,
                 f"Cannot create run directory: {exc}\n"
                 "Use --no-capture to bypass run capture.",
             )
@@ -118,7 +128,7 @@ def run_command(
         progress_stream=progress_stream,
     )
     output = render_result(result)
-    exit_code = 0 if result.ok else 1
+    exit_code = status_to_exit(result.status)
 
     if capture:
         try:
@@ -224,14 +234,14 @@ def setup_command(
     # runs — see the docstring's step 2. No side effect on a hostile value.
     if any(ch in recorded_python for ch in ("\n", "\r", "\x00")):
         return (
-            1,
+            ExitCode.ERROR,
             "error: invalid interpreter path (contains a newline or control "
             "character) — refusing to verify or record it. Nothing was written.",
         )
 
     if not provision.verify_importable(recorded_python):
         return (
-            1,
+            ExitCode.ERROR,
             f"error: `import cadre` does not resolve under {recorded_python}\n"
             "Install cadre into that interpreter first, e.g.:\n"
             f'  {recorded_python} -m pip install --force-reinstall --no-deps '
@@ -244,13 +254,13 @@ def setup_command(
     cadre_home = Path("~/.cadre").expanduser()
     if cadre_home.is_symlink():
         return (
-            1,
+            ExitCode.ERROR,
             f"error: {cadre_home} is a symlink — refusing (possible tampering); "
             "remove it and re-run. Nothing was written.",
         )
     if cadre_home.exists() and (cadre_home.stat().st_mode & 0o022):
         return (
-            1,
+            ExitCode.ERROR,
             f"error: {cadre_home} is group/other-writable — run `chmod 700 "
             f"{cadre_home}` and re-run. Nothing was written.",
         )
@@ -268,10 +278,10 @@ def setup_command(
         # contract this function already uses elsewhere) — an mkdir/write
         # failure (e.g. a read-only $HOME, a full disk) must degrade to a
         # clean error, never a raw traceback.
-        return (1, f"error provisioning ~/.cadre: {exc}")
+        return (ExitCode.ERROR, f"error provisioning ~/.cadre: {exc}")
 
     return (
-        0,
+        ExitCode.SUCCESS,
         f"Provisioned {home} from the installed cadre package.\n"
         f"Recorded Hermes Python: {recorded_python}\n"
         "Next: edit ~/.cadre/palette-candidates.yaml for your authenticated providers, "
@@ -360,18 +370,18 @@ def main(argv: list[str] | None = None) -> int:
         # error (not argparse's required-flag error, since --task is now optional).
         if args.task is None and not args.doc:
             print("Provide --task and/or --doc.")
-            return 2
+            return ExitCode.USAGE
         # Compose any --doc files into the task at the caller layer — the engine
         # stays path-free. compose raises ConfigError on an unreadable --doc, caught
-        # here so it exits cleanly (exit 1) rather than tracebacking (KTD5). The
-        # composed string is passed to run_command, whose signature is unchanged.
+        # here so it exits cleanly (ExitCode.ERROR) rather than tracebacking (KTD5).
+        # The composed string is passed to run_command, whose signature is unchanged.
         try:
             # cli.py has no --preview surface to disclose truncation, so the warn
             # below is the operator's only signal; the doc-paths list is unused here.
             task, _doc_paths, truncated = compose(args.task, args.doc)
         except ConfigError as err:
             print(str(err))
-            return 1
+            return ExitCode.ERROR
         # Surface oversize truncation on the run path too (run has no preview gate) —
         # the in-block note is model-facing, so without this the operator never knows
         # the review ran over a partial file.

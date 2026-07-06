@@ -25,9 +25,11 @@ from cadre.approval import (
 )
 from cadre.capture import prepare_run_dir, resolved_hermes_home, save_run
 from cadre.config import ConfigError, FleetConfig
+from cadre.exit_codes import ExitCode, status_to_exit
 from cadre.file_input import MAX_FILE_BYTES, compose
 from cadre.model_client import ModelClient
 from cadre.personas import default_pool_dir, resolve
+from cadre.preflight import preflight_refusal
 from cadre.preview_lint import render_preview_warnings
 from cadre.progress_runner import run_with_progress
 from cadre.text_safety import sanitize as _sanitize  # GH #23
@@ -105,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         composed_task, doc_paths, truncated_docs = compose(args.task, args.doc)
     except ConfigError as err:
         print(str(err))
-        return 1
+        return ExitCode.ERROR
     except OSError as exc:
         print(
             f"Could not read fleet spec '{args.fleet}': {exc}\n"
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             "a curated fleet (seeded by `cadre setup`), or compose one from "
             "~/.cadre/palette.yaml."
         )
-        return 1
+        return ExitCode.ERROR
 
     # --preview: render the parsed config and exit — BEFORE ModelClient, BEFORE
     # prepare_run_dir, BEFORE run_fleet. Zero model calls, zero capture.
@@ -172,20 +174,33 @@ def main(argv: list[str] | None = None) -> int:
                         "Ensure ~/.cadre (or CADRE_APPROVAL_PATH) is an owner-only, "
                         "non-symlink path, then re-preview."
                     )
-                    return 1
+                    return ExitCode.ERROR
                 flavor = "privileged " if args.approve_privileged else ""
                 # Sanitize the path label: CADRE_APPROVAL_PATH is caller-controlled and
                 # flows onto the approval surface, so a control byte in it must not spoof
                 # this line (CodeRabbit — same trust-surface rule as every other print here).
                 print(f"\nPreview-bound {flavor}approval written: {_sanitize(default_approval_path())}")
                 print("This run is now approved to execute this exact previewed surface once.")
-        return 0
+        return ExitCode.SUCCESS
 
     # Real run: need at least one of --task / --doc. composed_task is None only when
     # both are absent (compose returns the base task unchanged for a no-doc run).
     if composed_task is None:
         print("provide --task and/or --doc (unless --preview)")
-        return 2
+        return ExitCode.USAGE
+
+    # #62 preflight-refuse (R4, KTD4): refuse an off-palette model BEFORE
+    # consume_approval and BEFORE run_with_progress — before any spend AND
+    # before the one-shot approval token is burned. A host-side palette fix
+    # (adding the model via `cadre verify-palette`) leaves the fleet YAML —
+    # and therefore the surface digest — unchanged, so the same approval
+    # still works on a subsequent run. A palette-absent or malformed host
+    # degrades open (see preflight_refusal), so this never blocks a fleet
+    # with nothing to check it against.
+    refusal = preflight_refusal(cfg)
+    if refusal is not None:
+        print(refusal)
+        return ExitCode.PREFLIGHT_REFUSE
 
     # Preview-bound approval gate (#5 Part 2, R1/R4): a real run executes only
     # when it presents a valid, unconsumed approval bound to THIS exact surface
@@ -207,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             f"No valid preview-bound approval for this run. Run `{mint_cmd}` first to "
             "approve this exact fleet + task + docs + profile, then run again."
         )
-        return 1
+        return ExitCode.ERROR
 
     # Privileged fleets require a privileged-flavored approval (R5/AE4). The digest
     # already binds allow_privileged_tools, so a tampered false->true is caught by
@@ -219,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             "This fleet enables privileged tools and requires a privileged approval. "
             "Run `--approve-privileged` (not a plain `--preview`) to approve it."
         )
-        return 1
+        return ExitCode.ERROR
 
     # No --preview here to disclose truncation (or it was skipped), so warn on the
     # [cadre] stream that an oversize --doc is being reviewed only partially — the
@@ -242,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Cannot create run directory: {exc}\n"
                 "Use --no-capture to bypass run capture."
             )
-            return 1
+            return ExitCode.ERROR
 
     result = run_with_progress(
         cfg,
@@ -265,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[cadre] warn: failed to save run artifacts: {_sanitize(str(exc))}", file=sys.stderr)
 
     print(output)
-    return 0 if result.ok else 1
+    return status_to_exit(result.status)
 
 
 if __name__ == "__main__":

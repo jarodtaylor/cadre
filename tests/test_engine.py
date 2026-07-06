@@ -10,6 +10,7 @@ from pathlib import Path
 
 from cadre.config import FleetConfig
 from cadre.engine import FleetResult, FleetStatus, run_fleet
+from cadre.failure import FailureReason
 from cadre.model_client import AgentResult
 from cadre.personas import resolve
 from cadre.progress import JudgeDone, JudgeStarted, LaneDone, LaneLaunched, RoundStarted
@@ -289,6 +290,14 @@ class TestSpecialistTimeout(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.synthesis, "DONE")
         self.assertEqual(len(result.successes), 2)
+
+    def test_hung_specialist_reason_is_timeout(self):
+        """U2: the fabricated timeout result carries reason=TIMEOUT (and timed_out=True)."""
+        client = HangingClient(hang_roles={"social"}, behavior={"synthesizer": ("ok", "DONE")})
+        result = run_fleet(_config(), "task", client, call_timeout=0.3)
+        social = next(r for r in result.specialists if r.role == "social")
+        self.assertIs(social.reason, FailureReason.TIMEOUT)
+        self.assertTrue(social.timed_out)
 
 
 class TestSynthesizerTimeout(unittest.TestCase):
@@ -1111,6 +1120,18 @@ class TestSequentialTopology(unittest.TestCase):
         note_text = " ".join(result.notes)
         self.assertIn("analyst", note_text)
         self.assertNotIn("writer", note_text)
+
+    def test_ae2_skipped_lane_reason_is_skipped(self):
+        """U2: writer never ran because analyst failed → reason=SKIPPED (and skipped=True)."""
+        client = FakeClient({"analyst": ("fail", "e")})
+        result = run_fleet(_chain_config(), "task", client)
+        by_role = {r.role: r for r in result.specialists}
+        self.assertIs(by_role["writer"].reason, FailureReason.SKIPPED)
+        self.assertTrue(by_role["writer"].skipped)
+        # analyst ran (a real failure, not a skip) — FakeClient constructs AgentResult
+        # directly (bypassing ModelClient.run), so it carries no reason of its own;
+        # the point of this test is the engine-set SKIPPED tag on the downstream lane.
+        self.assertIsNone(by_role["analyst"].reason)
 
     # ------------------------------------------------------------------
     # AE3: first-lane failure — chain halted immediately

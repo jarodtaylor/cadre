@@ -46,6 +46,7 @@ from enum import Enum
 from typing import Callable
 
 from cadre.config import FleetConfig, SpecialistSpec
+from cadre.failure import FailureReason
 from cadre.model_client import AgentResult, ModelClient
 from cadre.progress import (
     JudgeDone,
@@ -337,6 +338,7 @@ def _timed_out_result(role: str, provider: str, model: str, timeout: float) -> A
     return AgentResult(
         role=role, provider=provider, model=model, ok=False,
         error=f"timed out after {timeout:g}s", timed_out=True,
+        reason=FailureReason.TIMEOUT,
     )
 
 
@@ -652,6 +654,7 @@ def _run_chain(
                 model=spec.model,
                 ok=False,
                 skipped=True,
+                reason=FailureReason.SKIPPED,
             )
             sk.toolset = list(spec.toolset)
             results.append(sk)

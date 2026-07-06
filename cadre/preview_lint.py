@@ -51,10 +51,40 @@ class Palette:
 # ---------------------------------------------------------------------------
 
 
+def resolve_palette_path(path: str | Path | None = None) -> Optional[Path]:
+    """Return the filesystem ``Path`` ``load_palette`` would read, or ``None`` if
+    the path itself is unresolvable (a NUL byte or a non-str/Path).
+
+    Resolution order mirrors ``load_palette``: explicit ``path`` -> ``CADRE_PALETTE``
+    env -> ``DEFAULT_PALETTE_PATH``. The #62 preflight gate uses this to tell
+    "no palette present" (degrade open) apart from "present but malformed" (fail
+    closed) when ``load_palette`` returns ``None`` — a distinction ``load_palette``
+    itself deliberately collapses to a single ``None``.
+    """
+    if path is None:
+        env = os.getenv("CADRE_PALETTE")
+        path = env if env else DEFAULT_PALETTE_PATH
+    try:
+        resolved = Path(path).expanduser()
+    except (ValueError, TypeError, RuntimeError):
+        # A non-str/Path, or an unresolvable home dir. RuntimeError is the
+        # container case: Path.expanduser() raises it when the path starts with
+        # ``~`` and HOME is unset (the default ``~/.cadre/palette.yaml``) — treat
+        # it as unresolvable and degrade cleanly rather than crashing.
+        return None
+    # A NUL byte survives Path()/expanduser() but raises ValueError at every
+    # filesystem op (read_text/exists/stat). Reject it here so both load_palette
+    # and the preflight stat treat it as unresolvable (degrade open) rather than
+    # crashing at the point of use.
+    if "\x00" in str(resolved):
+        return None
+    return resolved
+
+
 def load_palette(path: str | Path | None = None) -> Optional[Palette]:
     """Load and parse the host palette YAML.
 
-    Path resolution order:
+    Path resolution order (see ``resolve_palette_path``):
     1. ``path`` parameter (explicit injection — used by tests and CI).
     2. ``CADRE_PALETTE`` env var, if set (dev-host testability seam, mirrors
        ``CADRE_RUN_DIR`` in ``capture.py``).
@@ -68,18 +98,21 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
     - Any malformed entry in ``models`` (partial/garbage palette → None, not
       a partial result, so a corrupted palette degrades cleanly rather than
       producing a confusingly incomplete check).
-    """
-    if path is None:
-        env = os.getenv("CADRE_PALETTE")
-        path = env if env else DEFAULT_PALETTE_PATH
 
+    Because a *missing* and a *present-but-malformed* palette both collapse to
+    ``None`` here, a caller that must distinguish them (the #62 preflight gate)
+    stats ``resolve_palette_path(path)`` when this returns ``None``.
+    """
+    resolved = resolve_palette_path(path)
+    if resolved is None:
+        return None
     try:
-        # Path()/expanduser() can raise ValueError (an embedded NUL byte in the path) or
-        # TypeError (a non-str/Path) — both must degrade to None, not crash, to honor the
-        # never-raises contract. read_text adds OSError (missing/unreadable) and
-        # UnicodeDecodeError (a non-UTF-8 / binary palette, NOT an OSError subclass).
-        raw = Path(path).expanduser().read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        # read_text can raise OSError (missing/unreadable), UnicodeDecodeError
+        # (a non-UTF-8 / binary palette, NOT an OSError subclass), or ValueError
+        # (a NUL byte that slipped past resolve_palette_path) — all degrade to
+        # None, honoring the never-raises contract.
+        raw = resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
 
     try:
@@ -124,6 +157,60 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
 # ---------------------------------------------------------------------------
 
 
+def off_palette_model_pairs(config: FleetConfig, palette: Palette) -> list[tuple[str, str, str]]:
+    """Return ``(role_label, provider, model)`` for every model-bearing role whose
+    ``(provider, model)`` pair is absent from ``palette.models``.
+
+    Pure (no I/O). The single structured-membership source shared by
+    ``check_palette`` (which formats these into human-readable warning strings
+    below) and the #62 preflight gate (``cadre.preflight.preflight_refusal``) —
+    so the preview warnings and the run-time refusal can never disagree about
+    what counts as off-palette (KTD4). Filtering ``check_palette``'s formatted
+    warning strings for "the model ones" would require substring-matching
+    interleaved, human-readable prose — the anti-pattern this extraction
+    avoids.
+
+    Checks every specialist, plus the synthesizer (only when
+    ``config.convergence == "synthesize"`` and ``config.synthesis is not
+    None``) and the judge (only when ``config.convergence == "judge"`` and
+    ``config.judge is not None``) — the SAME convergence-mode gating
+    ``check_palette`` has always applied. Toolsets are NOT covered here — see
+    the separate toolset loop in ``check_palette``.
+
+    ``role_label`` is ``"specialist '<role>'"`` for a specialist, or the bare
+    ``"synthesizer"`` / ``"judge"`` for those roles — the same three label
+    shapes ``check_palette``'s warnings already use — so a specialist that
+    happens to be named "synthesizer" or "judge" can never be confused with
+    the real convergence role. All three return values are RAW (unsanitized):
+    membership checks use the raw values; a caller sanitizes before display
+    (mirrors the rest of this module).
+    """
+    pairs: list[tuple[str, str, str]] = []
+
+    for spec in config.specialists:
+        if (spec.provider, spec.model) not in palette.models:
+            pairs.append((f"specialist '{spec.role}'", spec.provider, spec.model))
+
+    # Synthesizer: only for synthesize-convergence fleets. Match the mode positively
+    # (== "synthesize") rather than "!= collect" — with three modes, "!= collect" also
+    # admits judge, and relying on synthesis-is-None to exclude judge is implicit. The
+    # explicit form mirrors the judge guard below. synthesis is guaranteed non-None in
+    # synthesize mode (config validation), so the second clause is belt-and-suspenders.
+    if config.convergence == "synthesize" and config.synthesis is not None:
+        syn = config.synthesis
+        if (syn.provider, syn.model) not in palette.models:
+            pairs.append(("synthesizer", syn.provider, syn.model))
+
+    # Judge: only for judge-convergence fleets. The judge is a model call, so
+    # palette-validate it like the synthesizer.
+    if config.convergence == "judge" and config.judge is not None:
+        j = config.judge
+        if (j.provider, j.model) not in palette.models:
+            pairs.append(("judge", j.provider, j.model))
+
+    return pairs
+
+
 def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
     """Return a list of warning strings for off-palette models/toolsets.
 
@@ -153,43 +240,26 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
     # terminal escapes). See docs/solutions/design-patterns/
     # sanitize-trust-surface-renders-against-terminal-escapes.md. Membership checks use the
     # RAW values; only the displayed text is sanitized.
+    #
+    # Model membership: off_palette_model_pairs (above) is the single source both this
+    # formatter and the #62 preflight gate consume (KTD4) — sanitizing the WHOLE
+    # role_label reproduces the original per-kind formatting exactly, since its literal
+    # wrapper text ("specialist '...'", "synthesizer", "judge") is plain ASCII and passes
+    # sanitize() unchanged; only an embedded role could carry anything sanitize would strip.
+    for role_label, provider, model in off_palette_model_pairs(config, palette):
+        warnings.append(
+            f"{_sanitize(role_label)}: ({_sanitize(provider)}, {_sanitize(model)}) not in palette; "
+            f"{palette_hint}"
+        )
+
+    # Toolset check — unchanged; off_palette_model_pairs does not cover toolsets.
     for spec in config.specialists:
-        pair = (spec.provider, spec.model)
-        if pair not in palette.models:
-            warnings.append(
-                f"specialist '{_sanitize(spec.role)}': "
-                f"({_sanitize(spec.provider)}, {_sanitize(spec.model)}) not in palette; "
-                f"{palette_hint}"
-            )
         for tool in spec.toolset:
             if tool not in palette.toolsets:
                 warnings.append(
                     f"specialist '{_sanitize(spec.role)}': toolset '{_sanitize(tool)}' not in palette; "
                     f"verify the toolset name against ~/.cadre/palette.yaml"
                 )
-
-    # Synthesizer: only for synthesize-convergence fleets. Match the mode positively
-    # (== "synthesize") rather than "!= collect" — with three modes, "!= collect" also
-    # admits judge, and relying on synthesis-is-None to exclude judge is implicit. The
-    # explicit form mirrors the judge guard below. synthesis is guaranteed non-None in
-    # synthesize mode (config validation), so the second clause is belt-and-suspenders.
-    if config.convergence == "synthesize" and config.synthesis is not None:
-        syn = config.synthesis
-        if (syn.provider, syn.model) not in palette.models:
-            warnings.append(
-                f"synthesizer: ({_sanitize(syn.provider)}, {_sanitize(syn.model)}) not in palette; "
-                f"{palette_hint}"
-            )
-
-    # Judge: only for judge-convergence fleets. The judge is a model call, so
-    # palette-validate it like the synthesizer.
-    if config.convergence == "judge" and config.judge is not None:
-        j = config.judge
-        if (j.provider, j.model) not in palette.models:
-            warnings.append(
-                f"judge: ({_sanitize(j.provider)}, {_sanitize(j.model)}) not in palette; "
-                f"{palette_hint}"
-            )
 
     return warnings
 

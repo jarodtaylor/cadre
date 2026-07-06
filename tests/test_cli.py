@@ -19,6 +19,7 @@ from cadre.approval import consume_approval, surface_digest, write_approval
 from cadre.capture import _slugify, resolve_run_dir, resolved_hermes_home
 from cadre.cli import main as cli_main, run_command, setup_command, validate_command
 from cadre.config import FleetConfig
+from cadre.exit_codes import ExitCode
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
@@ -147,17 +148,21 @@ class TestRun(unittest.TestCase):
         self.assertIn("PARTIAL", out)
 
     def test_run_total_failure_exits_nonzero(self):
+        # All specialists failed -> FleetStatus.FAILED -> ExitCode.FAILED (4), not
+        # the old binary 1 (#70 tri-state exit).
         client = FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
         code, out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertIn("partial result (no synthesis)", out)
 
     def test_run_synthesizer_failure_still_shows_specialist_text(self):
         # specialists succeed (default), synthesizer fails -> surviving lane output
-        # must still reach the user, not just provenance rows.
+        # must still reach the user, not just provenance rows. Specialists ok +
+        # convergence failed -> FleetStatus.DEGRADED -> ExitCode.DEGRADED (3), not
+        # the old binary 1 (#70 tri-state exit).
         client = FakeClient({"synthesizer": ("fail", "rate limited")})
         code, out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 3)
         self.assertIn("social-output", out)
         self.assertIn("web-output", out)
         self.assertIn("synthesizer failed", out)
@@ -270,7 +275,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
-        self.assertEqual(code, 1)  # run failed → non-zero even if save_run also failed
+        self.assertEqual(code, 4)  # all-failed → ExitCode.FAILED even if save_run also failed
 
     def test_run_folder_line_uses_save_run_return(self):
         """Gate (#4): cli prints the path save_run RETURNS (the possibly-renamed
@@ -1519,7 +1524,7 @@ class TestValidateCollectFleet(unittest.TestCase):
 
 
 class TestRunCommandCollectExitCodes(unittest.TestCase):
-    """Collect run: >=1 success → exit 0; all-failed → exit 1."""
+    """Collect run: >=1 success → exit 0; all-failed → exit 4 (FleetStatus.FAILED, #70)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1542,10 +1547,10 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         self.assertNotIn("synthesis was not attempted", out)
 
     def test_collect_all_failed_exits_nonzero(self):
-        """A collect run with all specialists failed exits 1."""
+        """A collect run with all specialists failed exits 4 (all-failed, #70)."""
         client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
         code, _out = run_command(self.fleet_path, "find tools", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +1620,8 @@ class TestValidateJudgeFleet(unittest.TestCase):
 
 
 class TestRunCommandJudgeExitCodes(unittest.TestCase):
-    """Judge run exit codes: success→0; partial coverage→0; judge-fail→1; all-fail→1."""
+    """Judge run exit codes (#70 tri-state): success→0; partial coverage→0;
+    judge-fail→3 (DEGRADED, specialists survived); all-fail→4 (FAILED)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1632,16 +1638,18 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_judge_failure_exits_nonzero(self):
-        """Judge ran but returned an error → exit 1."""
+        """Judge ran but returned an error, specialists survived → FleetStatus.DEGRADED
+        → exit 3 (#70 tri-state, not the old binary 1)."""
         client = FakeClient({"judge": ("fail", "rate limited")})
         code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 3)
 
     def test_all_specialists_failed_exits_nonzero(self):
-        """All specialists failed (judge never ran) → exit 1."""
+        """All specialists failed (judge never ran) → FleetStatus.FAILED → exit 4
+        (#70 tri-state, not the old binary 1)."""
         client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
         code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
 
     def test_low_grade_still_exits_zero(self):
         """Judge call succeeded (ok=True) with a low/critical grade text → exit 0.
@@ -1674,6 +1682,296 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
             any(u["role"] == "social" for u in ungraded),
             f"manifest must list 'social' as ungraded; got: {ungraded}",
         )
+
+
+# ---------------------------------------------------------------------------
+# U3 (#70): centralized tri-state exit codes — both runners
+# ---------------------------------------------------------------------------
+
+
+def _status_fake_client(status):
+    """A FakeClient behavior dict driving EXAMPLE (research-swarm.example.yaml —
+    synthesize mode, specialists social/web/analysis + a synthesizer) to the
+    named FleetStatus:
+
+    - 'success'  — every call ok -> FleetStatus.SUCCESS.
+    - 'degraded' — specialists ok (default), synthesizer fails -> convergence
+                   failed but specialists survived -> FleetStatus.DEGRADED.
+    - 'failed'   — every specialist fails -> convergence never runs ->
+                   FleetStatus.FAILED.
+    """
+    if status == "success":
+        return FakeClient({"synthesizer": ("ok", "SYNTH OK")})
+    if status == "degraded":
+        return FakeClient({"synthesizer": ("fail", "rate limited")})
+    if status == "failed":
+        return FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
+    raise ValueError(f"unknown status: {status!r}")
+
+
+class TestRunCommandStatusToExit(unittest.TestCase):
+    """cadre run (cli.py run_command) maps FleetStatus -> the tri-state exit via
+    status_to_exit (#70): SUCCESS 0 / DEGRADED 3 / FAILED 4."""
+
+    def test_success_exits_0(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("success"), capture=False)
+        self.assertEqual(code, 0)
+
+    def test_degraded_exits_3(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("degraded"), capture=False)
+        self.assertEqual(code, 3)
+
+    def test_failed_exits_4(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("failed"), capture=False)
+        self.assertEqual(code, 4)
+
+
+class TestSkillRunStatusToExit(unittest.TestCase):
+    """run.py's real-run path maps FleetStatus -> the SAME tri-state exit (#70),
+    via a valid preview-bound approval + a status-producing FakeClient."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _exit_code_for(self, status):
+        run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=_status_fake_client(status)):
+                # Mint the preview-bound approval for this exact surface first.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return self.run_mod.main(run_argv)
+
+    def test_success_exits_0(self):
+        self.assertEqual(self._exit_code_for("success"), 0)
+
+    def test_degraded_exits_3(self):
+        self.assertEqual(self._exit_code_for("degraded"), 3)
+
+    def test_failed_exits_4(self):
+        self.assertEqual(self._exit_code_for("failed"), 4)
+
+
+class TestExitCodeCouplingBothRunners(unittest.TestCase):
+    """KTD3's coupling requirement, made behavioral: cadre run (cli.py) and the
+    agent runner (run.py) must return the IDENTICAL exit code for the IDENTICAL
+    FleetStatus. Both runners route the run outcome through the one
+    status_to_exit(result.status) call — if either drifted back to its own
+    inline integer (or the two mappings diverged), this test catches the
+    mismatch directly, rather than relying on each runner's own tests
+    coincidentally agreeing."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _skill_exit_code(self, status):
+        run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=_status_fake_client(status)):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return self.run_mod.main(run_argv)
+
+    def test_both_runners_return_the_same_code_for_every_status(self):
+        for status, expected in (("success", 0), ("degraded", 3), ("failed", 4)):
+            with self.subTest(status=status):
+                cli_code, _out = run_command(
+                    EXAMPLE, "task", client=_status_fake_client(status), capture=False
+                )
+                skill_code = self._skill_exit_code(status)
+                self.assertEqual(cli_code, expected, f"cli.py run_command diverged on {status}")
+                self.assertEqual(skill_code, expected, f"run.py main() diverged on {status}")
+                self.assertEqual(cli_code, skill_code, f"runners disagree with each other on {status}")
+
+
+# ---------------------------------------------------------------------------
+# U4 (#62): preflight-refuse — both runners refuse an off-palette model BEFORE
+# any spend. These are wiring tests only: proving cli.py / run.py call
+# preflight_refusal in the right place (before ModelClient, before run-dir
+# creation, before consume_approval) and surface ExitCode.PREFLIGHT_REFUSE.
+# The exhaustive off-palette / all-on-palette / degrade-open / toolset-only /
+# sanitize semantics of preflight_refusal itself live in test_preflight.py.
+# ---------------------------------------------------------------------------
+
+# EXAMPLE (research-swarm.example.yaml) is synthesize-mode: specialists
+# social(xai/grok-4.3) / web(openrouter/google/gemini-3-flash) /
+# analysis(openrouter/anthropic/claude-sonnet-4.6) + a synthesizer
+# (openrouter/anthropic/claude-opus-4.8) — 4 model-bearing roles total.
+_ALL_EXAMPLE_MODELS = [
+    ("xai", "grok-4.3"),
+    ("openrouter", "google/gemini-3-flash"),
+    ("openrouter", "anthropic/claude-sonnet-4.6"),
+    ("openrouter", "anthropic/claude-opus-4.8"),
+]
+
+
+def _write_test_palette(path: Path, *, models, toolsets=None) -> Path:
+    """Write a minimal valid palette YAML to ``path`` and return it."""
+    if toolsets is None:
+        toolsets = ["web", "x_search"]
+    lines = ["generated_at: '2026-07-05T00:00:00.000000'", "models:"]
+    for provider, model in models:
+        lines.append(f"  - provider: {provider}")
+        lines.append(f"    model: {model}")
+    lines.append("toolsets:")
+    for t in toolsets:
+        lines.append(f"  - {t}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+class TestRunCommandPreflightRefuse(unittest.TestCase):
+    """cli.py run_command refuses an off-palette EXAMPLE fleet before any spend."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_off_palette_specialist_refuses_before_spend(self):
+        # Palette missing the 'social' specialist's (xai, grok-4.3) pair.
+        palette_path = _write_test_palette(
+            self.tmp / "palette.yaml",
+            models=[m for m in _ALL_EXAMPLE_MODELS if m != ("xai", "grok-4.3")],
+        )
+        client = FakeClient({"synthesizer": ("ok", "SHOULD NOT RUN")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(palette_path)}):
+            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(code, 5)
+        self.assertEqual(client.calls, [], "no model call should be made on a preflight refusal")
+        self.assertIn("social", out)
+        self.assertIn("grok-4.3", out)
+
+    def test_off_palette_synthesizer_refuses(self):
+        palette_path = _write_test_palette(
+            self.tmp / "palette.yaml",
+            models=[m for m in _ALL_EXAMPLE_MODELS if m != ("openrouter", "anthropic/claude-opus-4.8")],
+        )
+        client = FakeClient({"synthesizer": ("ok", "SHOULD NOT RUN")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(palette_path)}):
+            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(client.calls, [])
+        self.assertIn("synthesizer", out)
+        self.assertIn("claude-opus-4.8", out)
+
+    def test_all_on_palette_proceeds_normally(self):
+        palette_path = _write_test_palette(self.tmp / "palette.yaml", models=_ALL_EXAMPLE_MODELS)
+        client = FakeClient({"synthesizer": ("ok", "SYNTH OK")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(palette_path)}):
+            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, 0)
+        self.assertIn("SYNTH OK", out)
+        self.assertEqual(len(client.calls), 4)  # 3 specialists + synthesizer
+
+    def test_no_palette_proceeds_normally(self):
+        """Palette absent (CADRE_PALETTE points at nothing) -> degrade-open, proceeds."""
+        missing = self.tmp / "no_palette.yaml"
+        client = FakeClient({"synthesizer": ("ok", "SYNTH OK")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}):
+            code, _out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(client.calls), 4)
+
+    def test_refusal_makes_no_run_dir(self):
+        """A refusal happens before prepare_run_dir -- no folder is ever created."""
+        run_dir = self.tmp / "should-not-exist"
+        palette_path = _write_test_palette(
+            self.tmp / "palette.yaml",
+            models=[m for m in _ALL_EXAMPLE_MODELS if m != ("xai", "grok-4.3")],
+        )
+        client = FakeClient({"synthesizer": ("ok", "SHOULD NOT RUN")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(palette_path)}):
+            code, _out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertFalse(run_dir.exists(), "prepare_run_dir must never run on a preflight refusal")
+        self.assertEqual(client.calls, [])
+
+
+class TestSkillPreflightRefuse(unittest.TestCase):
+    """run.py's real-run path refuses an off-palette model BEFORE consume_approval
+    (#62, KTD4): the approval token is NOT burned by a refusal, so a subsequent
+    on-palette run presenting the SAME token still succeeds — a host-side
+    palette fix leaves the fleet YAML (and therefore the surface digest)
+    unchanged."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.token_path = str(self.tmp / "approval")
+
+    def _palette_path(self, *, include_social: bool) -> str:
+        models = [m for m in _ALL_EXAMPLE_MODELS if m != ("xai", "grok-4.3")]
+        if include_social:
+            models = list(_ALL_EXAMPLE_MODELS)
+        name = "palette_full.yaml" if include_social else "palette_missing_social.yaml"
+        return str(_write_test_palette(self.tmp / name, models=models))
+
+    def test_off_palette_refuses_without_consuming_token_then_succeeds_after_fix(self):
+        missing_palette = self._palette_path(include_social=False)
+        full_palette = self._palette_path(include_social=True)
+        run_argv = ["--fleet", EXAMPLE, "--task", "t", "--no-capture"]
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        env_base = {"CADRE_APPROVAL_PATH": self.token_path}
+
+        # Mint the approval under the (still off-palette) missing-social palette —
+        # --preview never preflight-checks; it only WARNS (unchanged behavior).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+        self.assertTrue(os.path.exists(self.token_path), "preview should have minted a token")
+
+        # Real run under the SAME missing-social palette -> refused, zero model
+        # calls, and — the load-bearing assertion — the token is NOT consumed.
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(fake.calls, [], "no model call should be made on a preflight refusal")
+        self.assertTrue(
+            os.path.exists(self.token_path),
+            "the approval token must survive a preflight refusal (no spend, no burned token)",
+        )
+        self.assertIn("social", buf.getvalue())
+        self.assertIn("grok-4.3", buf.getvalue())
+
+        # Fix the palette (the verify-palette host workflow) — the fleet YAML and
+        # therefore the surface digest are unchanged, so the SAME token still
+        # binds; the run now proceeds and consumes it (one-shot, as normal).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": full_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf2 = io.StringIO()
+                with contextlib.redirect_stdout(buf2):
+                    code2 = self.run_mod.main(run_argv)
+        self.assertEqual(code2, 0)
+        self.assertEqual(len(fake.calls), 4, "the follow-up on-palette run should actually call every role")
+        self.assertFalse(os.path.exists(self.token_path), "the token is consumed once the run proceeds")
+
+    def test_all_on_palette_proceeds_and_makes_model_calls(self):
+        full_palette = self._palette_path(include_social=True)
+        run_argv = ["--fleet", EXAMPLE, "--task", "t", "--no-capture"]
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        env = {"CADRE_APPROVAL_PATH": self.token_path, "CADRE_PALETTE": full_palette}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(fake.calls), 4)
 
 
 class _PromptCapturingClient(FakeClient):
