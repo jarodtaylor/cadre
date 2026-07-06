@@ -17,8 +17,7 @@ description: >-
 
 synthesis:
   provider: openrouter
-  # Strong synthesizer. Note: Claude bills at API rates inside Hermes — swap for a
-  # strong non-Anthropic model (e.g. a GPT/Gemini slug) to cut cost if preferred.
+  # Strong synthesizer that combines the specialist findings into one report.
   model: anthropic/claude-opus-4.8
   prompt: |
     Synthesize the specialist findings below into one grounded report on the task.

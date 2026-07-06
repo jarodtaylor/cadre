@@ -69,7 +69,7 @@ specialists:
 
   - role: product
     provider: openrouter       # aggregator -> full vendor/model slug; swap to your palette
-    # Cost-efficiency comparison lane: swap this to a cheaper/smaller model on your palette
+    # A comparison lane — set it to another model from your palette
     # (e.g. anthropic/claude-haiku-4-5) to compare rich-persona output vs. the old
     # compressed focus at a fixed cost point — the host dogfood controlled comparison.
     model: openai/gpt-5.5
