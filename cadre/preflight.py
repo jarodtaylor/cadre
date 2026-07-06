@@ -32,7 +32,7 @@ import importlib.util
 from pathlib import Path
 
 from cadre.config import FleetConfig
-from cadre.discover import _DEFAULT_CANDIDATES_PATH
+from cadre.discover import default_candidates_path
 from cadre.preview_lint import load_palette, off_palette_model_pairs, resolve_palette_path
 from cadre.text_safety import sanitize as _sanitize
 
@@ -80,7 +80,7 @@ def _candidates_file_exists() -> bool:
     self-evident once the operator looks).
     """
     try:
-        return _DEFAULT_CANDIDATES_PATH.expanduser().exists()
+        return default_candidates_path().expanduser().exists()
     except Exception:  # noqa: BLE001 — any probe failure -> the no-file remedies
         return False
 

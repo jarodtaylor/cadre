@@ -620,6 +620,46 @@ class TestVerifyCandidatesSanitizedStatusLines(unittest.TestCase):
         self.assertIn("grok-4.3", captured)
 
 
+class TestVerifyOneVerboseModeSanitizes(unittest.TestCase):
+    """CodeRabbit (#74): CADRE_VERIFY_VERBOSE=1 used to stream RAW provider
+    output — a model-output terminal surface that must route through the
+    text_safety chokepoint like every other. Verbose mode now captures and
+    prints the provider output sanitized."""
+
+    def test_verbose_provider_output_is_sanitized_not_raw(self):
+        def noisy_ok(*_a, **_k):
+            print("provider says\x1b[31m RED")
+            return "ok"
+
+        out = io.StringIO()
+        with patch.object(verify_palette, "_agent") as fake_agent, \
+             patch.dict(os.environ, {"CADRE_VERIFY_VERBOSE": "1"}):
+            fake_agent.return_value.chat.side_effect = noisy_ok
+            with contextlib.redirect_stdout(out):
+                ok, _detail = verify_palette._verify_one("xai", "grok-4.3")
+        self.assertTrue(ok)
+        captured = out.getvalue()
+        self.assertIn("provider says", captured)  # diagnostic value survives
+        self.assertNotIn("\x1b", captured)  # escape bytes do not
+
+    def test_verbose_exception_path_still_prints_sanitized_capture(self):
+        def noisy_boom(*_a, **_k):
+            print("partial\x1b[2K output")
+            raise RuntimeError("provider exploded")
+
+        out = io.StringIO()
+        with patch.object(verify_palette, "_agent") as fake_agent, \
+             patch.dict(os.environ, {"CADRE_VERIFY_VERBOSE": "1"}):
+            fake_agent.return_value.chat.side_effect = noisy_boom
+            with contextlib.redirect_stdout(out):
+                ok, detail = verify_palette._verify_one("xai", "grok-4.3")
+        self.assertFalse(ok)
+        self.assertIn("RuntimeError", detail)
+        captured = out.getvalue()
+        self.assertIn("partial", captured)
+        self.assertNotIn("\x1b", captured)
+
+
 class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
     """verify_candidates hides a candidate's raw provider output (the scary
     multi-line error AIAgent dumps for an unsupported model) and prints one calm

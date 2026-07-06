@@ -170,19 +170,30 @@ def _verify_one(provider: str, model: str) -> tuple[bool, str]:
     offer) makes AIAgent dump a multi-line error to stdout/stderr — which reads
     like a crash even though a skipped candidate is a normal outcome. Capture
     that output (and mute logging) so verify_candidates can print one calm line
-    instead. Set ``CADRE_VERIFY_VERBOSE=1`` to see the raw provider output.
+    instead. Set ``CADRE_VERIFY_VERBOSE=1`` to see the provider output
+    (sanitized — see below).
 
     Returns ``(ok, detail)``; never raises.
     """
     def _call() -> object:
         return _agent(provider, model).chat("Reply with the single word: ok")
 
-    # Verbose: stream the raw provider output (for debugging an unexpected result).
+    # Verbose: show the provider's own output (for debugging an unexpected
+    # result) — SANITIZED, not raw (CodeRabbit #74): provider output is model
+    # output, and every model-output terminal surface goes through the
+    # text_safety chokepoint. sanitize() only strips escape/control bytes,
+    # so the diagnostic value survives.
     if os.getenv("CADRE_VERIFY_VERBOSE"):
+        sink = io.StringIO()
         try:
-            text = _call()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                text = _call()
         except Exception as exc:  # noqa: BLE001
+            if sink.getvalue():
+                print(_sanitize(sink.getvalue()), end="")
             return False, f"{type(exc).__name__}: {exc}"
+        if sink.getvalue():
+            print(_sanitize(sink.getvalue()), end="")
         ok = bool(text and str(text).strip())
         return ok, (str(text)[:60] if ok else "empty response")
 

@@ -214,6 +214,16 @@ def discover_candidates(payload: dict | None = None) -> DiscoveryResult:
 # reader) imports this constant, so the writer and reader can't drift apart.
 _DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
 
+
+def default_candidates_path() -> Path:
+    """Public accessor for the candidates-file location (un-expanded).
+
+    For consumers OUTSIDE the candidates read/write pair (e.g. preflight's
+    remedy probe) — importing the private constant across that boundary
+    couples them to an internal detail (CodeRabbit #74).
+    """
+    return _DEFAULT_CANDIDATES_PATH
+
 # Absolute last-resort toolsets if the packaged palette.example.yaml is ever
 # unreadable (should not happen — it ships with the package). Kept separate
 # from _default_toolsets so a broken package resource degrades to *something*

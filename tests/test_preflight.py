@@ -358,9 +358,9 @@ class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
         read anyway; the manual path is self-evident)."""
         missing = self.tmp / "no_palette.yaml"
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        with patch("cadre.preflight._DEFAULT_CANDIDATES_PATH") as fake_path, \
+        with patch("cadre.preflight.default_candidates_path") as fake_path_fn, \
                 patch("cadre.preflight._hermes_cli_available", return_value=False):
-            fake_path.expanduser.side_effect = RuntimeError("HOME unset")
+            fake_path_fn.return_value.expanduser.side_effect = RuntimeError("HOME unset")
             refusal = preflight_refusal(cfg, palette_path=missing)
         self.assertIsNotNone(refusal)
         self.assertIn("palette-candidates.yaml", refusal)

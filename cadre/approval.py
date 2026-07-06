@@ -30,6 +30,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -129,14 +130,22 @@ def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> N
     is a deliberate non-goal here (behavior-preserving passes don't rewrite
     shipped trust-surface code).
 
-    ``exclusive=True`` swaps ``O_TRUNC`` for ``O_EXCL``: the ``open()`` itself
-    becomes the atomic existence check, raising ``FileExistsError`` rather
-    than truncating a file (or following a symlink) already there.
+    ``exclusive=True`` uses ``O_EXCL``: the ``open()`` itself becomes the
+    atomic existence check, raising ``FileExistsError`` rather than touching
+    a file (or following a symlink) already there. ``exclusive=False``
+    (overwrite) writes to a same-directory temp file and ``os.replace``s it
+    into place, so a mid-write failure (disk full, I/O error) leaves any
+    prior file byte-identical — never truncated, never partial (CodeRabbit:
+    a plain ``O_TRUNC`` open destroys the prior content the instant it
+    succeeds, breaking ``write_palette_fleet``'s no-truncation promise on
+    any post-open failure). A symlink at ``path`` is refused up front in
+    this mode (``os.replace`` would swap the symlink itself rather than
+    refuse, so the pre-check preserves the O_NOFOLLOW refusal contract).
 
     Raises:
-        OSError: the parent is unsafe, or ``path`` is a symlink
-            (``O_NOFOLLOW``'s ELOOP); ``FileExistsError`` (a subclass) when
-            ``exclusive`` and ``path`` already exists.
+        OSError: the parent is unsafe, or ``path`` is a symlink;
+            ``FileExistsError`` (a subclass) when ``exclusive`` and ``path``
+            already exists.
     """
     old_umask = os.umask(0o077)
     try:
@@ -149,15 +158,14 @@ def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> N
                 f"{path.parent} is unsafe — it must be owned by you and not "
                 "group/other-writable. Fix it, then re-run."
             )
-        create_or_truncate = os.O_EXCL if exclusive else os.O_TRUNC
-        flags = os.O_WRONLY | os.O_CREAT | create_or_truncate | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(path), flags, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-            path.chmod(0o600)
-        except OSError:
-            if exclusive:
+        if exclusive:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(path), flags, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                path.chmod(0o600)
+            except OSError:
                 # O_EXCL succeeded, so WE created this file — a failed write
                 # (disk full, I/O error) must not leave a partial file behind:
                 # create-only callers would read it as "exists — preserved"
@@ -165,7 +173,20 @@ def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> N
                 # Best-effort; the original error is what the caller needs.
                 with contextlib.suppress(OSError):
                     path.unlink()
-            raise
+                raise
+        else:
+            if path.is_symlink():
+                raise OSError(f"{path} is a symlink — refusing to write through it.")
+            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.chmod(tmp_name, 0o600)
+                os.replace(tmp_name, str(path))
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+                raise
     finally:
         os.umask(old_umask)
 
