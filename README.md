@@ -6,16 +6,16 @@ Provider-neutral, ephemeral, **multi-model agent fleets**. Fan a task out across
 
 ## Quickstart
 
-On a Hermes host, install `cadre` into the Hermes venv and run a fleet — no repo clone required. (`$PYBIN` is the Python that runs Hermes; the [full walkthrough](#install-and-run-it-on-your-hermes-host) below covers finding it and editing your palette + fleet.)
+On a Hermes host, install `cadre` into the Hermes venv and run a fleet — no repo clone required. (`$PYBIN` is the Python that runs Hermes; the [full walkthrough](#install-and-run-it-on-your-hermes-host) below covers finding it, and the manual fallback if your host can't auto-discover.)
 
 ```bash
 "$PYBIN" -m pip install --force-reinstall --no-deps "git+https://github.com/jarodtaylor/cadre@v0.1.0"
-"$PYBIN" -m cadre.cli setup           # provision ~/.cadre from the package
-"$PYBIN" -m cadre.cli verify-palette  # after editing ~/.cadre/palette-candidates.yaml to your models
-"$PYBIN" -m cadre.cli run ~/.cadre/fleets/research-swarm.yaml --task "<your question>"   # after setting the fleet's models
+"$PYBIN" -m cadre.cli setup           # provisions ~/.cadre, auto-discovering your authenticated providers
+"$PYBIN" -m cadre.cli verify-palette  # confirms them live — capped by default; --all verifies every candidate
+"$PYBIN" -m cadre.cli run ~/.cadre/fleets/palette-fleet.yaml --task "<your question>"   # generated above, zero editing
 ```
 
-Prefer to understand it first? Read on — [how it works](#how-it-works), then the [full host walkthrough](#install-and-run-it-on-your-hermes-host).
+That last fleet only generates once 2+ providers verify — with just one, edit a starter fleet instead (step 5 in the [full walkthrough](#install-and-run-it-on-your-hermes-host)). Prefer to understand it first? Read on — [how it works](#how-it-works), then the [full host walkthrough](#install-and-run-it-on-your-hermes-host).
 
 ## Why
 
@@ -116,17 +116,23 @@ If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK
 "$PYBIN" -m cadre.cli setup
 ```
 
-Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review **personas** (reusable, richer specialist definitions that fleets like `doc-review` use in place of an inline `focus` — see [CONCEPTS.md](CONCEPTS.md)), and a `palette-candidates.yaml` from the installed package (no repo reads), recording your Hermes Python to `~/.cadre/config`.
+Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review **personas** (reusable, richer specialist definitions that fleets like `doc-review` use in place of an inline `focus` — see [CONCEPTS.md](CONCEPTS.md)), and `palette-candidates.yaml`, recording your Hermes Python to `~/.cadre/config`. Candidate seeding **auto-discovers your authenticated providers** straight from Hermes's own inventory when its CLI package is importable in this venv (the common case here, since `cadre` runs inside it) — no editing needed. If that surface isn't importable, it falls back to a placeholder file and says why on stderr; edit that file by hand instead. Re-run `cadre discover` any time afterward to refresh the candidates from Hermes's current inventory (it overwrites the file, so hand edits don't survive a re-run).
 
-**4. Verify your palette.** Edit `~/.cadre/palette-candidates.yaml` down to the `(provider, model)` pairs you've actually authenticated, then verify them live:
+**4. Verify your palette.** By default this verifies a capped subset (2 candidates per provider, in file order) rather than everything discovered — it prints the split before the first paid call:
 
 ```bash
-"$PYBIN" -m cadre.cli verify-palette
+"$PYBIN" -m cadre.cli verify-palette   # add --all to verify every discovered candidate instead
 ```
 
-This makes a real call per candidate and writes the ones that resolve to `~/.cadre/palette.yaml` — your verified menu. (The seeded candidates are examples; a pair that isn't authenticated on your host is skipped, which is normal.)
+This makes a real call per candidate verified and writes the ones that resolve to `~/.cadre/palette.yaml` — your verified menu. (A pair that isn't authenticated on your host is skipped, which is normal.) Want to trim or reorder candidates before spending anything? Hand-edit `~/.cadre/palette-candidates.yaml` first — that edit survives until the next `cadre discover`. On success with 2+ providers verified, this step also (re)generates `~/.cadre/fleets/palette-fleet.yaml` — a tool-less smoke-test fleet, one lane per verified provider, runnable with zero further editing (step 5). Skip this step entirely and `cadre run` refuses before any spend, naming this exact fix — Cadre never runs a fleet with no palette to check it against.
 
-**5. Edit a fleet, validate it, then run.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml`, then `validate` before you run. Validate **fails** on malformed YAML (a stray tab, a missing field) and **flags** any model that isn't in your palette — so problems surface *before* you run, not mid-run after a call's been spent:
+**5. Run it.** If step 4 generated `~/.cadre/fleets/palette-fleet.yaml` (2+ providers verified), run it as-is — nothing to edit:
+
+```bash
+"$PYBIN" -m cadre.cli run ~/.cadre/fleets/palette-fleet.yaml --task "<anything>"
+```
+
+For a real fleet (or with only one provider verified), the starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml`, then `validate` before you run. Validate **fails** on malformed YAML (a stray tab, a missing field) and **flags** any model that isn't in your palette — so problems surface *before* you run, not mid-run after a call's been spent:
 
 ```bash
 # edit ~/.cadre/fleets/research-swarm.yaml → set each lane's provider/model to a verified pair
@@ -146,7 +152,7 @@ Beyond the direct CLI, a Hermes agent can run Cadre conversationally through the
 HERMES_SKILLS_DIR=/path/to/hermes/skills "$PYBIN" -m cadre.cli install-skill
 ```
 
-The agent composes fleets from the host-verified `~/.cadre/palette.yaml` (the preview flags off-palette picks as warnings; an off-palette *model* now refuses the run before any spend — the #62 preflight gate — while off-palette toolset/focus picks stay advisory), and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. A fleet that opts into privileged tools (`allow_privileged_tools: true`) is approved with `--approve-privileged` in place of the plain preview — the preview okay alone won't authorize privileged execution. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+The agent composes fleets from the host-verified `~/.cadre/palette.yaml` (the preview flags off-palette picks as warnings; an off-palette *model* — or a missing palette entirely — now refuses the run before any spend — the #61/#62 preflight gate — while off-palette toolset/focus picks stay advisory), and the **preview is the operative control**: it renders mechanically from the parsed fleet (synthesizer, `allow_privileged_tools`, the synthesis prompt, every lane) and exits *without a model call* — so a human approves *what actually runs*, not the agent's paraphrase. A fleet that opts into privileged tools (`allow_privileged_tools: true`) is approved with `--approve-privileged` in place of the plain preview — the preview okay alone won't authorize privileged execution. Safe toolsets still read untrusted web content and the synthesis is consumed by a terminal-capable agent, so prompt-injection/SSRF is a named, deferred risk — see [`cadre/data/skill/SKILL.md`](cadre/data/skill/SKILL.md), [SECURITY.md](SECURITY.md), and [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Develop / contribute
 

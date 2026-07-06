@@ -63,17 +63,40 @@ not a claim that Cadre is "injection-proof."
   `~/.cadre`, or a `CADRE_APPROVAL_PATH` override) is not owner-owned or is
   group/other-writable — the same ownership/permission check the persona pool uses.
   **The binding is necessary, not sufficient, for a run to execute.** A separate,
-  earlier gate — the #62 preflight check (read-only config inspection over the
+  earlier gate — the #61/#62 preflight check (read-only config inspection over the
   parsed fleet; no new privileged path) — can still refuse a validly-bound,
   exactly-matching surface if a specialist/synthesizer/judge model is absent
-  from the host palette (fail-closed, exit `5`, before any model call). That
-  refusal runs *before* the approval token is read, so it does not consume the
-  one-shot token; a host-side palette fix (e.g. `cadre verify-palette`) leaves
-  the fleet YAML — and so the digest — unchanged, and the same approval still
-  works on a subsequent run. "What runs is what was previewed" still holds; it
-  no longer follows that a matching preview guarantees a run executes at all.
+  from the host palette, **or if the host has no palette at all** (fail-closed,
+  exit `5`, before any model call — previously an absent palette degraded open,
+  i.e. proceeded ungated; it now refuses the same way as an off-palette model,
+  naming whichever remedy works on that host: `cadre discover` when Hermes's CLI
+  is importable, else the manual candidates-file hand-edit). That refusal runs
+  *before* the approval token is read, so it does not consume the one-shot token;
+  a host-side palette fix (e.g. `cadre verify-palette`, or `cadre discover` when
+  there was no palette at all) leaves the fleet YAML — and so the digest —
+  unchanged, and the same approval still works on a subsequent run. "What runs is
+  what was previewed" still holds; it no longer follows that a matching preview
+  guarantees a run executes at all. (A **regenerated** file is a different case
+  from an unchanged one: re-running `cadre discover`/`cadre verify-palette`
+  rewrites `~/.cadre/fleets/palette-fleet.yaml` in place, which changes its
+  bytes — so a previously minted approval token for *that* fleet stops matching
+  and the next run against it is refused until re-previewed. This is the same
+  fail-closed binding behaving correctly, not a gap: a regenerated file is, by
+  design, a different surface than the one that was approved.)
 - **Install seeding.** Starter fleets/personas are written owner-only (`0o600`) with
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
+- **Palette discovery reads, never executes.** `cadre discover` (and `cadre setup`'s
+  auto-seeding step) reads Hermes's own internal provider inventory in-process — no
+  subprocess, no network call of its own, and no model call anywhere in the discovery
+  path. Any drift in that internal surface, or a payload shaped unexpectedly, is a
+  legible refusal naming the manual candidates-file fallback; discovery never writes a
+  silently empty, partial, or narrowed candidates file. Every file discovery writes
+  (the candidates file) and every file the verify step generates from it (the palette
+  fleet) use the same owner-only, symlink-refusing, parent-checked write posture as the
+  existing palette/approval writers — no new, weaker write path. Discovered
+  provider/model strings are untrusted display input like any other fleet-controlled
+  field: sanitized at every terminal sink they're printed to, but written verbatim as
+  data in the YAML files themselves, so they round-trip exactly.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything
   privileged or unrecognized requires an explicit `allow_privileged_tools: true`.
 
