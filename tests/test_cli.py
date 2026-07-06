@@ -1895,7 +1895,7 @@ class TestExitCodeCouplingBothRunners(unittest.TestCase):
 # any spend. These are wiring tests only: proving cli.py / run.py call
 # preflight_refusal in the right place (before ModelClient, before run-dir
 # creation, before consume_approval) and surface ExitCode.PREFLIGHT_REFUSE.
-# The exhaustive off-palette / all-on-palette / degrade-open / toolset-only /
+# The exhaustive off-palette / all-on-palette / absent-palette / toolset-only /
 # sanitize semantics of preflight_refusal itself live in test_preflight.py.
 # ---------------------------------------------------------------------------
 
@@ -1970,14 +1970,18 @@ class TestRunCommandPreflightRefuse(unittest.TestCase):
         self.assertIn("SYNTH OK", out)
         self.assertEqual(len(client.calls), 4)  # 3 specialists + synthesizer
 
-    def test_no_palette_proceeds_normally(self):
-        """Palette absent (CADRE_PALETTE points at nothing) -> degrade-open, proceeds."""
+    def test_no_palette_refuses(self):
+        """Palette absent (CADRE_PALETTE points at nothing) -> refuses (#61/#62
+        flip, KTD7) before any spend, same posture as an off-palette model."""
         missing = self.tmp / "no_palette.yaml"
-        client = FakeClient({"synthesizer": ("ok", "SYNTH OK")})
-        with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}):
-            code, _out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 0)
-        self.assertEqual(len(client.calls), 4)
+        client = FakeClient({"synthesizer": ("ok", "SHOULD NOT RUN")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(code, 5)
+        self.assertEqual(client.calls, [], "no model call should be made on a preflight refusal")
+        self.assertIn("no palette", out.lower())
 
     def test_refusal_makes_no_run_dir(self):
         """A refusal happens before prepare_run_dir -- no folder is ever created."""
@@ -2070,6 +2074,55 @@ class TestSkillPreflightRefuse(unittest.TestCase):
                     code = self.run_mod.main(run_argv)
         self.assertEqual(code, 0)
         self.assertEqual(len(fake.calls), 4)
+
+    def test_absent_palette_refuses_without_consuming_token_then_succeeds_after_palette_created(self):
+        """Same ordering guarantee as the off-palette case above, but for a
+        genuinely-ABSENT palette (#61/#62 flip, KTD7): the refusal fires before
+        consume_approval, so the token survives it, and creating a palette
+        host-side (unlike fixing an off-palette pair, this leaves the fleet
+        YAML -- and therefore the surface digest -- equally unchanged) lets
+        the SAME approval proceed on a re-run."""
+        missing_palette = str(self.tmp / "no_palette.yaml")  # never written -> absent
+        full_palette = self._palette_path(include_social=True)
+        run_argv = ["--fleet", EXAMPLE, "--task", "t", "--no-capture"]
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        env_base = {"CADRE_APPROVAL_PATH": self.token_path}
+
+        # Mint the approval under the (still absent) palette -- --preview never
+        # preflight-checks; it only warns (unchanged behavior).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+        self.assertTrue(os.path.exists(self.token_path), "preview should have minted a token")
+
+        # Real run under the SAME absent palette -> refused, zero model calls,
+        # and — the load-bearing assertion — the token is NOT consumed.
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(fake.calls, [], "no model call should be made on a preflight refusal")
+        self.assertTrue(
+            os.path.exists(self.token_path),
+            "the approval token must survive a preflight refusal (no spend, no burned token)",
+        )
+        self.assertIn("no palette", buf.getvalue().lower())
+
+        # Create the palette (the verify-palette host workflow) — the fleet YAML
+        # and therefore the surface digest are unchanged, so the SAME token still
+        # binds; the run now proceeds and consumes it (one-shot, as normal).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": full_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf2 = io.StringIO()
+                with contextlib.redirect_stdout(buf2):
+                    code2 = self.run_mod.main(run_argv)
+        self.assertEqual(code2, 0)
+        self.assertEqual(len(fake.calls), 4, "the follow-up on-palette run should actually call every role")
+        self.assertFalse(os.path.exists(self.token_path), "the token is consumed once the run proceeds")
 
 
 class _PromptCapturingClient(FakeClient):

@@ -150,9 +150,10 @@ previewed surface — same fleet, same task/docs, same personas, same profile �
 so a swapped or drifted surface is refused. **It does not, by itself, guarantee
 the run executes:** a validly-approved, exactly-matching surface can still be
 refused by the separate #62 preflight gate if a specialist/synthesizer/judge
-model is off the host palette (exit `5`, before any spend — see step 3). That
-refusal does not consume the approval token, so fixing the palette host-side
-lets the same approval proceed on a re-run. The approval also does **not**
+model is off the host palette, **or if the host has no palette at all** (exit
+`5`, before any spend — see step 3). That refusal does not consume the
+approval token, so fixing (or creating) the palette host-side lets the same
+approval proceed on a re-run. The approval also does **not**
 replace the human's substantive review of *what* the fleet does (a
 rubber-stamped bad fleet still runs faithfully), and it does **not** prove a
 human was present for the okay — that stays the procedural step you perform by
@@ -201,14 +202,18 @@ three things load-bearing:
 
 **A separate, earlier gate can refuse before the approval check above even runs
 (GH #62).** If any specialist, synthesizer, or judge model in the fleet is
-absent from the host palette (`~/.cadre/palette.yaml`), the run refuses with
-exit `5` (`PREFLIGHT_REFUSE`) — before any model call, and before the approval
-token is even read, so this refusal does **not** consume the token you just
-minted. A host-side palette fix (e.g. adding the model via `cadre
-verify-palette`) leaves the fleet YAML — and so the surface digest — unchanged,
-so the same approval still works on a re-run. This gate never fires when there
-is no palette to check against (degrades open, matching the preview), and never
-fires for an off-palette *toolset* (that stays the advisory warning from step 2).
+absent from the host palette (`~/.cadre/palette.yaml`), **or the palette is
+missing entirely** (GH #61/#62), the run refuses with exit `5`
+(`PREFLIGHT_REFUSE`) — before any model call, and before the approval token is
+even read, so this refusal does **not** consume the token you just minted. A
+host-side palette fix (e.g. adding the model via `cadre verify-palette`) leaves
+the fleet YAML — and so the surface digest — unchanged, so the same approval
+still works on a re-run. **A missing palette refuses too** (it does not degrade
+open): the message names whichever fix works on this host — run `cadre
+discover` then `cadre verify-palette` when Hermes's CLI is available on this
+host, or hand-edit `~/.cadre/palette-candidates.yaml` then `cadre
+verify-palette` otherwise. This gate never fires for an off-palette *toolset*
+(that stays the advisory warning from step 2).
 
 Use `--doc PATH` (repeatable) to read a file's contents into the task — the
 "name the plan, no pasting" path, with the doc-review fleet as the primary
@@ -245,8 +250,9 @@ back:
 - **`1` (`ERROR`):** invalid fleet config, an unreadable/non-UTF-8 `--doc`
   file, a missing/mismatched/expired approval, or a run-directory I/O failure.
 - **`2` (`USAGE`):** neither `--task` nor `--doc` was given.
-- **`5` (`PREFLIGHT_REFUSE`):** the #62 preflight gate refused an off-palette
-  model before any spend (see step 3) — no manifest was written.
+- **`5` (`PREFLIGHT_REFUSE`):** the #62 preflight gate refused — an
+  off-palette model, or no palette at all (GH #61/#62) — before any spend
+  (see step 3); no manifest was written.
 
 **Synthesize fleets:** relay the synthesized report. **Collect fleets:** there is
 no synthesis — the result is a `collect result` header followed by one attributed

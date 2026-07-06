@@ -8,11 +8,15 @@ they exercise the full runner, not just this module.
 
 Coverage:
 - preflight_refusal: off-palette specialist / synthesizer / judge → refusal;
-  all on-palette → None; palette absent → None (degrade-open); present-but-
-  malformed → refusal (fail closed);
+  all on-palette → None; palette absent → refusal naming a host-aware remedy
+  (#61/#62 flip, KTD7: `cadre discover` when Hermes's CLI is importable, else
+  the manual palette-candidates hand-edit); present-but-malformed → refusal
+  (fail closed, unchanged by the flip);
   off-palette toolset only → None (tight-scope guard, models only);
   control/bidi bytes in role/model → refusal renders inertly (sanitized);
-  CADRE_PALETTE env resolution when no palette_path is given.
+  CADRE_PALETTE env resolution when no palette_path is given;
+  _hermes_cli_available: the presence probe selecting the absent-palette
+  remedy text, including its exception fallback.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from unittest.mock import patch
 
 from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from cadre.personas import resolve
-from cadre.preflight import preflight_refusal
+from cadre.preflight import _hermes_cli_available, preflight_refusal
 from cadre.preview_lint import Palette
 
 
@@ -239,14 +243,20 @@ class TestPreflightRefusalAllOnPalette(_PreflightTestBase):
 
 
 class TestPreflightRefusalMissingVsMalformedPalette(_PreflightTestBase):
-    """A genuinely-ABSENT palette degrades open (proceed); a PRESENT-but-malformed
-    one fails CLOSED with a refusal — a broken palette must not silently disable
-    the #62 spend-gate (Codex adversarial review)."""
+    """A genuinely-ABSENT palette now REFUSES with a host-aware remedy (#61/#62
+    flip, KTD7) — before this unit it degraded open (proceeded). A
+    PRESENT-but-malformed palette is UNCHANGED by this flip: it already failed
+    CLOSED with a refusal — a broken palette must not silently disable the #62
+    spend-gate (Codex adversarial review)."""
 
-    def test_absent_palette_proceeds(self):
+    def test_absent_palette_refuses(self):
         missing = self.tmp / "no_palette.yaml"  # never written -> genuinely absent
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        self.assertIsNone(preflight_refusal(cfg, palette_path=missing))
+        with patch("cadre.preflight._hermes_cli_available", return_value=False):
+            refusal = preflight_refusal(cfg, palette_path=missing)
+        self.assertIsNotNone(refusal)
+        self.assertIn("no spend has occurred", refusal)
+        self.assertIn("cadre verify-palette", refusal)
 
     def test_present_but_malformed_palette_refuses(self):
         """A palette file that EXISTS but is unparseable YAML fails closed."""
@@ -281,17 +291,90 @@ class TestPreflightRefusalMissingVsMalformedPalette(_PreflightTestBase):
             refusal = preflight_refusal(cfg)
         self.assertIsNotNone(refusal)
 
-    def test_no_env_no_param_default_path_absent_proceeds(self):
+    def test_no_env_no_param_default_path_absent_refuses(self):
         """No CADRE_PALETTE, no param → default path; deterministic via a patched
         DEFAULT_PALETTE_PATH pointed at a guaranteed-missing file (mirrors
-        test_preview_lint.py's equivalent load_palette test)."""
+        test_preview_lint.py's equivalent load_palette test). Refuses post-flip,
+        same as an explicitly-injected absent palette_path."""
         env_without = {k: v for k, v in os.environ.items() if k != "CADRE_PALETTE"}
         missing = str(self.tmp / "definitely-missing-palette.yaml")
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
         with patch.dict(os.environ, env_without, clear=True), \
-                patch("cadre.preview_lint.DEFAULT_PALETTE_PATH", missing):
+                patch("cadre.preview_lint.DEFAULT_PALETTE_PATH", missing), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
             refusal = preflight_refusal(cfg)
-        self.assertIsNone(refusal)
+        self.assertIsNotNone(refusal)
+
+
+class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
+    """The absent-palette refusal names a remedy that works on THIS host
+    (KTD7): `cadre discover` when Hermes's CLI is importable, else the manual
+    ~/.cadre/palette-candidates.yaml hand-edit — selected via a best-effort,
+    never-imports presence probe (_hermes_cli_available). Patched both ways
+    here so these assertions never depend on whether the machine actually
+    running the suite (a dev laptop, or a provisioned host) has hermes_cli
+    installed (KTD8 hermeticity)."""
+
+    def test_names_discover_when_hermes_cli_available(self):
+        missing = self.tmp / "no_palette.yaml"
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        with patch("cadre.preflight._hermes_cli_available", return_value=True):
+            refusal = preflight_refusal(cfg, palette_path=missing)
+        self.assertIsNotNone(refusal)
+        self.assertIn("cadre discover", refusal)
+        self.assertNotIn("palette-candidates.yaml", refusal)
+
+    def test_names_manual_edit_when_hermes_cli_unavailable(self):
+        missing = self.tmp / "no_palette.yaml"
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        with patch("cadre.preflight._hermes_cli_available", return_value=False):
+            refusal = preflight_refusal(cfg, palette_path=missing)
+        self.assertIsNotNone(refusal)
+        self.assertIn("palette-candidates.yaml", refusal)
+        self.assertNotIn("cadre discover", refusal)
+
+    def test_probe_exception_falls_back_to_manual_remedy(self):
+        """A raising probe (a corrupted meta-path finder, a stale
+        ``sys.modules["hermes_cli"] = None`` from a prior failed import,
+        etc.) must not crash the gate -- it degrades to the conservative
+        remedy that always works, since `cadre discover` itself re-validates
+        for real and fails closed naming the manual fallback if this guess
+        turns out to have been wrong."""
+        missing = self.tmp / "no_palette.yaml"
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        with patch("cadre.preflight.importlib.util.find_spec", side_effect=RuntimeError("boom")):
+            refusal = preflight_refusal(cfg, palette_path=missing)
+        self.assertIsNotNone(refusal)
+        self.assertIn("palette-candidates.yaml", refusal)
+
+    def test_absent_palette_path_sanitized_in_refusal(self):
+        """The resolved path is a caller-controlled trust surface (CADRE_PALETTE
+        is an env var, same rule as every other dynamic field this gate
+        renders) -- an escape byte in it must not forge terminal output."""
+        hostile = str(self.tmp / "no\x1b[2Kpalette.yaml")
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        with patch.dict(os.environ, {"CADRE_PALETTE": hostile}), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            refusal = preflight_refusal(cfg)
+        self.assertIsNotNone(refusal)
+        self.assertNotIn("\x1b", refusal)
+
+
+class TestHermesCliAvailableProbe(unittest.TestCase):
+    """Unit tests for the presence probe itself -- find_spec only, never an
+    import/execution of hermes_cli."""
+
+    def test_true_when_find_spec_finds_a_spec(self):
+        with patch("cadre.preflight.importlib.util.find_spec", return_value=object()):
+            self.assertTrue(_hermes_cli_available())
+
+    def test_false_when_find_spec_returns_none(self):
+        with patch("cadre.preflight.importlib.util.find_spec", return_value=None):
+            self.assertFalse(_hermes_cli_available())
+
+    def test_false_when_find_spec_raises(self):
+        with patch("cadre.preflight.importlib.util.find_spec", side_effect=RuntimeError("boom")):
+            self.assertFalse(_hermes_cli_available())
 
 
 class TestPreflightRefusalToolsetOnlyTightScope(_PreflightTestBase):
