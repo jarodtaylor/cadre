@@ -35,7 +35,14 @@ pip-installed into — the load-bearing KTD2 install target):
 1. `cadre setup` seeds ~/.cadre/palette-candidates.yaml from the installed
    package (or edit PROVIDERS in this file) with your real strings.
 2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
-   ~/.cadre/palette.yaml.
+   ~/.cadre/palette.yaml. By default this verifies a capped subset (2 per
+   provider, file order) rather than every discovered candidate; pass
+   `--all` to verify everything. Previously-verified pairs still in the
+   candidates file are always re-verified (cap-exempt) — a re-verify never
+   silently shrinks an existing palette. On success (2+ providers verified), it also
+   (re)generates ~/.cadre/fleets/palette-fleet.yaml — a tool-less smoke-test
+   fleet with one lane per verified provider, ready to `cadre run` with zero
+   editing (see cadre/palette_fleet.py).
 3. The cadre-fleet skill reads palette.yaml; compose only from its contents.
 
 ---
@@ -53,6 +60,7 @@ import contextlib
 import io
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -61,12 +69,19 @@ import yaml
 
 from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
-
-# Default candidates file path (operator edits once after install seeds it).
-_DEFAULT_CANDIDATES_PATH = Path("~/.cadre/palette-candidates.yaml")
+from cadre.discover import _DEFAULT_CANDIDATES_PATH
+from cadre.palette_fleet import write_palette_fleet
+from cadre.text_safety import sanitize as _sanitize
 
 # Default palette output path.
 _DEFAULT_PALETTE_PATH = Path("~/.cadre/palette.yaml")
+
+# Default per-provider verify cap (R5): zero-touch discovery (#61) can surface
+# ~70 candidates across a handful of providers; verifying every one before the
+# palette is even usable is 70 paid calls. A named constant (not a bare literal
+# in the function default) so the cap size can't drift out of sync between the
+# actual cap and the banner message that reports it.
+_DEFAULT_PER_PROVIDER_CAP = 2
 
 # ---------------------------------------------------------------------------
 # Candidate pairs to verify on the host.
@@ -134,10 +149,16 @@ def verify_candidates(candidates: list[tuple[str, str]]) -> list[VerifyRecord]:
     records: list[VerifyRecord] = []
     for provider, model in candidates:
         ok, detail = _verify_one(provider, model)
+        # Candidate strings are discovery-sourced (#61) and detail derives from
+        # provider output — both untrusted display input (KTD9): sanitize each
+        # field, never the assembled line.
         if ok:
-            print(f"  ✓ {provider} / {model}")
+            print(f"  ✓ {_sanitize(provider)} / {_sanitize(model)}")
         else:
-            print(f"  ✗ {provider} / {model}  — skipped ({_short_reason(detail)})")
+            print(
+                f"  ✗ {_sanitize(provider)} / {_sanitize(model)}  "
+                f"— skipped ({_sanitize(_short_reason(detail))})"
+            )
         records.append(VerifyRecord(provider=provider, model=model, ok=ok, detail=detail))
     return records
 
@@ -149,19 +170,30 @@ def _verify_one(provider: str, model: str) -> tuple[bool, str]:
     offer) makes AIAgent dump a multi-line error to stdout/stderr — which reads
     like a crash even though a skipped candidate is a normal outcome. Capture
     that output (and mute logging) so verify_candidates can print one calm line
-    instead. Set ``CADRE_VERIFY_VERBOSE=1`` to see the raw provider output.
+    instead. Set ``CADRE_VERIFY_VERBOSE=1`` to see the provider output
+    (sanitized — see below).
 
     Returns ``(ok, detail)``; never raises.
     """
     def _call() -> object:
         return _agent(provider, model).chat("Reply with the single word: ok")
 
-    # Verbose: stream the raw provider output (for debugging an unexpected result).
+    # Verbose: show the provider's own output (for debugging an unexpected
+    # result) — SANITIZED, not raw (CodeRabbit #74): provider output is model
+    # output, and every model-output terminal surface goes through the
+    # text_safety chokepoint. sanitize() only strips escape/control bytes,
+    # so the diagnostic value survives.
     if os.getenv("CADRE_VERIFY_VERBOSE"):
+        sink = io.StringIO()
         try:
-            text = _call()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                text = _call()
         except Exception as exc:  # noqa: BLE001
+            if sink.getvalue():
+                print(_sanitize(sink.getvalue()), end="")
             return False, f"{type(exc).__name__}: {exc}"
+        if sink.getvalue():
+            print(_sanitize(sink.getvalue()), end="")
         ok = bool(text and str(text).strip())
         return ok, (str(text)[:60] if ok else "empty response")
 
@@ -346,7 +378,130 @@ def _load_candidates(candidates_path: Path) -> tuple[list[tuple[str, str]], list
     return PROVIDERS, []
 
 
-def main() -> int:
+def _cap_candidates(
+    candidates: list[tuple[str, str]],
+    per_provider: int = _DEFAULT_PER_PROVIDER_CAP,
+    always_keep: frozenset[tuple[str, str]] = frozenset(),
+) -> list[tuple[str, str]]:
+    """Order-preserving cap: keep the first ``per_provider`` candidates for each
+    provider, in file order. Pure — no I/O, no printing, no live calls; sits
+    between ``_load_candidates`` and ``verify_candidates`` (R5, KTD4). A
+    provider with fewer than ``per_provider`` candidates is unaffected.
+
+    ``always_keep`` pairs are kept regardless of the cap (they do not count
+    toward it): the caller passes the EXISTING palette's pairs so a capped
+    re-verify RE-VERIFIES previously-verified pairs instead of silently
+    pruning them from the rewritten palette (the cross-model No-ship catch —
+    a routine re-verify must never strand a fleet whose pair is still valid).
+    The cap bounds only the discovery flood; a pair leaves the palette solely
+    by failing verification or by leaving the candidates file — both honest.
+
+    Args:
+        candidates: (provider, model) pairs, in file order.
+        per_provider: Max candidates to keep per provider.
+        always_keep: Pairs kept even beyond the cap (not counted toward it).
+
+    Returns:
+        The capped list, preserving the input order.
+    """
+    seen: dict[str, int] = {}
+    capped: list[tuple[str, str]] = []
+    for pair in candidates:
+        if pair in always_keep:
+            capped.append(pair)
+            continue
+        provider = pair[0]
+        count = seen.get(provider, 0)
+        if count < per_provider:
+            capped.append(pair)
+            seen[provider] = count + 1
+    return capped
+
+
+def _verifying_banner(to_verify: list[tuple[str, str]], total: int) -> str:
+    """Build the pre-spend disclosure banner printed before the first paid call.
+
+    States the X-of-Y split honestly (KTD4): when nothing was trimmed
+    (``len(to_verify) == total`` — either ``--all`` was passed, or every
+    provider was already at or under the cap), it says "all N" and never
+    mentions the cap or ``--all`` — implying a trim happened when it didn't
+    would be misleading. When capped, it also names exactly which pairs will
+    be verified, so the operator sees the spend commitment up front rather
+    than discovering it call-by-call.
+
+    Discovered candidate strings are untrusted display input (KTD9) — each
+    provider/model piece is routed through the sanitize chokepoint before
+    joining, the same per-field pattern ``cli.py``'s ``validate_command`` uses
+    (sanitize each piece, not the assembled line — a hostile value can't then
+    forge the ``, `` separator into a fake extra pair).
+    """
+    footer = (
+        "Unsupported or unauthenticated ones are skipped (a skip is normal, not\n"
+        "an error). Provider output is hidden; set CADRE_VERIFY_VERBOSE=1 to show it."
+    )
+    if len(to_verify) == total:
+        return f"Verifying all {total} discovered candidate(s) against this host —\n{footer}\n"
+
+    shown = ", ".join(f"{_sanitize(p)} / {_sanitize(m)}" for p, m in to_verify)
+    return (
+        f"Verifying {len(to_verify)} of {total} discovered candidate(s) against this host\n"
+        f"({_DEFAULT_PER_PROVIDER_CAP} per provider by default; pass --all to verify all "
+        f"{total}):\n"
+        f"  {shown}\n\n"
+        f"{footer}\n"
+    )
+
+
+def _existing_palette_pairs(palette_path: Path) -> set[tuple[str, str]]:
+    """The (provider, model) pairs on the EXISTING palette, or empty.
+
+    ``write_palette`` rewrites ``palette.yaml`` from a pass's records only —
+    it never merges the prior palette (verified-truth-per-cycle). ``main``
+    therefore feeds these pairs back in two ways: as ``_cap_candidates``'s
+    ``always_keep`` set (a capped re-verify RE-VERIFIES them rather than
+    silently pruning them — the cross-model No-ship catch), and to warn about
+    the remainder (pairs no longer in the candidates file at all, which WILL
+    drop). Tolerant read — an absent/unreadable/malformed existing palette
+    returns empty (the malformed case is preflight's business, not this
+    disclosure's).
+    """
+    try:
+        data = yaml.safe_load(palette_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return set()
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        return set()
+    existing: set[tuple[str, str]] = set()
+    for entry in data["models"]:
+        if isinstance(entry, dict):
+            provider, model = entry.get("provider"), entry.get("model")
+            if isinstance(provider, str) and isinstance(model, str):
+                existing.add((provider, model))
+    return existing
+
+
+def main(all_candidates: bool = False) -> int:
+    """Verify candidates against this host and write the palette (R5, R6).
+
+    By default, verifies a capped subset (``_DEFAULT_PER_PROVIDER_CAP`` per
+    provider, in file order — ``_cap_candidates``) rather than every
+    discovered candidate: zero-touch discovery (#61) can surface ~70 pairs
+    across a handful of providers, and paying for 70 calls before the palette
+    is even usable is needless spend. Pass ``all_candidates=True`` (the CLI's
+    ``--all`` flag) to verify every discovered candidate instead. Either way,
+    the X-of-Y split (``_verifying_banner``) prints BEFORE the first paid call
+    (``verify_candidates``, below) — the spend commitment is disclosed up
+    front, never discovered call-by-call or after the fact.
+
+    Args:
+        all_candidates: Verify every discovered candidate, bypassing the
+            per-provider cap. Defaults to False (the capped subset).
+
+    Returns:
+        0 on a successful write (at least one candidate verified ok); 1 if
+        there are no candidates to verify, or the palette write itself failed
+        (a clean message is printed either way — never a raw traceback).
+    """
     candidates_path = _DEFAULT_CANDIDATES_PATH.expanduser()
     palette_path = _DEFAULT_PALETTE_PATH.expanduser()
 
@@ -362,12 +517,37 @@ def main() -> int:
         )
         return 1
 
-    print(
-        f"Verifying {len(candidates)} candidate(s) against this host — unsupported or\n"
-        "unauthenticated ones are skipped (a skip is normal, not an error). Provider\n"
-        "output is hidden; set CADRE_VERIFY_VERBOSE=1 to show it.\n"
+    total = len(candidates)
+    # Cross-model No-ship catch: a re-verify must never silently prune a
+    # previously-verified pair. Existing-palette pairs still in the candidates
+    # file are ALWAYS re-verified (exempt from the cap); the cap bounds only
+    # the discovery flood.
+    existing = _existing_palette_pairs(palette_path)
+    to_verify = (
+        candidates
+        if all_candidates
+        else _cap_candidates(candidates, always_keep=frozenset(existing))
     )
-    records = verify_candidates(candidates)
+
+    # Pre-spend disclosure #2: pairs on the existing palette that are no
+    # longer in the candidates file at all cannot be re-verified and WILL
+    # drop when the palette is rewritten. Warn loudly BEFORE the first paid
+    # call so the operator can abort and re-add them.
+    dropping = sorted(existing - set(to_verify))
+    if dropping:
+        shown = ", ".join(f"{_sanitize(p)}/{_sanitize(m)}" for p, m in dropping)
+        print(
+            f"[cadre] warning: {len(dropping)} previously-verified pair(s) are no "
+            f"longer in the candidates file and will DROP from the palette: {shown}\n"
+            "  The palette is rewritten from this pass only. To keep them, add "
+            "them back to ~/.cadre/palette-candidates.yaml first (re-running "
+            "`cadre discover` regenerates that file from the current inventory). "
+            "Fleets composed from dropped pairs will be refused at preflight.",
+            file=sys.stderr,
+        )
+
+    print(_verifying_banner(to_verify, total))
+    records = verify_candidates(to_verify)
 
     n_ok = sum(1 for r in records if r.ok)
     try:
@@ -381,9 +561,24 @@ def main() -> int:
         return 1
 
     print(f"\n✓ {n_ok} of {len(records)} verified → {palette_path}")
-    skipped = [f"{r.provider}/{r.model}" for r in records if not r.ok]
+    # Same KTD9 rule as verify_candidates' per-candidate lines: discovered
+    # strings render sanitized, per field.
+    skipped = [f"{_sanitize(r.provider)}/{_sanitize(r.model)}" for r in records if not r.ok]
     if skipped:
         print(f"  skipped {len(skipped)}: {', '.join(skipped)}")
+
+    # Bonus artifact (U5, #61): a runnable smoke-test fleet from the just-verified
+    # pairs, written as a sibling "fleets/" dir of wherever palette.yaml just
+    # landed — deliberately derived from palette_path rather than a second
+    # independent ~/.cadre-rooted default: every existing test above reaches
+    # this point only after patching _DEFAULT_PALETTE_PATH to a tmp path, and
+    # deriving from it (instead of a standalone constant no test knows to
+    # patch) keeps those tests hermetic for free, with no changes to them.
+    # write_palette_fleet NEVER raises — a fleet-write failure (or too few
+    # verified providers) warns to stderr but must not flip this successful
+    # verify to a nonzero exit; palette.yaml above is the primary deliverable.
+    fleet_path = palette_path.parent / "fleets" / "palette-fleet.yaml"
+    write_palette_fleet(records, path=fleet_path)
 
     return 0
 

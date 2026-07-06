@@ -17,6 +17,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from cadre.approval import (
@@ -395,6 +396,80 @@ class TestApprovalTokenParentDirPermissions(unittest.TestCase):
         token = consume_approval(path=tok)
         self.assertIsNotNone(token)
         self.assertEqual(token.digest, "digest-y")
+
+
+class TestWriteOwnerOnlyPartialFileCleanup(unittest.TestCase):
+    """#61 review catches: in exclusive (create-only) mode, a write failure
+    AFTER the O_EXCL creation must not leave a partial file — a later
+    create-only caller would read it as "exists — preserved" forever. In
+    non-exclusive (overwrite) mode, a mid-write failure must leave the prior
+    file BYTE-IDENTICAL (CodeRabbit #74: the old O_TRUNC open destroyed the
+    prior content the instant it succeeded; the temp+os.replace path makes
+    the overwrite atomic)."""
+
+    def setUp(self):
+        import tempfile as _tempfile
+
+        self._tmp = _tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "candidates.yaml"
+
+    def _failing_fdopen(self, *a, **k):
+        # Close the raw fd (so the test leaks nothing), then fail like an
+        # I/O error at write time would.
+        os.close(a[0])
+        raise OSError(28, "No space left on device")
+
+    def test_exclusive_write_failure_unlinks_partial(self):
+        from cadre.approval import _write_owner_only
+
+        with patch("cadre.approval.os.fdopen", side_effect=self._failing_fdopen):
+            with self.assertRaises(OSError):
+                _write_owner_only(self.path, "content", exclusive=True)
+        self.assertFalse(
+            self.path.exists(),
+            "a failed exclusive write must not leave a partial file behind",
+        )
+
+    def test_non_exclusive_write_failure_keeps_existing_file_content(self):
+        """CodeRabbit (#74): asserting mere existence was weak — under the old
+        O_TRUNC open the file survived but was already truncated EMPTY when
+        the write failed. The atomic overwrite must leave the prior content
+        byte-identical and clean up its temp file."""
+        from cadre.approval import _write_owner_only
+
+        self.path.write_text("PRIOR", encoding="utf-8")
+        with patch("cadre.approval.os.fdopen", side_effect=self._failing_fdopen):
+            with self.assertRaises(OSError):
+                _write_owner_only(self.path, "content", exclusive=False)
+        self.assertEqual(
+            self.path.read_text(encoding="utf-8"),
+            "PRIOR",
+            "a failed overwrite must leave the prior content untouched",
+        )
+        leftovers = [p for p in self.path.parent.iterdir() if p.name.startswith(".")]
+        self.assertEqual(leftovers, [], "failed overwrite must clean up its temp file")
+
+    def test_non_exclusive_overwrite_replaces_content_and_keeps_0600(self):
+        from cadre.approval import _write_owner_only
+
+        self.path.write_text("OLD", encoding="utf-8")
+        _write_owner_only(self.path, "NEW", exclusive=False)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "NEW")
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_non_exclusive_symlink_destination_refused(self):
+        """os.replace would swap a symlink rather than refuse it — the explicit
+        pre-check preserves the O_NOFOLLOW refusal contract in overwrite mode."""
+        from cadre.approval import _write_owner_only
+
+        sentinel = self.path.parent / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        self.path.symlink_to(sentinel)
+        with self.assertRaises(OSError):
+            _write_owner_only(self.path, "content", exclusive=False)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(self.path.is_symlink(), "the symlink itself must be untouched")
 
 
 if __name__ == "__main__":

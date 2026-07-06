@@ -25,10 +25,12 @@ present-but-undeletable token is refused rather than honored (fail-closed).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -112,6 +114,81 @@ def _parent_is_safe(parent: str) -> bool:
     if st.st_mode & 0o022:  # group- or other-writable
         return False
     return True
+
+
+def _write_owner_only(path: Path, content: str, *, exclusive: bool = False) -> None:
+    """Write ``content`` to ``path`` with the repo's canonical owner-only posture.
+
+    The shared write tail of the #61 writers (``discover.write_candidates``,
+    ``palette_fleet``'s fleet writer): tightened umask, an owner-only-created
+    parent, the ``_parent_is_safe`` refusal of a foreign-owned or
+    group/other-writable pre-existing parent, and ``O_NOFOLLOW`` so a symlink
+    planted at ``path`` is refused rather than written through. The earlier
+    writers (``write_approval`` above, ``verify_palette.write_palette``,
+    ``provision.write_config``/``_seed_files``) hand-roll the same sequence
+    with per-site error types/messages and predate this helper; unifying them
+    is a deliberate non-goal here (behavior-preserving passes don't rewrite
+    shipped trust-surface code).
+
+    ``exclusive=True`` uses ``O_EXCL``: the ``open()`` itself becomes the
+    atomic existence check, raising ``FileExistsError`` rather than touching
+    a file (or following a symlink) already there. ``exclusive=False``
+    (overwrite) writes to a same-directory temp file and ``os.replace``s it
+    into place, so a mid-write failure (disk full, I/O error) leaves any
+    prior file byte-identical — never truncated, never partial (CodeRabbit:
+    a plain ``O_TRUNC`` open destroys the prior content the instant it
+    succeeds, breaking ``write_palette_fleet``'s no-truncation promise on
+    any post-open failure). A symlink at ``path`` is refused up front in
+    this mode (``os.replace`` would swap the symlink itself rather than
+    refuse, so the pre-check preserves the O_NOFOLLOW refusal contract).
+
+    Raises:
+        OSError: the parent is unsafe, or ``path`` is a symlink;
+            ``FileExistsError`` (a subclass) when ``exclusive`` and ``path``
+            already exists.
+    """
+    old_umask = os.umask(0o077)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Check AFTER mkdir: a freshly-created dir is 0o700 by construction;
+        # only a PRE-EXISTING loose parent is refused (mkdir(exist_ok=True)
+        # will not tighten one).
+        if not _parent_is_safe(str(path.parent)):
+            raise OSError(
+                f"{path.parent} is unsafe — it must be owned by you and not "
+                "group/other-writable. Fix it, then re-run."
+            )
+        if exclusive:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(path), flags, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                path.chmod(0o600)
+            except OSError:
+                # O_EXCL succeeded, so WE created this file — a failed write
+                # (disk full, I/O error) must not leave a partial file behind:
+                # create-only callers would read it as "exists — preserved"
+                # forever, silently defeating every future seeding attempt.
+                # Best-effort; the original error is what the caller needs.
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                raise
+        else:
+            if path.is_symlink():
+                raise OSError(f"{path} is a symlink — refusing to write through it.")
+            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.chmod(tmp_name, 0o600)
+                os.replace(tmp_name, str(path))
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+                raise
+    finally:
+        os.umask(old_umask)
 
 
 @dataclasses.dataclass

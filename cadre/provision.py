@@ -10,16 +10,22 @@ sourced starter data via ``cadre.resources`` (package data under
 signature changes to the seed functions.
 
 Exported functions:
-  ensure_cadre_dirs(home)                 — owner-only dir scaffolding
-  write_config(python_path, config_path)  — owner-only config writer (C2 contract)
-  seed_starter_fleets(cadre_home)         — idempotent fleet seeding, never raises
-  seed_personas(cadre_home)               — idempotent persona seeding, never raises
-  seed_palette_candidates(cadre_home)     — idempotent palette-candidates seeding, never raises
-  verify_importable(python_path)          — KTD11: subprocess check, `import cadre` under python_path
+  ensure_cadre_dirs(home)                    — owner-only dir scaffolding
+  write_config(python_path, config_path)     — owner-only config writer (C2 contract)
+  seed_starter_fleets(cadre_home)            — idempotent fleet seeding, never raises
+  seed_personas(cadre_home)                  — idempotent persona seeding, never raises
+  seed_palette_candidates(cadre_home)        — idempotent PLACEHOLDER palette-candidates
+                                                seeding, never raises (the pre-#61 behavior;
+                                                still used directly, and as the fallback below)
+  seed_or_discover_palette_candidates(home)  — #61: seeds REAL discovered candidates when
+                                                Hermes is importable, else falls back to
+                                                seed_palette_candidates(); never raises
+  verify_importable(python_path)             — KTD11: subprocess check, `import cadre` under python_path
 
 ``cadre setup`` (cadre/cli.py) orchestrates these: verify_importable() gates
-(fail-closed, before any write) the rest — ensure_cadre_dirs() then the three
-seed_* functions then write_config().
+(fail-closed, before any write) the rest — ensure_cadre_dirs() then
+seed_starter_fleets(), seed_personas(), seed_or_discover_palette_candidates(),
+then write_config().
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from cadre.approval import _parent_is_safe
+from cadre.discover import DiscoveryError, discover_candidates, write_candidates
 from cadre.resources import fleets_dir, palette_example_path, personas_dir
+from cadre.text_safety import sanitize as _sanitize
 
 # Explicit allowlist — NEVER glob fleets/*.yaml: palette.example.yaml lives there
 # and is not a fleet (it would break FleetConfig.load if seeded as a fleet).
@@ -232,6 +240,97 @@ def seed_palette_candidates(cadre_home: Path) -> None:
         names=(example.name,),
         dest_name_fn=lambda _name: "palette-candidates.yaml",
     )
+
+
+def seed_or_discover_palette_candidates(cadre_home: Path) -> None:
+    """`cadre setup`'s candidate-seeding step (#61, R3): discovery when
+    possible, the pre-#61 placeholder when not.
+
+    Attempts ``cadre.discover.discover_candidates()`` to seed REAL
+    (provider, model) pairs from this host's authenticated Hermes providers.
+    When Hermes is not importable, unauthenticated, or its internal surface
+    has drifted (``DiscoveryError``), falls back to
+    ``seed_palette_candidates()`` — the placeholder seeding this function
+    replaces at the setup call site — printing a stderr line stating
+    discovery was unavailable and why. Same fallback on an ``OSError`` from
+    the discovered-candidates write itself (e.g. an unsafe parent), so any
+    failure in the discovery path lands on the SAME placeholder safety net.
+
+    Never overwrites an existing candidates file, on EITHER path (AE6):
+    the discovered write is create-only (``write_candidates(...,
+    create_only=True)``, KTD6) — a ``FileExistsError`` there means the file
+    is already there, so it's preserved and the freshly discovered result
+    is discarded in the operator's favor; the placeholder fallback
+    (``seed_palette_candidates``) is itself idempotent/preserve-existing.
+    Discovery's loud regenerate-and-overwrite posture
+    (``write_candidates``'s default ``create_only=False``) is reserved for
+    the explicit ``cadre discover`` verb — setup never regenerates.
+
+    No model call, no spend, on either path (R6): ``discover_candidates()``
+    and ``write_candidates()`` make none; this function adds no I/O beyond
+    what each already does, plus one stderr line.
+
+    Never raises: every ``DiscoveryError`` and ``OSError`` from the
+    discovery path is caught here and degrades to the placeholder fallback
+    (itself never-raises) — mirrors ``seed_palette_candidates``'s own
+    contract, so ``setup_command``'s exit code is unaffected by a discovery
+    failure.
+    Never writes to stdout: all messages go to sys.stderr.
+
+    Args:
+        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+    """
+    path = cadre_home / "palette-candidates.yaml"
+
+    # An existing file is preserved no matter what discovery would find, so
+    # skip the inventory read entirely (setup is rerun-safe; without this, a
+    # rerun on a provisioned host fetches the whole inventory just to discard
+    # it — and on a host WITHOUT Hermes it printed a misleading "discovery
+    # unavailable" line before the preserved message). This pre-check only
+    # avoids wasted work: the create-only O_EXCL write below still guards the
+    # actual create-vs-exists race for the fresh path.
+    if path.exists():
+        print(f"[cadre] {path.name}: exists — preserved", file=sys.stderr)
+        return
+
+    try:
+        result = discover_candidates()
+    except DiscoveryError as exc:
+        # DiscoveryError text can embed payload-derived strings (slugs, entry
+        # reprs, hermes exception text) — untrusted display input (KTD9),
+        # mirroring discover.main()'s identical sanitize-before-print.
+        print(
+            f"[cadre] discovery unavailable during setup: {_sanitize(str(exc))} "
+            "Seeding the placeholder palette-candidates.yaml instead.",
+            file=sys.stderr,
+        )
+        seed_palette_candidates(cadre_home)
+        return
+
+    try:
+        write_candidates(result, path, create_only=True)
+    except FileExistsError:
+        # Mirrors _seed_files' own "exists — preserved" wording (KTD6): the
+        # discovered result is discarded in favor of the operator's file.
+        print(f"[cadre] {path.name}: exists — preserved", file=sys.stderr)
+    except OSError as exc:
+        print(
+            f"[cadre] warning: could not write discovered candidates to {path} "
+            f"({_sanitize(str(exc))}). Seeding the placeholder "
+            "palette-candidates.yaml instead.",
+            file=sys.stderr,
+        )
+        seed_palette_candidates(cadre_home)
+    else:
+        # Mirrors _seed_files' "[cadre] seeded <name>" success line so the
+        # operator can tell the discovered seed happened (counts only — no
+        # untrusted strings on this line).
+        n_pairs = sum(len(p.models) for p in result.providers)
+        print(
+            f"[cadre] seeded {path.name} from discovery "
+            f"({n_pairs} candidate(s), {len(result.providers)} provider(s))",
+            file=sys.stderr,
+        )
 
 
 def ensure_cadre_dirs(home: str = "~/.cadre") -> Path:

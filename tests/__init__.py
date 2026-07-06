@@ -11,8 +11,11 @@ dozens of real-run tests on a provisioned/dogfood host while CI (a fresh
 container with no ``~/.cadre``) stays green.
 
 Force ``CADRE_PALETTE`` at a guaranteed-absent path so ``load_palette`` returns
-``None`` and the preflight gate sees no palette (degrade OPEN -> proceed) across
-the whole suite, keeping it hermetic regardless of the host. The path is a
+``None`` and the preflight gate sees the same "no palette" state on every
+machine (since the #61 flip that state REFUSES a run — every fleet-run test
+therefore brings its own explicit palette via
+``tests/palette_fixtures.matching_palette``; this pin keeps the ambient
+default hermetic rather than open). The path is a
 subdirectory of THIS package directory that the suite never creates, so the file
 cannot exist. It is deliberately ``__file__``-relative rather than under
 ``tempfile.gettempdir()`` — the latter is resolved at import time and can raise

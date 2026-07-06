@@ -194,9 +194,9 @@ def main(argv: list[str] | None = None) -> int:
     # before the one-shot approval token is burned. A host-side palette fix
     # (adding the model via `cadre verify-palette`) leaves the fleet YAML —
     # and therefore the surface digest — unchanged, so the same approval
-    # still works on a subsequent run. A palette-absent or malformed host
-    # degrades open (see preflight_refusal), so this never blocks a fleet
-    # with nothing to check it against.
+    # still works on a subsequent run. An absent or malformed palette ALSO
+    # refuses (fail closed; absent flipped by #61) — the refusal text names
+    # the host-appropriate fix (see preflight_refusal).
     refusal = preflight_refusal(cfg)
     if refusal is not None:
         print(refusal)

@@ -8,6 +8,7 @@ Usage:
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..."
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..." --no-capture
     python -m cadre.cli setup
+    python -m cadre.cli discover
     python -m cadre.cli verify-palette
     HERMES_SKILLS_DIR=<dir> python -m cadre.cli install-skill
 """
@@ -21,7 +22,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from cadre import provision, verify_palette
+from cadre import discover, provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.exit_codes import ExitCode, status_to_exit
@@ -100,9 +101,9 @@ def run_command(
         return ExitCode.ERROR, f"Fleet spec not found: {path}"
 
     # #62 preflight-refuse (R4): refuse an off-palette model BEFORE any spend —
-    # before prepare_run_dir, before run_with_progress. A palette-absent or
-    # malformed host degrades open (see preflight_refusal), so this never
-    # blocks a fleet with nothing to check it against.
+    # before prepare_run_dir, before run_with_progress. An absent or malformed
+    # palette ALSO refuses (fail closed; absent flipped by #61) — the refusal
+    # text names the host-appropriate fix (see preflight_refusal).
     refusal = preflight_refusal(cfg)
     if refusal is not None:
         return ExitCode.PREFLIGHT_REFUSE, refusal
@@ -188,7 +189,10 @@ def setup_command(
 
     Only once all four pass does it scaffold + seed + write config:
     ensure_cadre_dirs() -> seed_starter_fleets() -> seed_personas() ->
-    seed_palette_candidates() -> write_config(). Idempotent overall (each step
+    seed_or_discover_palette_candidates() -> write_config(). The palette-candidates
+    step seeds REAL discovered (provider, model) pairs when Hermes is importable,
+    falling back to the placeholder example otherwise (#61) — either way it never
+    overwrites an existing candidates file. Idempotent overall (each step
     preserves existing operator edits; write_config overwrites the single
     config line every run).
 
@@ -269,7 +273,7 @@ def setup_command(
         home = provision.ensure_cadre_dirs()
         provision.seed_starter_fleets(home)
         provision.seed_personas(home)
-        provision.seed_palette_candidates(home)
+        provision.seed_or_discover_palette_candidates(home)
         provision.write_config(recorded_python)
     except OSError as exc:
         # The pre-#11 scripts/resolve_venv.py wrapped this identical
@@ -284,8 +288,10 @@ def setup_command(
         ExitCode.SUCCESS,
         f"Provisioned {home} from the installed cadre package.\n"
         f"Recorded Hermes Python: {recorded_python}\n"
-        "Next: edit ~/.cadre/palette-candidates.yaml for your authenticated providers, "
-        "then run `cadre verify-palette`.",
+        # Path-neutral next step: the seeding line above (stderr) already said
+        # whether discovery populated real pairs or the placeholder was seeded.
+        "Next: review ~/.cadre/palette-candidates.yaml (auto-discovered from "
+        "Hermes when available — edit only if needed), then run `cadre verify-palette`.",
     )
 
 
@@ -331,10 +337,27 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sub.add_parser(
+        "discover",
+        help=(
+            "Discover authenticated Hermes providers and write "
+            "~/.cadre/palette-candidates.yaml (host-only; no model calls)"
+        ),
+    )
+
+    p_verify_palette = sub.add_parser(
         "verify-palette",
         help=(
             "Verify authenticated (provider, model) candidates against this host "
             "and write ~/.cadre/palette.yaml (host-only, live — makes real model calls)"
+        ),
+    )
+    p_verify_palette.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help=(
+            "Verify every discovered candidate instead of the default capped "
+            "subset (2 per provider)"
         ),
     )
 
@@ -357,12 +380,17 @@ def main(argv: list[str] | None = None) -> int:
         code, out = validate_command(args.spec)
     elif args.cmd == "setup":
         code, out = setup_command(args.venv_python)
+    elif args.cmd == "discover":
+        # discover.main() owns its own printing (mirrors verify-palette's dispatch
+        # just below) -- propagate its exit code as-is rather than forcing it
+        # through the (code, out); print(out) shape.
+        return discover.main()
     elif args.cmd == "verify-palette":
         # verify_palette.main() streams its own live per-candidate progress lines
         # directly to stdout as it runs (unlike validate/setup's single end-of-call
         # message) — so it owns its own printing; propagate its exit code as-is
         # rather than forcing it through the (code, out); print(out) shape below.
-        return verify_palette.main()
+        return verify_palette.main(all_candidates=args.all)
     elif args.cmd == "install-skill":
         code, out = install_skill(args.skills_dir)
     else:

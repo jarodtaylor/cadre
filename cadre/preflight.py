@@ -1,4 +1,5 @@
-"""#62 preflight-refuse: block an off-palette fleet before any model call.
+"""#62 preflight-refuse: block an off-palette (or palette-less) fleet before
+any model call.
 
 Caller-layer only: imported by ``cadre/cli.py`` and ``cadre/data/skill/run.py``.
 NEVER imported by ``engine.py`` or ``model_client.py`` (R7) — the engine stays
@@ -10,20 +11,78 @@ directions, mirroring ``approval.py``'s posture).
 Built on ``preview_lint.off_palette_model_pairs`` — the exact structured
 membership check ``check_palette`` already uses for its preview warnings
 (KTD4) — so this gate and the preview warnings share one source and can never
-disagree about what counts as off-palette. Scope is deliberately narrow (R4):
-refuses ONLY on an off-palette *model* (a specialist, the synthesizer, or the
-judge); off-palette *toolsets* stay a warning, never a refusal, and no palette
-present at all degrades OPEN (proceed) — matching the preview's own posture.
-Requiring a palette to exist is #61's job, not this gate's.
+disagree about what counts as off-palette. Scope is deliberately narrow (R4)
+on the model-vs-toolset axis: refuses on an off-palette *model* (a specialist,
+the synthesizer, or the judge); off-palette *toolsets* stay a warning, never a
+refusal — matching the preview's own posture there.
+
+A genuinely-absent palette is NOT exempt (#61/#62 flip, KTD7 — this used to
+degrade OPEN, i.e. proceed, before ``cadre discover``/#61 existed to give a
+fresh host an easy fix): a host with no ``~/.cadre/palette.yaml`` at all now
+refuses too, naming a remedy that works on THIS host (``cadre discover`` when
+Hermes's CLI is importable, else the manual ``palette-candidates.yaml``
+hand-edit — see ``_hermes_cli_available``) rather than silently running every
+model ungated. A PRESENT-but-unreadable/malformed palette was already a
+refusal before this flip and is unchanged by it.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 from cadre.config import FleetConfig
+from cadre.discover import default_candidates_path
 from cadre.preview_lint import load_palette, off_palette_model_pairs, resolve_palette_path
 from cadre.text_safety import sanitize as _sanitize
+
+
+def _hermes_cli_available() -> bool:
+    """Best-effort PRESENCE probe for Hermes's CLI package.
+
+    Selects ONLY which remedy the absent-palette refusal below names — it
+    never gates the refusal itself (that fires unconditionally once the
+    palette is absent). A presence check via ``importlib.util.find_spec``
+    ONLY: it never imports or executes ``hermes_cli`` (mirrors
+    ``cadre.discover``'s own presence-vs-import split — discovery itself
+    lazy-imports ``hermes_cli.inventory`` only inside its ``_fetch_inventory``,
+    at call time, never here).
+
+    Spoofable by cwd/``PYTHONPATH`` (a stale entry could make this return
+    True or False for the wrong reason) — accepted, since a wrong guess only
+    picks the wrong remedy TEXT and self-corrects: `cadre discover` itself
+    re-validates for real and fails closed naming the manual fallback if it
+    turns out Hermes wasn't actually available. Any exception during the
+    probe (a corrupted meta-path finder, a stale
+    ``sys.modules["hermes_cli"] = None`` left by a prior failed import,
+    anything) also degrades to ``False`` — the conservative remedy that
+    always works regardless of what's actually installed.
+    """
+    try:
+        return importlib.util.find_spec("hermes_cli") is not None
+    except Exception:  # noqa: BLE001 — any probe failure -> the conservative remedy
+        return False
+
+
+def _candidates_file_exists() -> bool:
+    """Best-effort presence probe for the candidates file the remedy names.
+
+    Selects ONLY the absent-palette remedy text below — when a (possibly
+    hand-curated) ``~/.cadre/palette-candidates.yaml`` already exists, the
+    remedy must point at `cadre verify-palette` directly, never at
+    `cadre discover`, which would REGENERATE the file and discard those edits
+    (the refusal text is a recipe an agent follows verbatim, and the skill
+    authorizes self-running discover exactly when this refusal names it).
+    Same patchable-seam pattern as ``_hermes_cli_available`` — tests force it
+    both ways because a provisioned host genuinely has the file. Any probe
+    failure degrades to False (the remedies that assume no file always work:
+    discover refuses create-or-overwrite loudly, and the manual edit path is
+    self-evident once the operator looks).
+    """
+    try:
+        return default_candidates_path().expanduser().exists()
+    except Exception:  # noqa: BLE001 — any probe failure -> the no-file remedies
+        return False
 
 
 def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = None) -> str | None:
@@ -35,14 +94,19 @@ def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = Non
     runners call this with no argument, matching the plan's single-``cfg``
     signature and getting the env/default resolution).
 
-    Degrades OPEN — returns ``None`` — when the palette is genuinely ABSENT
-    (the operator opted out of palette checking): a fleet with no palette to
-    check against proceeds. But a palette that is PRESENT yet unreadable or
-    malformed (``load_palette`` returns ``None`` while the resolved file
-    exists) FAILS CLOSED with a refusal — a broken palette must not silently
-    disable the #62 spend-gate (correctness DevEx: fail loud on a bad config,
-    do not spend ungated). Also returns ``None`` when a palette IS present and
-    valid but every specialist, synthesizer, and judge model is on it.
+    Refuses — never degrades open — when the palette is genuinely ABSENT
+    (#61/#62 flip, KTD7): a host with nothing to check against now gets a
+    legible refusal instead of silently running every model ungated. The
+    remedy it names depends on whether Hermes's CLI is importable on this
+    host (``_hermes_cli_available``): ``cadre discover`` when it is, else the
+    manual ``~/.cadre/palette-candidates.yaml`` hand-edit. A palette that is
+    PRESENT yet unreadable or malformed (``load_palette`` returns ``None``
+    while the resolved file exists) ALSO fails CLOSED with a refusal, as
+    before this flip — a broken palette must not silently disable the #62
+    spend-gate either (correctness DevEx: fail loud on a bad or missing
+    config, do not spend ungated). Returns ``None`` only when a palette IS
+    present and valid and every specialist, synthesizer, and judge model is
+    on it.
 
     Otherwise returns a clear, multi-line refusal naming each offending role
     + ``(provider, model)`` — every field ``_sanitize``d, since the fleet
@@ -56,11 +120,14 @@ def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = Non
     """
     palette = load_palette(palette_path)
     if palette is None:
-        # A genuinely-absent palette degrades open (operator opted out). But a
-        # PRESENT-but-unreadable/malformed palette must NOT silently disable the
-        # spend-gate: fail closed with a clear error. Stat the resolved path to
-        # tell the two apart (load_palette collapses both to None). Guard the
-        # stat itself so a stat failure degrades open rather than crashing.
+        # Both branches below now refuse -- but for two different reasons, so
+        # tell them apart first. A PRESENT-but-unreadable/malformed palette
+        # fails closed with a "fix your palette" error (unchanged by this
+        # unit). A genuinely-ABSENT palette used to degrade open; it now ALSO
+        # fails closed, but with a "get a palette" remedy instead (KTD7). Stat
+        # the resolved path to tell the two apart (load_palette collapses both
+        # to None). Guard the stat itself so a stat failure is treated as
+        # absent rather than crashing.
         resolved = resolve_palette_path(palette_path)
         present = False
         if resolved is not None:
@@ -77,7 +144,37 @@ def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = Non
                 "Fix: repair or remove the palette, or run `cadre verify-palette` "
                 "to regenerate it."
             )
-        return None
+        # Genuinely absent (#61/#62 flip, KTD7): refuse, naming whichever remedy
+        # actually works on this host. The location is included when resolvable,
+        # sanitized like every other dynamic field this gate renders (CADRE_PALETTE
+        # is a caller-set env var — a trust surface, not user-typed-and-trusted).
+        location = f" at {_sanitize(str(resolved))}" if resolved is not None else ""
+        if _candidates_file_exists():
+            # A candidates file already exists (possibly hand-curated) — the
+            # remedy must NOT name `cadre discover`, which would regenerate it
+            # and discard those edits (Codex adversarial catch: the refusal is
+            # a recipe an agent follows verbatim, and the skill authorizes it
+            # to self-run discover when named here).
+            fix = (
+                "Fix: run `cadre verify-palette` — your existing "
+                "~/.cadre/palette-candidates.yaml will be verified as-is."
+            )
+        elif _hermes_cli_available():
+            fix = (
+                "Fix: run `cadre discover` to auto-discover your authenticated "
+                "providers, then `cadre verify-palette` to confirm them on this host."
+            )
+        else:
+            fix = (
+                "Fix: edit ~/.cadre/palette-candidates.yaml with your authenticated "
+                "providers and models, then run `cadre verify-palette` to confirm "
+                "them on this host."
+            )
+        return (
+            "Refused (no palette) — no spend has occurred. No host palette was "
+            f"found{location}, so off-palette models cannot be checked.\n"
+            f"{fix}"
+        )
 
     off_palette = off_palette_model_pairs(cfg, palette)
     if not off_palette:

@@ -73,12 +73,14 @@ CANDIDATES_PRE_EXISTED=0
 "$PYBIN" -m cadre.cli setup
 
 if [ "$CANDIDATES_PRE_EXISTED" -eq 0 ]; then
-    # First run: candidates were just seeded from the package example. Stop
-    # here so the operator can edit them BEFORE the (paid, live-provider)
-    # verify step below runs against real API calls.
+    # First run: candidates were just seeded — from Hermes's own inventory when
+    # discovery was available (#61), else the package placeholder. Stop here so
+    # the operator can REVIEW them BEFORE the (paid, live-provider) verify step
+    # below runs against real API calls.
     echo ""
-    echo "Seeded ~/.cadre/palette-candidates.yaml — EDIT it for your authenticated"
-    echo "providers, then re-run ./scripts/install.sh to verify + write the palette."
+    echo "Seeded ~/.cadre/palette-candidates.yaml (auto-discovered from Hermes when"
+    echo "available — the setup output above says which). Review/edit it, then"
+    echo "re-run ./scripts/install.sh to verify + write the palette."
     echo ""
     echo "See docs/RUNBOOK.md — 'Install & provisioning' for provisioning guidance."
     exit 0

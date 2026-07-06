@@ -23,7 +23,9 @@ from cadre.exit_codes import ExitCode
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
-from cadre.resources import fleets_dir, skill_dir
+from cadre.resources import fleets_dir, palette_example_path, skill_dir
+from cadre.preview_lint import load_palette
+from tests.palette_fixtures import matching_palette
 
 EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
@@ -35,16 +37,35 @@ EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 # failure output is unaffected.
 _REAL_STDERR = None
 
+# Hermeticity guard (#61 palette auto-discovery): setup_command's seeding step
+# now calls provision.seed_or_discover_palette_candidates(), which attempts
+# cadre.discover.discover_candidates() -- a lazy `from hermes_cli.inventory
+# import ...` when a test doesn't inject/patch a payload. A provisioned host HAS
+# hermes_cli importable; this dev laptop does not -- without forcing this,
+# every setup_command test that doesn't specifically care about discovery would
+# take a DIFFERENT, ambient-host-dependent code path depending on which machine
+# runs the suite (mirrors tests/__init__.py's CADRE_PALETTE guard for the same
+# class of risk: docs/solutions/best-practices/force-ambient-host-state-in-tests-when-code-reads-it.md).
+# Forcing the import to fail here makes every such test exercise the SAME
+# (fallback-to-placeholder) path deterministically, regardless of host. Tests
+# that need discovery to SUCCEED patch discover_candidates directly (bypassing
+# this import entirely), so this guard does not affect them.
+_HERMES_CLI_INVENTORY_PATCH = None
+
 
 def setUpModule():
-    global _REAL_STDERR
+    global _REAL_STDERR, _HERMES_CLI_INVENTORY_PATCH
     _REAL_STDERR = sys.stderr
     sys.stderr = io.StringIO()
+    _HERMES_CLI_INVENTORY_PATCH = patch.dict(sys.modules, {"hermes_cli.inventory": None})
+    _HERMES_CLI_INVENTORY_PATCH.start()
 
 
 def tearDownModule():
     if _REAL_STDERR is not None:
         sys.stderr = _REAL_STDERR
+    if _HERMES_CLI_INVENTORY_PATCH is not None:
+        _HERMES_CLI_INVENTORY_PATCH.stop()
 
 
 def _tmp_yaml(text):
@@ -67,6 +88,51 @@ class FakeClient:
         ok = kind == "ok"
         return AgentResult(role=role, provider=provider, model=model, ok=ok,
                            text=payload if ok else None, error=None if ok else payload)
+
+
+# ---------------------------------------------------------------------------
+# matching_palette fixture self-test (#61 U6): the fixture itself must produce
+# a palette that load_palette() actually parses and that covers every model
+# the wrapped fleet(s) declare -- every other class in this module trusts
+# that without re-checking it.
+# ---------------------------------------------------------------------------
+
+
+class TestMatchingPaletteFixture(unittest.TestCase):
+    def test_written_palette_loads_and_covers_declared_pairs(self):
+        with matching_palette(EXAMPLE) as path:
+            self.assertEqual(os.environ.get("CADRE_PALETTE"), str(path))
+            palette = load_palette(str(path))
+        self.assertIsNotNone(palette, "matching_palette must write a parseable palette.yaml")
+        # EXAMPLE (research-swarm.example.yaml) is synthesize-mode: 3 specialists
+        # (social/web/analysis) + a synthesizer -- all 4 model-bearing roles.
+        cfg = FleetConfig.load(EXAMPLE)
+        expected = {(s.provider, s.model) for s in cfg.specialists}
+        expected.add((cfg.synthesis.provider, cfg.synthesis.model))
+        self.assertEqual(palette.models, expected)
+
+    def test_multiple_fleets_union_their_pairs(self):
+        collect_path = _tmp_yaml(
+            "name: other\n"
+            "convergence: collect\n"
+            "specialists:\n"
+            "  - {role: r, provider: some-provider, model: some-model, toolset: [], focus: f}\n"
+        )
+        self.addCleanup(os.unlink, collect_path)
+        with matching_palette(EXAMPLE, collect_path) as path:
+            palette = load_palette(str(path))
+        self.assertIn(("some-provider", "some-model"), palette.models)
+        cfg = FleetConfig.load(EXAMPLE)
+        for s in cfg.specialists:
+            self.assertIn((s.provider, s.model), palette.models)
+
+    def test_env_restored_on_exit(self):
+        sentinel = "/nonexistent/prior-palette.yaml"
+        with patch.dict(os.environ, {"CADRE_PALETTE": sentinel}):
+            with matching_palette(EXAMPLE) as path:
+                self.assertNotEqual(os.environ.get("CADRE_PALETTE"), sentinel)
+            self.assertEqual(os.environ.get("CADRE_PALETTE"), sentinel)
+        self.assertFalse(path.exists(), "the temp palette file must be removed on exit")
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +196,9 @@ class TestValidate(unittest.TestCase):
 
 
 class TestRun(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(matching_palette(EXAMPLE))
+
     def test_run_renders_synthesis_and_provenance(self):
         client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
         code, out = run_command(EXAMPLE, "what's new?", client=client, capture=False)
@@ -179,6 +248,7 @@ class TestRunCaptureDefault(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_default_run_writes_folder_and_prints_path(self):
         run_dir = self.tmp / "myrun"
@@ -210,6 +280,7 @@ class TestRunCaptureDisabled(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_no_capture_writes_no_folder(self):
         run_dir = self.tmp / "should-not-exist"
@@ -225,6 +296,7 @@ class TestRunCaptureBadDir(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_unwritable_dir_fails_fast_before_model_calls(self):
         # Make a regular file where run_dir would need to be a directory.
@@ -255,6 +327,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_save_run_failure_does_not_discard_synthesis(self):
         run_dir = self.tmp / "writerun"
@@ -295,6 +368,7 @@ class TestRunCaptureRunDirPermissions(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_run_dir_created_0o700(self):
         run_dir = self.tmp / "permrun"
@@ -310,6 +384,7 @@ class TestRunCaptureUmaskParentDirs(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_default_path_parent_dirs_are_0o700(self):
         """When CADRE_RUN_DIR is unset, the auto-created default root is 0o700."""
@@ -440,6 +515,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def _run_skill(self, behavior=None, extra_argv=None):
         """Run the skill's main() with a fake client, redirected to self.tmp."""
@@ -761,6 +837,11 @@ class TestSkillApprovalGate(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.token_path = str(self.tmp / "approval")
+        # test_config_swap_refused runs a SECOND fleet (fleet_b) on this same
+        # approval path -- cover both fleets' models so either one's real run
+        # reaches its own behavior instead of a preflight refusal.
+        fleet_b = str(fleets_dir() / "code-review.example.yaml")
+        self.enterContext(matching_palette(_EXAMPLE_FLEET, fleet_b))
 
     def _env(self):
         return {"CADRE_APPROVAL_PATH": self.token_path}
@@ -943,6 +1024,9 @@ class TestSkillPrivilegedApproval(unittest.TestCase):
                 },
                 f,
             )
+        # test_nonprivileged_fleet_accepts_privileged_token_no_lockout runs
+        # _EXAMPLE_FLEET (not self.priv_fleet) -- cover both.
+        self.enterContext(matching_palette(str(self.priv_fleet), _EXAMPLE_FLEET))
 
     def _env(self):
         return {"CADRE_APPROVAL_PATH": self.token_path}
@@ -1204,6 +1288,7 @@ class TestSkillArbitraryFleet(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def test_arbitrary_fleet_runs_and_writes_manifest(self):
         """A real run with --fleet <example> and a FakeClient exits 0, writes manifest."""
@@ -1233,6 +1318,7 @@ class TestRunCommandProgressStreamSplit(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_report_clean_of_progress_and_progress_has_breadcrumbs(self):
         # Covers AE1.
@@ -1293,6 +1379,7 @@ class TestRunCommandWritesCompleteFolder(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_full_folder_written(self):
         run_dir = self.tmp / "run"
@@ -1337,6 +1424,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_broken_progress_stream_still_returns_report(self):
         client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
@@ -1384,6 +1472,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_save_lane_failure_warns_and_run_succeeds(self):
         from cadre.capture import save_lane as real_save_lane
@@ -1417,6 +1506,7 @@ class TestLaneArtifactWrittenBeforeBreadcrumb(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_artifact_exists_when_its_breadcrumb_is_emitted(self):
         run_dir = self.tmp / "r"
@@ -1444,6 +1534,7 @@ class TestSkillProgressStreamSplit(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def test_report_stdout_progress_stderr_and_full_folder(self):
         fake = FakeClient({"synthesizer": ("ok", "SKILL REPORT")})
@@ -1533,6 +1624,7 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         with os.fdopen(fd, "w") as f:
             f.write(_COLLECT_FLEET_YAML)
         self.addCleanup(os.unlink, self.fleet_path)
+        self.enterContext(matching_palette(self.fleet_path))
 
     def test_collect_success_exits_zero(self):
         """A collect run with >=1 specialist success exits 0 and renders the collect shape."""
@@ -1630,6 +1722,7 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
         with os.fdopen(fd, "w") as f:
             f.write(_JUDGE_FLEET_YAML)
         self.addCleanup(os.unlink, self.fleet_path)
+        self.enterContext(matching_palette(self.fleet_path))
 
     def test_judge_success_exits_zero(self):
         """All specialists + judge succeed → exit 0."""
@@ -1713,6 +1806,9 @@ class TestRunCommandStatusToExit(unittest.TestCase):
     """cadre run (cli.py run_command) maps FleetStatus -> the tri-state exit via
     status_to_exit (#70): SUCCESS 0 / DEGRADED 3 / FAILED 4."""
 
+    def setUp(self):
+        self.enterContext(matching_palette(EXAMPLE))
+
     def test_success_exits_0(self):
         code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("success"), capture=False)
         self.assertEqual(code, 0)
@@ -1734,6 +1830,7 @@ class TestSkillRunStatusToExit(unittest.TestCase):
         self.run_mod = _load_skill_module()
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _exit_code_for(self, status):
         run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
@@ -1769,6 +1866,7 @@ class TestExitCodeCouplingBothRunners(unittest.TestCase):
         self.run_mod = _load_skill_module()
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _skill_exit_code(self, status):
         run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
@@ -1797,7 +1895,7 @@ class TestExitCodeCouplingBothRunners(unittest.TestCase):
 # any spend. These are wiring tests only: proving cli.py / run.py call
 # preflight_refusal in the right place (before ModelClient, before run-dir
 # creation, before consume_approval) and surface ExitCode.PREFLIGHT_REFUSE.
-# The exhaustive off-palette / all-on-palette / degrade-open / toolset-only /
+# The exhaustive off-palette / all-on-palette / absent-palette / toolset-only /
 # sanitize semantics of preflight_refusal itself live in test_preflight.py.
 # ---------------------------------------------------------------------------
 
@@ -1872,14 +1970,18 @@ class TestRunCommandPreflightRefuse(unittest.TestCase):
         self.assertIn("SYNTH OK", out)
         self.assertEqual(len(client.calls), 4)  # 3 specialists + synthesizer
 
-    def test_no_palette_proceeds_normally(self):
-        """Palette absent (CADRE_PALETTE points at nothing) -> degrade-open, proceeds."""
+    def test_no_palette_refuses(self):
+        """Palette absent (CADRE_PALETTE points at nothing) -> refuses (#61/#62
+        flip, KTD7) before any spend, same posture as an off-palette model."""
         missing = self.tmp / "no_palette.yaml"
-        client = FakeClient({"synthesizer": ("ok", "SYNTH OK")})
-        with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}):
-            code, _out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 0)
-        self.assertEqual(len(client.calls), 4)
+        client = FakeClient({"synthesizer": ("ok", "SHOULD NOT RUN")})
+        with patch.dict(os.environ, {"CADRE_PALETTE": str(missing)}), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            code, out = run_command(EXAMPLE, "task", client=client, capture=False)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(code, 5)
+        self.assertEqual(client.calls, [], "no model call should be made on a preflight refusal")
+        self.assertIn("no palette", out.lower())
 
     def test_refusal_makes_no_run_dir(self):
         """A refusal happens before prepare_run_dir -- no folder is ever created."""
@@ -1973,6 +2075,55 @@ class TestSkillPreflightRefuse(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(fake.calls), 4)
 
+    def test_absent_palette_refuses_without_consuming_token_then_succeeds_after_palette_created(self):
+        """Same ordering guarantee as the off-palette case above, but for a
+        genuinely-ABSENT palette (#61/#62 flip, KTD7): the refusal fires before
+        consume_approval, so the token survives it, and creating a palette
+        host-side (unlike fixing an off-palette pair, this leaves the fleet
+        YAML -- and therefore the surface digest -- equally unchanged) lets
+        the SAME approval proceed on a re-run."""
+        missing_palette = str(self.tmp / "no_palette.yaml")  # never written -> absent
+        full_palette = self._palette_path(include_social=True)
+        run_argv = ["--fleet", EXAMPLE, "--task", "t", "--no-capture"]
+        fake = FakeClient({"synthesizer": ("ok", "S")})
+        env_base = {"CADRE_APPROVAL_PATH": self.token_path}
+
+        # Mint the approval under the (still absent) palette -- --preview never
+        # preflight-checks; it only warns (unchanged behavior).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+        self.assertTrue(os.path.exists(self.token_path), "preview should have minted a token")
+
+        # Real run under the SAME absent palette -> refused, zero model calls,
+        # and — the load-bearing assertion — the token is NOT consumed.
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": missing_palette}), \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = self.run_mod.main(run_argv)
+        self.assertEqual(code, ExitCode.PREFLIGHT_REFUSE)
+        self.assertEqual(fake.calls, [], "no model call should be made on a preflight refusal")
+        self.assertTrue(
+            os.path.exists(self.token_path),
+            "the approval token must survive a preflight refusal (no spend, no burned token)",
+        )
+        self.assertIn("no palette", buf.getvalue().lower())
+
+        # Create the palette (the verify-palette host workflow) — the fleet YAML
+        # and therefore the surface digest are unchanged, so the SAME token still
+        # binds; the run now proceeds and consumes it (one-shot, as normal).
+        with patch.dict(os.environ, {**env_base, "CADRE_PALETTE": full_palette}):
+            with patch.object(self.run_mod, "ModelClient", return_value=fake):
+                buf2 = io.StringIO()
+                with contextlib.redirect_stdout(buf2):
+                    code2 = self.run_mod.main(run_argv)
+        self.assertEqual(code2, 0)
+        self.assertEqual(len(fake.calls), 4, "the follow-up on-palette run should actually call every role")
+        self.assertFalse(os.path.exists(self.token_path), "the token is consumed once the run proceeds")
+
 
 class _PromptCapturingClient(FakeClient):
     """FakeClient that also records the prompt each specialist received."""
@@ -2008,6 +2159,7 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
             "  - {role: r, provider: openrouter, model: m, toolset: [], persona: rev}\n"
         )
         self.addCleanup(os.unlink, self._fleet)
+        self.enterContext(matching_palette(self._fleet))
 
     def test_validate_resolves_persona_against_pool(self):
         """validate exits 0 for a persona fleet whose persona resolves in the pool."""
@@ -2048,6 +2200,7 @@ class TestCLIDocFlag(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _doc(self, name, text):
         p = self.tmp / name
@@ -2148,6 +2301,7 @@ class TestSkillDocFlag(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def _doc(self, name, text):
         p = self.tmp / name
@@ -2228,15 +2382,22 @@ class TestSkillDocFlag(unittest.TestCase):
 
     def test_preview_with_doc_shows_path_and_makes_no_model_call(self):
         """Covers AE4 + R7: --preview --doc shows the --doc path AND makes zero
-        model calls / zero capture side-effects."""
+        model calls / zero capture side-effects.
+
+        CADRE_APPROVAL_PATH must be pinned like this class's other tests: a
+        doc-only preview COMPOSES a task and therefore MINTS — unpinned, it
+        wrote the token to the real ~/.cadre/approval (hermeticity leak,
+        caught during #61 U5)."""
         doc = self._doc("preview.md", "PREVIEW_DOC_BODY")
         fake_client_cls = MagicMock()
         mock_prepare = MagicMock()
         buf = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
-            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
-                with contextlib.redirect_stdout(buf):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(buf):
+                        code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", doc])
         self.assertEqual(code, 0)
         self.assertIn(doc, buf.getvalue(), "the --doc path appears in the preview (R7)")
         fake_client_cls.assert_not_called()
@@ -2289,10 +2450,14 @@ class TestSkillDocFlag(unittest.TestCase):
         fake_client_cls = MagicMock()
         mock_prepare = MagicMock()
         buf = io.StringIO()
-        with patch.object(self.run_mod, "ModelClient", fake_client_cls):
-            with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
-                with contextlib.redirect_stdout(buf):
-                    code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
+        # Pin the approval path: a readable-doc preview MINTS (same hermeticity
+        # leak class as test_preview_with_doc_shows_path_and_makes_no_model_call).
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", fake_client_cls):
+                with patch.object(self.run_mod, "prepare_run_dir", mock_prepare):
+                    with contextlib.redirect_stdout(buf):
+                        code = self.run_mod.main(["--fleet", _EXAMPLE_FLEET, "--preview", "--doc", str(big)])
         out = buf.getvalue()
         self.assertEqual(code, 0)
         self.assertIn(str(big), out)
@@ -2791,6 +2956,94 @@ class TestSetupCommandIdempotent(unittest.TestCase):
         self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
 
 
+class TestSetupCommandDiscoverySeeding(unittest.TestCase):
+    """cadre setup's candidate-seeding step through the full setup_command
+    entrypoint (#61) -- discovery when possible, the pre-#61 placeholder
+    when not; either way, never overwrites an existing candidates file and
+    never fails setup's exit code (R3/R6).
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring).
+    The module-level hermeticity guard (see setUpModule at the top of this
+    file) forces a bare, unpatched discover_candidates() call to fail closed
+    deterministically regardless of whether hermes_cli happens to be
+    importable on the machine running the suite; tests below that need
+    discovery to SUCCEED patch cadre.provision.discover_candidates directly,
+    bypassing that guard entirely.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def _candidates_path(self):
+        return Path(self.tmp) / ".cadre" / "palette-candidates.yaml"
+
+    def _fake_result(self, provider="xai-oauth", models=("grok-4.3",)):
+        from cadre.discover import DiscoveredProvider, DiscoveryResult
+
+        return DiscoveryResult(
+            providers=[DiscoveredProvider(provider=provider, models=list(models))],
+            hermes_home="/tmp/profile",
+        )
+
+    def test_existing_candidates_preserved_through_setup_even_with_fresh_discovery(self):
+        """Test scenario 1 / AE6's setup-preserves half, through the full
+        setup_command entrypoint: an operator-edited palette-candidates.yaml
+        survives a real `cadre setup` run byte-identical, even when discovery
+        has fresh (different) data ready to write. Setup's exit code is
+        unaffected (still 0)."""
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700, parents=True)
+        candidates = cadre_home / "palette-candidates.yaml"
+        candidates.write_text("OPERATOR EDIT — DO NOT DELETE", encoding="utf-8")
+
+        with patch("cadre.provision.discover_candidates", return_value=self._fake_result()):
+            code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(candidates.read_text(encoding="utf-8"), "OPERATOR EDIT — DO NOT DELETE")
+
+    def test_discovery_success_seeds_discovered_candidates_and_exits_zero(self):
+        """Discovery success through the full setup_command entrypoint: the
+        discovered pairs land in palette-candidates.yaml, exit code 0."""
+        import cadre.verify_palette as verify_palette
+
+        result = self._fake_result(provider="openrouter", models=("a/model", "b/model"))
+        with patch("cadre.provision.discover_candidates", return_value=result):
+            code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        candidates, _toolsets = verify_palette._load_candidates(self._candidates_path())
+        self.assertEqual(candidates, [("openrouter", "a/model"), ("openrouter", "b/model")])
+
+    def test_discovery_unavailable_setup_exits_zero_and_seeds_placeholder(self):
+        """Test scenario 3 / AE2's setup half + scenario 6: hermes_cli is
+        forced not-importable deterministically (the module-level guard, not
+        ambient host state) -- setup still exits 0 and seeds the placeholder
+        palette-candidates.yaml exactly as it did before #61."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        expected = palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(self._candidates_path().read_text(encoding="utf-8"), expected)
+
+    def test_create_only_write_oserror_setup_still_exits_zero(self):
+        """Test scenario 4 + 6: discovery succeeds but the create-only write
+        raises OSError -- setup still exits 0 via the placeholder fallback."""
+        with patch("cadre.provision.discover_candidates", return_value=self._fake_result()):
+            with patch("cadre.provision.write_candidates", side_effect=OSError("disk full")):
+                code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        expected = palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(self._candidates_path().read_text(encoding="utf-8"), expected)
+
+
 class TestSetupCommandCLIWiring(unittest.TestCase):
     """`cadre setup` is reachable through cli.main()'s argparse dispatch."""
 
@@ -2836,18 +3089,27 @@ class TestSetupCommandCLIWiring(unittest.TestCase):
 
 class TestVerifyPaletteCommandCLIWiring(unittest.TestCase):
     """`cadre verify-palette` is reachable through cli.main()'s argparse dispatch
-    and propagates cadre.verify_palette.main()'s exit code verbatim."""
+    and propagates cadre.verify_palette.main()'s exit code verbatim. U4 added
+    the --all flag, threaded through as the all_candidates keyword arg — the
+    default-cap behavior itself lives in verify_palette.main (test_palette.py),
+    not the CLI; this class only proves the argparse wiring."""
 
     def test_main_verify_palette_subcommand_calls_verify_palette_main(self):
         with patch("cadre.verify_palette.main", return_value=0) as fake_main:
             code = cli_main(["verify-palette"])
-        fake_main.assert_called_once_with()
+        fake_main.assert_called_once_with(all_candidates=False)
         self.assertEqual(code, 0)
 
     def test_main_verify_palette_propagates_nonzero_exit(self):
         with patch("cadre.verify_palette.main", return_value=1):
             code = cli_main(["verify-palette"])
         self.assertEqual(code, 1)
+
+    def test_main_verify_palette_all_flag_passes_all_candidates_true(self):
+        with patch("cadre.verify_palette.main", return_value=0) as fake_main:
+            code = cli_main(["verify-palette", "--all"])
+        fake_main.assert_called_once_with(all_candidates=True)
+        self.assertEqual(code, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -2884,6 +3146,44 @@ class TestInstallSkillCommandCLIWiring(unittest.TestCase):
         fake.assert_called_once_with(self.skills_dir)
         self.assertEqual(code, 1)
         self.assertIn("boom", buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# U2 (#61 palette auto-discovery): `cadre discover` — a thin dispatch onto
+# cadre.discover.main(), which owns its own printing and exit code (mirrors
+# the verify-palette dispatch above). discover.main()'s own behavior (fetch,
+# write, sanitize-on-terminal) is covered by tests/test_discover.py; this only
+# proves the argparse wiring and exit-code propagation.
+# (docs/plans/2026-07-06-001-feat-palette-auto-discovery-plan.md)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverCommandCLIWiring(unittest.TestCase):
+    """`cadre discover` is reachable through cli.main()'s argparse dispatch
+    and propagates cadre.discover.main()'s exit code verbatim."""
+
+    def test_main_discover_subcommand_calls_discover_main(self):
+        with patch("cadre.discover.main", return_value=0) as fake_main:
+            code = cli_main(["discover"])
+        fake_main.assert_called_once_with()
+        self.assertEqual(code, 0)
+
+    def test_main_discover_propagates_nonzero_exit(self):
+        with patch("cadre.discover.main", return_value=1):
+            code = cli_main(["discover"])
+        self.assertEqual(code, 1)
+
+    def test_discover_help_text_matches_repo_style(self):
+        # A subparser's `help=` text (its one-line summary) renders in the
+        # PARENT parser's --help listing, not the subcommand's own --help
+        # (which only shows usage/options) -- so assert on `cadre --help`.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli_main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = buf.getvalue()
+        self.assertIn("discover", help_text)
+        self.assertIn("palette-candidates", help_text)
 
 
 if __name__ == "__main__":
