@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from cadre.failure import FailureReason
+
 # A factory builds a live agent: given (provider, model, toolset) it returns an
 # object exposing ``.chat(prompt) -> str``. Injecting it is what makes the engine
 # testable without live calls — tests pass a fake; production uses the default.
@@ -28,6 +30,10 @@ class AgentResult:
     ok: bool
     text: str | None = None
     error: str | None = None
+    # Structured failure reason (TIMEOUT / SKIPPED / EMPTY_OUTPUT / MODEL_ERROR),
+    # set at each failure's construction site; None on every success. See
+    # __post_init__ for why the coercion below is conditional on non-None.
+    reason: FailureReason | None = None
     # Capture signals — set by the engine at collection, never by ModelClient.run.
     # elapsed_s: wall-clock seconds from daemon launch to result collection.
     # toolset: the specialist's validated config toolset ([] means no tools).
@@ -40,6 +46,16 @@ class AgentResult:
     toolset: list[str] = field(default_factory=list)
     timed_out: bool = False
     skipped: bool = False
+
+    def __post_init__(self) -> None:
+        # Normalize a raw-string reason to the FailureReason enum, mirroring
+        # FleetStatus.__post_init__ (cadre/engine.py) so identity checks (`is`)
+        # stay correct even when reason arrives as a manifest-serialized string.
+        # Unlike status (never None), reason defaults to None on every successful
+        # lane — an unconditional coerce would raise ValueError on every success,
+        # so the coercion applies ONLY when a reason is actually present.
+        if self.reason is not None:
+            self.reason = FailureReason(self.reason)
 
 
 def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any:
@@ -93,7 +109,7 @@ class ModelClient:
             # does raise (e.g. agent construction). Both land on a typed failure.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}", reason=FailureReason.MODEL_ERROR,
             )
 
         if text is None or not str(text).strip():
@@ -103,7 +119,7 @@ class ModelClient:
             # failed/non-retryable provider call rather than raising.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
-                error="empty response from model",
+                error="empty response from model", reason=FailureReason.EMPTY_OUTPUT,
             )
 
         return AgentResult(role=role, provider=provider, model=model, ok=True, text=str(text))
