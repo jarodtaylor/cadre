@@ -124,6 +124,60 @@ def load_palette(path: str | Path | None = None) -> Optional[Palette]:
 # ---------------------------------------------------------------------------
 
 
+def off_palette_model_pairs(config: FleetConfig, palette: Palette) -> list[tuple[str, str, str]]:
+    """Return ``(role_label, provider, model)`` for every model-bearing role whose
+    ``(provider, model)`` pair is absent from ``palette.models``.
+
+    Pure (no I/O). The single structured-membership source shared by
+    ``check_palette`` (which formats these into human-readable warning strings
+    below) and the #62 preflight gate (``cadre.preflight.preflight_refusal``) —
+    so the preview warnings and the run-time refusal can never disagree about
+    what counts as off-palette (KTD4). Filtering ``check_palette``'s formatted
+    warning strings for "the model ones" would require substring-matching
+    interleaved, human-readable prose — the anti-pattern this extraction
+    avoids.
+
+    Checks every specialist, plus the synthesizer (only when
+    ``config.convergence == "synthesize"`` and ``config.synthesis is not
+    None``) and the judge (only when ``config.convergence == "judge"`` and
+    ``config.judge is not None``) — the SAME convergence-mode gating
+    ``check_palette`` has always applied. Toolsets are NOT covered here — see
+    the separate toolset loop in ``check_palette``.
+
+    ``role_label`` is ``"specialist '<role>'"`` for a specialist, or the bare
+    ``"synthesizer"`` / ``"judge"`` for those roles — the same three label
+    shapes ``check_palette``'s warnings already use — so a specialist that
+    happens to be named "synthesizer" or "judge" can never be confused with
+    the real convergence role. All three return values are RAW (unsanitized):
+    membership checks use the raw values; a caller sanitizes before display
+    (mirrors the rest of this module).
+    """
+    pairs: list[tuple[str, str, str]] = []
+
+    for spec in config.specialists:
+        if (spec.provider, spec.model) not in palette.models:
+            pairs.append((f"specialist '{spec.role}'", spec.provider, spec.model))
+
+    # Synthesizer: only for synthesize-convergence fleets. Match the mode positively
+    # (== "synthesize") rather than "!= collect" — with three modes, "!= collect" also
+    # admits judge, and relying on synthesis-is-None to exclude judge is implicit. The
+    # explicit form mirrors the judge guard below. synthesis is guaranteed non-None in
+    # synthesize mode (config validation), so the second clause is belt-and-suspenders.
+    if config.convergence == "synthesize" and config.synthesis is not None:
+        syn = config.synthesis
+        if (syn.provider, syn.model) not in palette.models:
+            pairs.append(("synthesizer", syn.provider, syn.model))
+
+    # Judge: only for judge-convergence fleets. The judge is a model call, so
+    # palette-validate it like the synthesizer.
+    if config.convergence == "judge" and config.judge is not None:
+        j = config.judge
+        if (j.provider, j.model) not in palette.models:
+            pairs.append(("judge", j.provider, j.model))
+
+    return pairs
+
+
 def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
     """Return a list of warning strings for off-palette models/toolsets.
 
@@ -153,43 +207,26 @@ def check_palette(config: FleetConfig, palette: Palette) -> list[str]:
     # terminal escapes). See docs/solutions/design-patterns/
     # sanitize-trust-surface-renders-against-terminal-escapes.md. Membership checks use the
     # RAW values; only the displayed text is sanitized.
+    #
+    # Model membership: off_palette_model_pairs (above) is the single source both this
+    # formatter and the #62 preflight gate consume (KTD4) — sanitizing the WHOLE
+    # role_label reproduces the original per-kind formatting exactly, since its literal
+    # wrapper text ("specialist '...'", "synthesizer", "judge") is plain ASCII and passes
+    # sanitize() unchanged; only an embedded role could carry anything sanitize would strip.
+    for role_label, provider, model in off_palette_model_pairs(config, palette):
+        warnings.append(
+            f"{_sanitize(role_label)}: ({_sanitize(provider)}, {_sanitize(model)}) not in palette; "
+            f"{palette_hint}"
+        )
+
+    # Toolset check — unchanged; off_palette_model_pairs does not cover toolsets.
     for spec in config.specialists:
-        pair = (spec.provider, spec.model)
-        if pair not in palette.models:
-            warnings.append(
-                f"specialist '{_sanitize(spec.role)}': "
-                f"({_sanitize(spec.provider)}, {_sanitize(spec.model)}) not in palette; "
-                f"{palette_hint}"
-            )
         for tool in spec.toolset:
             if tool not in palette.toolsets:
                 warnings.append(
                     f"specialist '{_sanitize(spec.role)}': toolset '{_sanitize(tool)}' not in palette; "
                     f"verify the toolset name against ~/.cadre/palette.yaml"
                 )
-
-    # Synthesizer: only for synthesize-convergence fleets. Match the mode positively
-    # (== "synthesize") rather than "!= collect" — with three modes, "!= collect" also
-    # admits judge, and relying on synthesis-is-None to exclude judge is implicit. The
-    # explicit form mirrors the judge guard below. synthesis is guaranteed non-None in
-    # synthesize mode (config validation), so the second clause is belt-and-suspenders.
-    if config.convergence == "synthesize" and config.synthesis is not None:
-        syn = config.synthesis
-        if (syn.provider, syn.model) not in palette.models:
-            warnings.append(
-                f"synthesizer: ({_sanitize(syn.provider)}, {_sanitize(syn.model)}) not in palette; "
-                f"{palette_hint}"
-            )
-
-    # Judge: only for judge-convergence fleets. The judge is a model call, so
-    # palette-validate it like the synthesizer.
-    if config.convergence == "judge" and config.judge is not None:
-        j = config.judge
-        if (j.provider, j.model) not in palette.models:
-            warnings.append(
-                f"judge: ({_sanitize(j.provider)}, {_sanitize(j.model)}) not in palette; "
-                f"{palette_hint}"
-            )
 
     return warnings
 

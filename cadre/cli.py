@@ -29,6 +29,7 @@ from cadre.file_input import MAX_FILE_BYTES, compose
 from cadre.install_skill import install_skill
 from cadre.model_client import ModelClient
 from cadre.personas import default_pool_dir, resolve
+from cadre.preflight import preflight_refusal
 from cadre.preview_lint import render_preview_warnings
 from cadre.progress_runner import run_with_progress
 from cadre.render import render_result
@@ -97,6 +98,14 @@ def run_command(
         return ExitCode.ERROR, str(err)
     except FileNotFoundError:
         return ExitCode.ERROR, f"Fleet spec not found: {path}"
+
+    # #62 preflight-refuse (R4): refuse an off-palette model BEFORE any spend —
+    # before prepare_run_dir, before run_with_progress. A palette-absent or
+    # malformed host degrades open (see preflight_refusal), so this never
+    # blocks a fleet with nothing to check it against.
+    refusal = preflight_refusal(cfg)
+    if refusal is not None:
+        return ExitCode.PREFLIGHT_REFUSE, refusal
 
     if capture:
         try:

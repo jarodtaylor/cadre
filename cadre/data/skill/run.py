@@ -29,6 +29,7 @@ from cadre.exit_codes import ExitCode, status_to_exit
 from cadre.file_input import MAX_FILE_BYTES, compose
 from cadre.model_client import ModelClient
 from cadre.personas import default_pool_dir, resolve
+from cadre.preflight import preflight_refusal
 from cadre.preview_lint import render_preview_warnings
 from cadre.progress_runner import run_with_progress
 from cadre.text_safety import sanitize as _sanitize  # GH #23
@@ -187,6 +188,19 @@ def main(argv: list[str] | None = None) -> int:
     if composed_task is None:
         print("provide --task and/or --doc (unless --preview)")
         return ExitCode.USAGE
+
+    # #62 preflight-refuse (R4, KTD4): refuse an off-palette model BEFORE
+    # consume_approval and BEFORE run_with_progress — before any spend AND
+    # before the one-shot approval token is burned. A host-side palette fix
+    # (adding the model via `cadre verify-palette`) leaves the fleet YAML —
+    # and therefore the surface digest — unchanged, so the same approval
+    # still works on a subsequent run. A palette-absent or malformed host
+    # degrades open (see preflight_refusal), so this never blocks a fleet
+    # with nothing to check it against.
+    refusal = preflight_refusal(cfg)
+    if refusal is not None:
+        print(refusal)
+        return ExitCode.PREFLIGHT_REFUSE
 
     # Preview-bound approval gate (#5 Part 2, R1/R4): a real run executes only
     # when it presents a valid, unconsumed approval bound to THIS exact surface
