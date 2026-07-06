@@ -560,6 +560,172 @@ class TestSeedPaletteCandidates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# New in U3 (#61 palette auto-discovery): seed_or_discover_palette_candidates
+#
+# HERMETICITY (load-bearing): a provisioned host HAS hermes_cli importable;
+# this dev laptop does NOT. Every test here forces the discovery outcome
+# deterministically by patching cadre.provision.discover_candidates /
+# .write_candidates (the names imported into this module's namespace) —
+# never relying on whether hermes_cli happens to be importable on the
+# machine running the suite.
+# (docs/solutions/best-practices/force-ambient-host-state-in-tests-when-code-reads-it.md)
+# ---------------------------------------------------------------------------
+
+
+def _fake_discovery_result(provider="xai-oauth", models=("grok-4.3",), hermes_home="/tmp/profile"):
+    from cadre.discover import DiscoveredProvider, DiscoveryResult
+
+    return DiscoveryResult(
+        providers=[DiscoveredProvider(provider=provider, models=list(models))],
+        hermes_home=hermes_home,
+    )
+
+
+class TestSeedOrDiscoverPaletteCandidates(unittest.TestCase):
+    """seed_or_discover_palette_candidates: discovery when possible, the
+    pre-#61 seed_palette_candidates() placeholder when not — either way,
+    never overwrites an existing candidates file, never raises."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cadre_home = Path(self.tmp) / "cadre"
+        self.cadre_home.mkdir(mode=0o700)
+        self.candidates_path = self.cadre_home / "palette-candidates.yaml"
+
+    def test_existing_file_preserved_even_when_discovery_succeeds(self):
+        """Test scenario 1 / AE6's setup-preserves half: an operator-edited
+        file survives, byte-identical, even though discovery has fresh
+        (different) data ready to write. A "preserved" message is printed;
+        seed_or_discover_palette_candidates itself never raises (setup's
+        exit code is proven unaffected at the setup_command level in
+        test_cli.py)."""
+        self.candidates_path.write_text("OPERATOR EDIT — DO NOT DELETE", encoding="utf-8")
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", return_value=_fake_discovery_result()
+        ):
+            with contextlib.redirect_stderr(stderr_buf):
+                provision.seed_or_discover_palette_candidates(self.cadre_home)
+
+        self.assertEqual(
+            self.candidates_path.read_text(encoding="utf-8"),
+            "OPERATOR EDIT — DO NOT DELETE",
+        )
+        self.assertIn("preserved", stderr_buf.getvalue())
+
+    def test_fresh_dir_seeds_discovered_candidates(self):
+        """Test scenario 2: a clean dir + fake discovery success -> the
+        discovered pairs are written, round-tripping through
+        verify_palette._load_candidates, 0600 perms."""
+        import cadre.verify_palette as verify_palette
+
+        result = _fake_discovery_result(provider="openrouter", models=("a/model", "b/model"))
+        with unittest.mock.patch.object(provision, "discover_candidates", return_value=result):
+            provision.seed_or_discover_palette_candidates(self.cadre_home)
+
+        self.assertTrue(self.candidates_path.exists())
+        candidates, _toolsets = verify_palette._load_candidates(self.candidates_path)
+        self.assertEqual(candidates, [("openrouter", "a/model"), ("openrouter", "b/model")])
+        mode = stat.S_IMODE(self.candidates_path.stat().st_mode)
+        self.assertEqual(mode, 0o600, f"expected 0o600, got 0o{mode:03o}")
+
+    def test_discovery_unavailable_falls_back_to_placeholder_with_reason(self):
+        """Test scenario 3 / AE2's setup half: DiscoveryError -> the
+        placeholder is seeded exactly as pre-#61, plus a stderr line naming
+        why discovery was unavailable."""
+        from cadre.discover import DiscoveryError
+
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(
+            provision,
+            "discover_candidates",
+            side_effect=DiscoveryError("hermes_cli not importable on this host."),
+        ):
+            with contextlib.redirect_stderr(stderr_buf):
+                provision.seed_or_discover_palette_candidates(self.cadre_home)
+
+        expected = provision.palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(self.candidates_path.read_text(encoding="utf-8"), expected)
+        notice = stderr_buf.getvalue()
+        self.assertIn("discovery", notice.lower())
+        self.assertIn("unavailable", notice.lower())
+        self.assertIn("hermes_cli not importable on this host.", notice)
+
+    def test_discovery_error_reason_renders_sanitized(self):
+        """Test scenario 3 (sanitize half) / KTD9: DiscoveryError text is
+        untrusted display input -- a hostile byte sequence in it must not
+        reach the stderr line unsanitized."""
+        from cadre.discover import DiscoveryError
+
+        hostile = DiscoveryError("boom\x1b[31m drifted.")
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(provision, "discover_candidates", side_effect=hostile):
+            with contextlib.redirect_stderr(stderr_buf):
+                provision.seed_or_discover_palette_candidates(self.cadre_home)
+        notice = stderr_buf.getvalue()
+        self.assertNotIn("\x1b", notice)
+        self.assertIn("drifted", notice)
+
+    def test_create_only_write_oserror_falls_back_to_placeholder(self):
+        """Test scenario 4: discovery succeeds but the create-only write
+        raises OSError (not FileExistsError) -> warn + fall back to the
+        placeholder path, no partial discovered-content file left."""
+        stderr_buf = io.StringIO()
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", return_value=_fake_discovery_result()
+        ):
+            with unittest.mock.patch.object(
+                provision, "write_candidates", side_effect=OSError("disk full")
+            ):
+                with contextlib.redirect_stderr(stderr_buf):
+                    provision.seed_or_discover_palette_candidates(self.cadre_home)
+
+        expected = provision.palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(
+            self.candidates_path.read_text(encoding="utf-8"),
+            expected,
+            "no partial discovered-content file should be left after the fallback",
+        )
+        self.assertIn("disk full", stderr_buf.getvalue())
+
+    def test_never_raises_on_discovery_error(self):
+        from cadre.discover import DiscoveryError
+
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", side_effect=DiscoveryError("unavailable")
+        ):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    provision.seed_or_discover_palette_candidates(self.cadre_home)
+            except Exception as exc:  # noqa: BLE001
+                self.fail(f"seed_or_discover_palette_candidates raised: {exc!r}")
+
+    def test_never_raises_on_write_oserror(self):
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", return_value=_fake_discovery_result()
+        ):
+            with unittest.mock.patch.object(
+                provision, "write_candidates", side_effect=OSError("boom")
+            ):
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        provision.seed_or_discover_palette_candidates(self.cadre_home)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"seed_or_discover_palette_candidates raised: {exc!r}")
+
+    def test_stdout_silence(self):
+        """Never writes to stdout, on either the discovery or fallback path."""
+        stdout_buf = io.StringIO()
+        with unittest.mock.patch.object(
+            provision, "discover_candidates", return_value=_fake_discovery_result()
+        ):
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(io.StringIO()):
+                provision.seed_or_discover_palette_candidates(self.cadre_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+
+# ---------------------------------------------------------------------------
 # New in U4: verify_importable (KTD11 fail-closed guard)
 # ---------------------------------------------------------------------------
 

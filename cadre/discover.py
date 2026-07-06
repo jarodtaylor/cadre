@@ -270,7 +270,12 @@ def _default_toolsets() -> list[str]:
     return list(_FALLBACK_TOOLSETS)
 
 
-def write_candidates(result: DiscoveryResult, path: Path | str = _DEFAULT_CANDIDATES_PATH) -> None:
+def write_candidates(
+    result: DiscoveryResult,
+    path: Path | str = _DEFAULT_CANDIDATES_PATH,
+    *,
+    create_only: bool = False,
+) -> None:
     """Write ``result`` to ``path`` as the discovery-owned candidates file.
 
     Every discovered (provider, model) pair becomes one ``candidates:``
@@ -280,20 +285,34 @@ def write_candidates(result: DiscoveryResult, path: Path | str = _DEFAULT_CANDID
     about that schema, only how the file gets populated. ``toolsets:``
     carries over from a prior candidates file at ``path`` when one exists
     and parses (``_existing_toolsets``); otherwise it's seeded from the
-    packaged default (``_default_toolsets``).
+    packaged default (``_default_toolsets``) — except in ``create_only``
+    mode, where there is never a prior file to carry over from (see below).
 
-    Regenerating an existing file prints a loud ``[cadre]``-prefixed stderr
+    Default mode (``create_only=False``, the ``cadre discover`` CLI verb):
+    regenerating an existing file prints a loud ``[cadre]``-prefixed stderr
     notice BEFORE overwriting (R4): the file is discovery-owned and hand
     edits are about to be discarded. A first-time write (no prior file)
     prints nothing extra — there is nothing to warn about losing yet.
 
-    The write posture mirrors ``verify_palette.write_palette`` /
-    ``approval.write_approval`` / ``provision.write_config`` exactly:
-    owner-only parent (0o700, tightened umask), the ``_parent_is_safe``
-    guard against a foreign-owned or group/other-writable parent,
-    ``O_NOFOLLOW`` so a symlink planted at ``path`` is refused rather than
-    followed, and a 0o600 leaf written at creation (never a momentary
-    default-umask mode). No new weaker write path (R13).
+    ``create_only=True`` (``cadre setup``'s discovery-seeding step, KTD6):
+    creates with ``O_EXCL`` instead of ``O_TRUNC`` — if ``path`` already
+    exists (a regular file, or a symlink; either way ``O_EXCL`` sees a
+    dirent already there), the write raises ``FileExistsError`` instead of
+    overwriting, and prints no notice (there is nothing to warn about
+    losing when nothing is overwritten). This is a no-check-then-write
+    race: the existence check IS the ``open()`` call, same atomicity as
+    ``provision._seed_files``'s per-file guard. Callers that need to tell
+    "preserved" apart from other write failures should catch
+    ``FileExistsError`` before the broader ``OSError``.
+
+    The write posture is otherwise identical between both modes, mirroring
+    ``verify_palette.write_palette`` / ``approval.write_approval`` /
+    ``provision.write_config``: owner-only parent (0o700, tightened
+    umask), the ``_parent_is_safe`` guard against a foreign-owned or
+    group/other-writable parent, ``O_NOFOLLOW`` so a symlink planted at
+    ``path`` is refused rather than followed, and a 0o600 leaf written at
+    creation (never a momentary default-umask mode). No new weaker write
+    path (R13).
 
     The written YAML content is verbatim, UN-sanitized data (KTD9) — it
     must round-trip exactly through ``verify_palette._load_candidates``.
@@ -305,28 +324,43 @@ def write_candidates(result: DiscoveryResult, path: Path | str = _DEFAULT_CANDID
         result: A completed discovery pass (``discover_candidates()``).
         path: Destination path for the candidates YAML (parent is created
             if missing). Defaults to ``~/.cadre/palette-candidates.yaml``.
+        create_only: When True, never overwrite an existing ``path`` —
+            raise ``FileExistsError`` instead (KTD6). Defaults to False
+            (the ``cadre discover`` CLI verb's loud-overwrite posture).
 
     Raises:
         OSError: ``path``'s parent directory is a symlink, is not owned by
             the current user, or is group/other-writable
             (``_parent_is_safe``); or ``path`` itself is a symlink
-            (``O_NOFOLLOW``).
+            (``O_NOFOLLOW``) — in ``create_only`` mode a symlink at
+            ``path`` instead raises ``FileExistsError`` (below), since
+            ``O_EXCL`` sees the dirent before ``O_NOFOLLOW`` would matter.
+        FileExistsError: ``create_only`` is True and ``path`` already
+            exists (a subclass of ``OSError`` — catch it first if the
+            distinction matters to the caller).
     """
     path = Path(path).expanduser()
 
-    existed = path.exists()
-    toolsets = _existing_toolsets(path)
-    if toolsets is None:
+    if create_only:
+        # No prior file to carry a toolsets list over from: O_EXCL below
+        # raises FileExistsError before this content is ever written if one
+        # is already there, so there is nothing here to preserve or warn
+        # about losing.
         toolsets = _default_toolsets()
+    else:
+        existed = path.exists()
+        toolsets = _existing_toolsets(path)
+        if toolsets is None:
+            toolsets = _default_toolsets()
 
-    if existed:
-        print(
-            f"[cadre] {path} already exists — regenerating it now. This file "
-            "is discovery-owned: hand edits are discarded on every "
-            "`cadre discover` run. To keep a hand-curated file instead, edit "
-            "it directly and do not run `cadre discover` again.",
-            file=sys.stderr,
-        )
+        if existed:
+            print(
+                f"[cadre] {path} already exists — regenerating it now. This file "
+                "is discovery-owned: hand edits are discarded on every "
+                "`cadre discover` run. To keep a hand-curated file instead, edit "
+                "it directly and do not run `cadre discover` again.",
+                file=sys.stderr,
+            )
 
     candidates_data = [
         {"provider": provider.provider, "model": model}
@@ -378,8 +412,11 @@ def write_candidates(result: DiscoveryResult, path: Path | str = _DEFAULT_CANDID
         # O_NOFOLLOW: refuse to follow a symlink planted at path, matching
         # the repo's other hardened writers. Owner-only at creation — never
         # the momentary 0o644 a write-then-chmod would leave under a default
-        # umask.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        # umask. create_only swaps O_TRUNC for O_EXCL (KTD6): the open()
+        # itself becomes the atomic existence check, raising FileExistsError
+        # rather than truncating a file (or following a symlink) already there.
+        create_or_truncate = os.O_EXCL if create_only else os.O_TRUNC
+        flags = os.O_WRONLY | os.O_CREAT | create_or_truncate | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(path), flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)

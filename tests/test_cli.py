@@ -23,7 +23,7 @@ from cadre.exit_codes import ExitCode
 from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
-from cadre.resources import fleets_dir, skill_dir
+from cadre.resources import fleets_dir, palette_example_path, skill_dir
 
 EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
@@ -35,16 +35,35 @@ EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 # failure output is unaffected.
 _REAL_STDERR = None
 
+# Hermeticity guard (#61 palette auto-discovery): setup_command's seeding step
+# now calls provision.seed_or_discover_palette_candidates(), which attempts
+# cadre.discover.discover_candidates() -- a lazy `from hermes_cli.inventory
+# import ...` when a test doesn't inject/patch a payload. A provisioned host HAS
+# hermes_cli importable; this dev laptop does not -- without forcing this,
+# every setup_command test that doesn't specifically care about discovery would
+# take a DIFFERENT, ambient-host-dependent code path depending on which machine
+# runs the suite (mirrors tests/__init__.py's CADRE_PALETTE guard for the same
+# class of risk: docs/solutions/best-practices/force-ambient-host-state-in-tests-when-code-reads-it.md).
+# Forcing the import to fail here makes every such test exercise the SAME
+# (fallback-to-placeholder) path deterministically, regardless of host. Tests
+# that need discovery to SUCCEED patch discover_candidates directly (bypassing
+# this import entirely), so this guard does not affect them.
+_HERMES_CLI_INVENTORY_PATCH = None
+
 
 def setUpModule():
-    global _REAL_STDERR
+    global _REAL_STDERR, _HERMES_CLI_INVENTORY_PATCH
     _REAL_STDERR = sys.stderr
     sys.stderr = io.StringIO()
+    _HERMES_CLI_INVENTORY_PATCH = patch.dict(sys.modules, {"hermes_cli.inventory": None})
+    _HERMES_CLI_INVENTORY_PATCH.start()
 
 
 def tearDownModule():
     if _REAL_STDERR is not None:
         sys.stderr = _REAL_STDERR
+    if _HERMES_CLI_INVENTORY_PATCH is not None:
+        _HERMES_CLI_INVENTORY_PATCH.stop()
 
 
 def _tmp_yaml(text):
@@ -2800,6 +2819,94 @@ class TestSetupCommandIdempotent(unittest.TestCase):
         value = line.split("=", 1)[1]
         self.assertEqual(value, sys.executable)
         self.assertEqual(content, f"CADRE_HERMES_PYTHON={sys.executable}\n")
+
+
+class TestSetupCommandDiscoverySeeding(unittest.TestCase):
+    """cadre setup's candidate-seeding step through the full setup_command
+    entrypoint (#61) -- discovery when possible, the pre-#61 placeholder
+    when not; either way, never overwrites an existing candidates file and
+    never fails setup's exit code (R3/R6).
+
+    Mocks the KTD11 gate (see TestSetupCommandCleanHome's setUp docstring).
+    The module-level hermeticity guard (see setUpModule at the top of this
+    file) forces a bare, unpatched discover_candidates() call to fail closed
+    deterministically regardless of whether hermes_cli happens to be
+    importable on the machine running the suite; tests below that need
+    discovery to SUCCEED patch cadre.provision.discover_candidates directly,
+    bypassing that guard entirely.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home_patch = patch.dict(os.environ, {"HOME": self.tmp})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.verify_patch = patch("cadre.provision.verify_importable", return_value=True)
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def _candidates_path(self):
+        return Path(self.tmp) / ".cadre" / "palette-candidates.yaml"
+
+    def _fake_result(self, provider="xai-oauth", models=("grok-4.3",)):
+        from cadre.discover import DiscoveredProvider, DiscoveryResult
+
+        return DiscoveryResult(
+            providers=[DiscoveredProvider(provider=provider, models=list(models))],
+            hermes_home="/tmp/profile",
+        )
+
+    def test_existing_candidates_preserved_through_setup_even_with_fresh_discovery(self):
+        """Test scenario 1 / AE6's setup-preserves half, through the full
+        setup_command entrypoint: an operator-edited palette-candidates.yaml
+        survives a real `cadre setup` run byte-identical, even when discovery
+        has fresh (different) data ready to write. Setup's exit code is
+        unaffected (still 0)."""
+        cadre_home = Path(self.tmp) / ".cadre"
+        cadre_home.mkdir(mode=0o700, parents=True)
+        candidates = cadre_home / "palette-candidates.yaml"
+        candidates.write_text("OPERATOR EDIT — DO NOT DELETE", encoding="utf-8")
+
+        with patch("cadre.provision.discover_candidates", return_value=self._fake_result()):
+            code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(candidates.read_text(encoding="utf-8"), "OPERATOR EDIT — DO NOT DELETE")
+
+    def test_discovery_success_seeds_discovered_candidates_and_exits_zero(self):
+        """Discovery success through the full setup_command entrypoint: the
+        discovered pairs land in palette-candidates.yaml, exit code 0."""
+        import cadre.verify_palette as verify_palette
+
+        result = self._fake_result(provider="openrouter", models=("a/model", "b/model"))
+        with patch("cadre.provision.discover_candidates", return_value=result):
+            code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        candidates, _toolsets = verify_palette._load_candidates(self._candidates_path())
+        self.assertEqual(candidates, [("openrouter", "a/model"), ("openrouter", "b/model")])
+
+    def test_discovery_unavailable_setup_exits_zero_and_seeds_placeholder(self):
+        """Test scenario 3 / AE2's setup half + scenario 6: hermes_cli is
+        forced not-importable deterministically (the module-level guard, not
+        ambient host state) -- setup still exits 0 and seeds the placeholder
+        palette-candidates.yaml exactly as it did before #61."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        expected = palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(self._candidates_path().read_text(encoding="utf-8"), expected)
+
+    def test_create_only_write_oserror_setup_still_exits_zero(self):
+        """Test scenario 4 + 6: discovery succeeds but the create-only write
+        raises OSError -- setup still exits 0 via the placeholder fallback."""
+        with patch("cadre.provision.discover_candidates", return_value=self._fake_result()):
+            with patch("cadre.provision.write_candidates", side_effect=OSError("disk full")):
+                code, out = setup_command(None)
+
+        self.assertEqual(code, 0, out)
+        expected = palette_example_path().read_text(encoding="utf-8")
+        self.assertEqual(self._candidates_path().read_text(encoding="utf-8"), expected)
 
 
 class TestSetupCommandCLIWiring(unittest.TestCase):

@@ -556,6 +556,95 @@ class TestWriteCandidatesFileContentVerbatim(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# U3 (#61): write_candidates(..., create_only=True) — the setup-seeding
+# write mode. Never overwrites; skips the loud regenerate notice; otherwise
+# identical posture (umask, parent-safety, O_NOFOLLOW, 0600).
+# ---------------------------------------------------------------------------
+
+
+class TestWriteCandidatesCreateOnly(unittest.TestCase):
+    """create_only=True: O_EXCL instead of O_TRUNC (KTD6)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.out = self.tmp / "palette-candidates.yaml"
+
+    def test_fresh_path_writes_normally(self):
+        """The happy path: no prior file -> writes succeed exactly like the
+        default mode, with correct content and permissions."""
+        discover.write_candidates(_one_provider_result(provider="xai-oauth"), self.out, create_only=True)
+        loaded = yaml.safe_load(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["candidates"], [{"provider": "xai-oauth", "model": "grok-4.3"}])
+        mode = stat.S_IMODE(self.out.stat().st_mode)
+        self.assertEqual(mode, 0o600, f"expected 0o600, got 0o{mode:03o}")
+
+    def test_fresh_path_prints_no_notice(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            discover.write_candidates(_one_provider_result(), self.out, create_only=True)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_existing_file_raises_file_exists_error(self):
+        """The load-bearing behavior: create_only never overwrites."""
+        self.out.write_text("OPERATOR EDIT — DO NOT DELETE\n", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            discover.write_candidates(_one_provider_result(), self.out, create_only=True)
+        self.assertEqual(self.out.read_text(encoding="utf-8"), "OPERATOR EDIT — DO NOT DELETE\n")
+
+    def test_existing_file_prints_no_overwrite_notice(self):
+        """create_only never prints the default mode's loud regenerate notice —
+        callers own their own "preserved" messaging on FileExistsError."""
+        self.out.write_text("OPERATOR EDIT\n", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(FileExistsError):
+            discover.write_candidates(_one_provider_result(), self.out, create_only=True)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_existing_symlink_raises_file_exists_error_not_followed(self):
+        """A symlink planted at the destination is refused the same way a
+        regular file is — O_EXCL sees the dirent regardless of what it points
+        to, so the symlink target is never written through."""
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET", encoding="utf-8")
+        self.out.symlink_to(sentinel)
+
+        with self.assertRaises(FileExistsError):
+            discover.write_candidates(_one_provider_result(), self.out, create_only=True)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "OPERATOR SECRET")
+        self.assertTrue(self.out.is_symlink(), "the symlink itself must be untouched, not replaced")
+
+    def test_unsafe_parent_still_refused(self):
+        """The _parent_is_safe guard still applies in create_only mode."""
+        d = self.tmp / "loose"
+        d.mkdir(mode=0o770)
+        os.chmod(d, 0o770)  # chmod after mkdir -- mkdir's mode arg is umask-affected
+
+        out = d / "palette-candidates.yaml"
+        with self.assertRaises(OSError):
+            discover.write_candidates(_one_provider_result(), out, create_only=True)
+        self.assertFalse(out.exists(), "no file should be written into an unsafe parent")
+
+    def test_parent_dir_still_created_if_missing(self):
+        nested = self.tmp / "subdir" / "deeper"
+        out = nested / "palette-candidates.yaml"
+        discover.write_candidates(_one_provider_result(), out, create_only=True)
+        self.assertTrue(out.exists())
+
+    def test_default_mode_unaffected(self):
+        """create_only defaults to False -- the pre-existing `cadre discover`
+        overwrite posture is unchanged by adding the parameter."""
+        discover.write_candidates(_one_provider_result(provider="xai-oauth"), self.out)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            discover.write_candidates(_one_provider_result(provider="openrouter"), self.out)
+        self.assertIn("discovery-owned", err.getvalue())
+        loaded = yaml.safe_load(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["candidates"], [{"provider": "openrouter", "model": "grok-4.3"}])
+
+
+# ---------------------------------------------------------------------------
 # U2: `cadre discover` CLI entrypoint (discover.main()).
 # ---------------------------------------------------------------------------
 
