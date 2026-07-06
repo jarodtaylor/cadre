@@ -34,6 +34,7 @@ from cadre.personas import resolve
 from cadre.progress_runner import run_with_progress
 from cadre.render import render_result
 from cadre.resources import fleets_dir
+from tests.palette_fixtures import matching_palette
 from tests.test_engine import RoundAwareFakeClient, _derive_status, _iterative_config
 
 
@@ -1007,6 +1008,7 @@ class TestRunCommandReadOnlyDirFailsFast(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         # addCleanup is LIFO: rmtree registered first, chmod second → chmod runs before rmtree.
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _make_readonly(self, name: str) -> Path:
         ro_dir = self.tmp / name

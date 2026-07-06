@@ -24,6 +24,8 @@ from cadre.file_input import compose
 from cadre.model_client import AgentResult
 from cadre.personas import default_pool_dir, resolve
 from cadre.resources import fleets_dir, palette_example_path, skill_dir
+from cadre.preview_lint import load_palette
+from tests.palette_fixtures import matching_palette
 
 EXAMPLE = str(fleets_dir() / "research-swarm.example.yaml")
 
@@ -89,6 +91,51 @@ class FakeClient:
 
 
 # ---------------------------------------------------------------------------
+# matching_palette fixture self-test (#61 U6): the fixture itself must produce
+# a palette that load_palette() actually parses and that covers every model
+# the wrapped fleet(s) declare -- every other class in this module trusts
+# that without re-checking it.
+# ---------------------------------------------------------------------------
+
+
+class TestMatchingPaletteFixture(unittest.TestCase):
+    def test_written_palette_loads_and_covers_declared_pairs(self):
+        with matching_palette(EXAMPLE) as path:
+            self.assertEqual(os.environ.get("CADRE_PALETTE"), str(path))
+            palette = load_palette(str(path))
+        self.assertIsNotNone(palette, "matching_palette must write a parseable palette.yaml")
+        # EXAMPLE (research-swarm.example.yaml) is synthesize-mode: 3 specialists
+        # (social/web/analysis) + a synthesizer -- all 4 model-bearing roles.
+        cfg = FleetConfig.load(EXAMPLE)
+        expected = {(s.provider, s.model) for s in cfg.specialists}
+        expected.add((cfg.synthesis.provider, cfg.synthesis.model))
+        self.assertEqual(palette.models, expected)
+
+    def test_multiple_fleets_union_their_pairs(self):
+        collect_path = _tmp_yaml(
+            "name: other\n"
+            "convergence: collect\n"
+            "specialists:\n"
+            "  - {role: r, provider: some-provider, model: some-model, toolset: [], focus: f}\n"
+        )
+        self.addCleanup(os.unlink, collect_path)
+        with matching_palette(EXAMPLE, collect_path) as path:
+            palette = load_palette(str(path))
+        self.assertIn(("some-provider", "some-model"), palette.models)
+        cfg = FleetConfig.load(EXAMPLE)
+        for s in cfg.specialists:
+            self.assertIn((s.provider, s.model), palette.models)
+
+    def test_env_restored_on_exit(self):
+        sentinel = "/nonexistent/prior-palette.yaml"
+        with patch.dict(os.environ, {"CADRE_PALETTE": sentinel}):
+            with matching_palette(EXAMPLE) as path:
+                self.assertNotEqual(os.environ.get("CADRE_PALETTE"), sentinel)
+            self.assertEqual(os.environ.get("CADRE_PALETTE"), sentinel)
+        self.assertFalse(path.exists(), "the temp palette file must be removed on exit")
+
+
+# ---------------------------------------------------------------------------
 # Existing validate tests (unchanged)
 # ---------------------------------------------------------------------------
 
@@ -149,6 +196,9 @@ class TestValidate(unittest.TestCase):
 
 
 class TestRun(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(matching_palette(EXAMPLE))
+
     def test_run_renders_synthesis_and_provenance(self):
         client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
         code, out = run_command(EXAMPLE, "what's new?", client=client, capture=False)
@@ -198,6 +248,7 @@ class TestRunCaptureDefault(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_default_run_writes_folder_and_prints_path(self):
         run_dir = self.tmp / "myrun"
@@ -229,6 +280,7 @@ class TestRunCaptureDisabled(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_no_capture_writes_no_folder(self):
         run_dir = self.tmp / "should-not-exist"
@@ -244,6 +296,7 @@ class TestRunCaptureBadDir(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_unwritable_dir_fails_fast_before_model_calls(self):
         # Make a regular file where run_dir would need to be a directory.
@@ -274,6 +327,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_save_run_failure_does_not_discard_synthesis(self):
         run_dir = self.tmp / "writerun"
@@ -314,6 +368,7 @@ class TestRunCaptureRunDirPermissions(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_run_dir_created_0o700(self):
         run_dir = self.tmp / "permrun"
@@ -329,6 +384,7 @@ class TestRunCaptureUmaskParentDirs(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_default_path_parent_dirs_are_0o700(self):
         """When CADRE_RUN_DIR is unset, the auto-created default root is 0o700."""
@@ -459,6 +515,7 @@ class TestSkillEntryCapture(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def _run_skill(self, behavior=None, extra_argv=None):
         """Run the skill's main() with a fake client, redirected to self.tmp."""
@@ -780,6 +837,11 @@ class TestSkillApprovalGate(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.token_path = str(self.tmp / "approval")
+        # test_config_swap_refused runs a SECOND fleet (fleet_b) on this same
+        # approval path -- cover both fleets' models so either one's real run
+        # reaches its own behavior instead of a preflight refusal.
+        fleet_b = str(fleets_dir() / "code-review.example.yaml")
+        self.enterContext(matching_palette(_EXAMPLE_FLEET, fleet_b))
 
     def _env(self):
         return {"CADRE_APPROVAL_PATH": self.token_path}
@@ -962,6 +1024,9 @@ class TestSkillPrivilegedApproval(unittest.TestCase):
                 },
                 f,
             )
+        # test_nonprivileged_fleet_accepts_privileged_token_no_lockout runs
+        # _EXAMPLE_FLEET (not self.priv_fleet) -- cover both.
+        self.enterContext(matching_palette(str(self.priv_fleet), _EXAMPLE_FLEET))
 
     def _env(self):
         return {"CADRE_APPROVAL_PATH": self.token_path}
@@ -1223,6 +1288,7 @@ class TestSkillArbitraryFleet(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def test_arbitrary_fleet_runs_and_writes_manifest(self):
         """A real run with --fleet <example> and a FakeClient exits 0, writes manifest."""
@@ -1252,6 +1318,7 @@ class TestRunCommandProgressStreamSplit(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_report_clean_of_progress_and_progress_has_breadcrumbs(self):
         # Covers AE1.
@@ -1312,6 +1379,7 @@ class TestRunCommandWritesCompleteFolder(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_full_folder_written(self):
         run_dir = self.tmp / "run"
@@ -1356,6 +1424,7 @@ class TestRunCommandStreamFailureResilience(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_broken_progress_stream_still_returns_report(self):
         client = FakeClient({"synthesizer": ("ok", "THE REPORT")})
@@ -1403,6 +1472,7 @@ class TestRunCommandLaneCaptureFailure(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_save_lane_failure_warns_and_run_succeeds(self):
         from cadre.capture import save_lane as real_save_lane
@@ -1436,6 +1506,7 @@ class TestLaneArtifactWrittenBeforeBreadcrumb(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def test_artifact_exists_when_its_breadcrumb_is_emitted(self):
         run_dir = self.tmp / "r"
@@ -1463,6 +1534,7 @@ class TestSkillProgressStreamSplit(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def test_report_stdout_progress_stderr_and_full_folder(self):
         fake = FakeClient({"synthesizer": ("ok", "SKILL REPORT")})
@@ -1552,6 +1624,7 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         with os.fdopen(fd, "w") as f:
             f.write(_COLLECT_FLEET_YAML)
         self.addCleanup(os.unlink, self.fleet_path)
+        self.enterContext(matching_palette(self.fleet_path))
 
     def test_collect_success_exits_zero(self):
         """A collect run with >=1 specialist success exits 0 and renders the collect shape."""
@@ -1649,6 +1722,7 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
         with os.fdopen(fd, "w") as f:
             f.write(_JUDGE_FLEET_YAML)
         self.addCleanup(os.unlink, self.fleet_path)
+        self.enterContext(matching_palette(self.fleet_path))
 
     def test_judge_success_exits_zero(self):
         """All specialists + judge succeed → exit 0."""
@@ -1732,6 +1806,9 @@ class TestRunCommandStatusToExit(unittest.TestCase):
     """cadre run (cli.py run_command) maps FleetStatus -> the tri-state exit via
     status_to_exit (#70): SUCCESS 0 / DEGRADED 3 / FAILED 4."""
 
+    def setUp(self):
+        self.enterContext(matching_palette(EXAMPLE))
+
     def test_success_exits_0(self):
         code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("success"), capture=False)
         self.assertEqual(code, 0)
@@ -1753,6 +1830,7 @@ class TestSkillRunStatusToExit(unittest.TestCase):
         self.run_mod = _load_skill_module()
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _exit_code_for(self, status):
         run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
@@ -1788,6 +1866,7 @@ class TestExitCodeCouplingBothRunners(unittest.TestCase):
         self.run_mod = _load_skill_module()
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _skill_exit_code(self, status):
         run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
@@ -2027,6 +2106,7 @@ class TestPersonaResolutionViaCLI(unittest.TestCase):
             "  - {role: r, provider: openrouter, model: m, toolset: [], persona: rev}\n"
         )
         self.addCleanup(os.unlink, self._fleet)
+        self.enterContext(matching_palette(self._fleet))
 
     def test_validate_resolves_persona_against_pool(self):
         """validate exits 0 for a persona fleet whose persona resolves in the pool."""
@@ -2067,6 +2147,7 @@ class TestCLIDocFlag(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.enterContext(matching_palette(EXAMPLE))
 
     def _doc(self, name, text):
         p = self.tmp / name
@@ -2167,6 +2248,7 @@ class TestSkillDocFlag(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_mod = _load_skill_module()
+        self.enterContext(matching_palette(_EXAMPLE_FLEET))
 
     def _doc(self, name, text):
         p = self.tmp / name
