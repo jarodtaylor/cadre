@@ -47,3 +47,6 @@ CLAUDE.md
 # .venv/bin); never commit to a public repo.
 .codex/
 
+
+# Local compound-engineering config (per-user, not repo policy)
+.compound-engineering/
