@@ -7,7 +7,6 @@ uses for check_palette / render_preview_warnings. Runner-level wiring tests
 they exercise the full runner, not just this module.
 
 Coverage:
-- off_palette_models: thin wrapper over preview_lint.off_palette_model_pairs.
 - preflight_refusal: off-palette specialist / synthesizer / judge → refusal;
   all on-palette → None; palette absent/malformed → None (degrade-open);
   off-palette toolset only → None (tight-scope guard, models only);
@@ -26,7 +25,7 @@ from unittest.mock import patch
 
 from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from cadre.personas import resolve
-from cadre.preflight import off_palette_models, preflight_refusal
+from cadre.preflight import preflight_refusal
 from cadre.preview_lint import Palette
 
 
@@ -108,29 +107,6 @@ class _PreflightTestBase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
 
-
-# ---------------------------------------------------------------------------
-# off_palette_models — thin wrapper
-# ---------------------------------------------------------------------------
-
-
-class TestOffPaletteModelsWrapper(_PreflightTestBase):
-    """off_palette_models is a thin pass-through to preview_lint.off_palette_model_pairs."""
-
-    def test_matches_preview_lint_helper(self):
-        from cadre.preview_lint import off_palette_model_pairs
-
-        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        palette = Palette(models={("openrouter", "google/gemini-3-flash")}, toolsets={"web"})
-        self.assertEqual(off_palette_models(cfg, palette), off_palette_model_pairs(cfg, palette))
-
-    def test_all_on_palette_returns_empty_list(self):
-        cfg = _make_config()
-        palette = Palette(
-            models={("xai", "grok-4.3"), ("openrouter", "google/gemini-3-flash")},
-            toolsets={"web"},
-        )
-        self.assertEqual(off_palette_models(cfg, palette), [])
 
 
 # ---------------------------------------------------------------------------

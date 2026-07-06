@@ -42,8 +42,7 @@ class ExitCode(IntEnum):
     PREFLIGHT_REFUSE — the #62 preflight gate refused an off-palette fleet
                         before any model call. Distinct from ERROR because a
                         preflight refusal writes no manifest, so the exit code
-                        is its only structured signal. Defined here; returned
-                        starting with U4 — unused until that gate is wired in.
+                        is its only structured signal.
     """
 
     SUCCESS = 0

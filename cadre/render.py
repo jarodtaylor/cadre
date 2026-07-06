@@ -431,12 +431,8 @@ def render_result(result: FleetResult) -> str:
         elif r.ok:
             tag = "ok  "
             suffix = ""
-        elif r.timed_out:
-            tag = "TIMEOUT"
-            reason_tag = f" [{r.reason.value}]" if r.reason is not None else ""
-            suffix = f"{reason_tag}: {_sanitize(r.error)}" if r.error else reason_tag
         else:
-            tag = "FAIL"
+            tag = "TIMEOUT" if r.timed_out else "FAIL"
             reason_tag = f" [{r.reason.value}]" if r.reason is not None else ""
             suffix = f"{reason_tag}: {_sanitize(r.error)}" if r.error else reason_tag
         out.append(f"[{tag}] {_sanitize(r.role)} ({_sanitize(r.provider)}/{_sanitize(r.model)}){suffix}")

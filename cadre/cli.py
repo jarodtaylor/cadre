@@ -278,10 +278,10 @@ def setup_command(
         # contract this function already uses elsewhere) — an mkdir/write
         # failure (e.g. a read-only $HOME, a full disk) must degrade to a
         # clean error, never a raw traceback.
-        return (1, f"error provisioning ~/.cadre: {exc}")
+        return (ExitCode.ERROR, f"error provisioning ~/.cadre: {exc}")
 
     return (
-        0,
+        ExitCode.SUCCESS,
         f"Provisioned {home} from the installed cadre package.\n"
         f"Recorded Hermes Python: {recorded_python}\n"
         "Next: edit ~/.cadre/palette-candidates.yaml for your authenticated providers, "

@@ -22,21 +22,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from cadre.config import FleetConfig
-from cadre.preview_lint import Palette, load_palette, off_palette_model_pairs
+from cadre.preview_lint import load_palette, off_palette_model_pairs
 from cadre.text_safety import sanitize as _sanitize
-
-
-def off_palette_models(cfg: FleetConfig, palette: Palette) -> list[tuple[str, str, str]]:
-    """Thin wrapper over ``preview_lint.off_palette_model_pairs`` (KTD4).
-
-    Returns ``(role_label, provider, model)`` for every specialist/synthesizer/
-    judge model absent from ``palette.models`` — the identical structured
-    check ``check_palette`` uses for its warnings, so the preflight gate and
-    the preview can never drift on what counts as off-palette. Exposed here so
-    a caller that only needs the structured list (not the formatted refusal
-    string) doesn't need to import ``preview_lint`` directly.
-    """
-    return off_palette_model_pairs(cfg, palette)
 
 
 def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = None) -> str | None:
