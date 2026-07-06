@@ -318,7 +318,8 @@ class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
     def test_names_discover_when_hermes_cli_available(self):
         missing = self.tmp / "no_palette.yaml"
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        with patch("cadre.preflight._hermes_cli_available", return_value=True):
+        with patch("cadre.preflight._hermes_cli_available", return_value=True), \
+                patch("cadre.preflight._candidates_file_exists", return_value=False):
             refusal = preflight_refusal(cfg, palette_path=missing)
         self.assertIsNotNone(refusal)
         self.assertIn("cadre discover", refusal)
@@ -327,11 +328,42 @@ class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
     def test_names_manual_edit_when_hermes_cli_unavailable(self):
         missing = self.tmp / "no_palette.yaml"
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        with patch("cadre.preflight._hermes_cli_available", return_value=False):
+        with patch("cadre.preflight._hermes_cli_available", return_value=False), \
+                patch("cadre.preflight._candidates_file_exists", return_value=False):
             refusal = preflight_refusal(cfg, palette_path=missing)
         self.assertIsNotNone(refusal)
         self.assertIn("palette-candidates.yaml", refusal)
         self.assertNotIn("cadre discover", refusal)
+
+    def test_names_verify_only_when_candidates_file_exists(self):
+        """Codex adversarial fold: when a (possibly hand-curated) candidates
+        file already exists, the remedy must NOT name `cadre discover` — the
+        refusal is a recipe an agent follows verbatim, and discover would
+        regenerate the file and discard the curation. The candidates branch
+        wins REGARDLESS of hermes availability."""
+        missing = self.tmp / "no_palette.yaml"
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        for hermes in (True, False):
+            with patch("cadre.preflight._hermes_cli_available", return_value=hermes), \
+                    patch("cadre.preflight._candidates_file_exists", return_value=True):
+                refusal = preflight_refusal(cfg, palette_path=missing)
+            self.assertIsNotNone(refusal)
+            self.assertIn("cadre verify-palette", refusal)
+            self.assertIn("verified as-is", refusal)
+            self.assertNotIn("cadre discover", refusal)
+
+    def test_candidates_probe_exception_falls_back_to_no_file_remedies(self):
+        """A raising candidates probe degrades to False — the no-file remedies
+        always work (discover refuses loudly over an existing file it can't
+        read anyway; the manual path is self-evident)."""
+        missing = self.tmp / "no_palette.yaml"
+        cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
+        with patch("cadre.preflight._DEFAULT_CANDIDATES_PATH") as fake_path, \
+                patch("cadre.preflight._hermes_cli_available", return_value=False):
+            fake_path.expanduser.side_effect = RuntimeError("HOME unset")
+            refusal = preflight_refusal(cfg, palette_path=missing)
+        self.assertIsNotNone(refusal)
+        self.assertIn("palette-candidates.yaml", refusal)
 
     def test_probe_exception_falls_back_to_manual_remedy(self):
         """A raising probe (a corrupted meta-path finder, a stale
@@ -342,7 +374,8 @@ class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
         turns out to have been wrong."""
         missing = self.tmp / "no_palette.yaml"
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
-        with patch("cadre.preflight.importlib.util.find_spec", side_effect=RuntimeError("boom")):
+        with patch("cadre.preflight.importlib.util.find_spec", side_effect=RuntimeError("boom")), \
+                patch("cadre.preflight._candidates_file_exists", return_value=False):
             refusal = preflight_refusal(cfg, palette_path=missing)
         self.assertIsNotNone(refusal)
         self.assertIn("palette-candidates.yaml", refusal)
@@ -354,7 +387,8 @@ class TestPreflightRefusalAbsentPaletteRemedy(_PreflightTestBase):
         hostile = str(self.tmp / "no\x1b[2Kpalette.yaml")
         cfg = _make_config(specialist_provider="unknown", specialist_model="mystery")
         with patch.dict(os.environ, {"CADRE_PALETTE": hostile}), \
-                patch("cadre.preflight._hermes_cli_available", return_value=False):
+                patch("cadre.preflight._hermes_cli_available", return_value=False), \
+                patch("cadre.preflight._candidates_file_exists", return_value=False):
             refusal = preflight_refusal(cfg)
         self.assertIsNotNone(refusal)
         self.assertNotIn("\x1b", refusal)

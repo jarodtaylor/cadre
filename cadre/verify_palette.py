@@ -37,7 +37,9 @@ pip-installed into — the load-bearing KTD2 install target):
 2. Run `cadre verify-palette` via the Hermes venv — verifies + writes
    ~/.cadre/palette.yaml. By default this verifies a capped subset (2 per
    provider, file order) rather than every discovered candidate; pass
-   `--all` to verify everything. On success (2+ providers verified), it also
+   `--all` to verify everything. Previously-verified pairs still in the
+   candidates file are always re-verified (cap-exempt) — a re-verify never
+   silently shrinks an existing palette. On success (2+ providers verified), it also
    (re)generates ~/.cadre/fleets/palette-fleet.yaml — a tool-less smoke-test
    fleet with one lane per verified provider, ready to `cadre run` with zero
    editing (see cadre/palette_fleet.py).
@@ -368,15 +370,25 @@ def _load_candidates(candidates_path: Path) -> tuple[list[tuple[str, str]], list
 def _cap_candidates(
     candidates: list[tuple[str, str]],
     per_provider: int = _DEFAULT_PER_PROVIDER_CAP,
+    always_keep: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[tuple[str, str]]:
     """Order-preserving cap: keep the first ``per_provider`` candidates for each
     provider, in file order. Pure — no I/O, no printing, no live calls; sits
     between ``_load_candidates`` and ``verify_candidates`` (R5, KTD4). A
     provider with fewer than ``per_provider`` candidates is unaffected.
 
+    ``always_keep`` pairs are kept regardless of the cap (they do not count
+    toward it): the caller passes the EXISTING palette's pairs so a capped
+    re-verify RE-VERIFIES previously-verified pairs instead of silently
+    pruning them from the rewritten palette (the cross-model No-ship catch —
+    a routine re-verify must never strand a fleet whose pair is still valid).
+    The cap bounds only the discovery flood; a pair leaves the palette solely
+    by failing verification or by leaving the candidates file — both honest.
+
     Args:
         candidates: (provider, model) pairs, in file order.
         per_provider: Max candidates to keep per provider.
+        always_keep: Pairs kept even beyond the cap (not counted toward it).
 
     Returns:
         The capped list, preserving the input order.
@@ -384,6 +396,9 @@ def _cap_candidates(
     seen: dict[str, int] = {}
     capped: list[tuple[str, str]] = []
     for pair in candidates:
+        if pair in always_keep:
+            capped.append(pair)
+            continue
         provider = pair[0]
         count = seen.get(provider, 0)
         if count < per_provider:
@@ -426,33 +441,32 @@ def _verifying_banner(to_verify: list[tuple[str, str]], total: int) -> str:
     )
 
 
-def _pairs_dropping_from_palette(
-    palette_path: Path, to_verify: list[tuple[str, str]]
-) -> list[tuple[str, str]]:
-    """Previously-verified pairs that will VANISH if this pass rewrites the palette.
+def _existing_palette_pairs(palette_path: Path) -> set[tuple[str, str]]:
+    """The (provider, model) pairs on the EXISTING palette, or empty.
 
-    ``write_palette`` rewrites ``palette.yaml`` from this pass's records only —
-    it never merges the prior palette (verified-truth-per-cycle). So any pair
-    on the EXISTING palette that is not in ``to_verify`` silently drops, and a
-    fleet composed from it starts refusing at preflight (the cross-model
-    review's cascade catch: the #61 default cap makes this reachable on a
-    plain re-verify). Tolerant read — an absent/unreadable/malformed existing
-    palette returns [] (nothing to warn about; the malformed case is already
-    preflight's business, not this disclosure's).
+    ``write_palette`` rewrites ``palette.yaml`` from a pass's records only —
+    it never merges the prior palette (verified-truth-per-cycle). ``main``
+    therefore feeds these pairs back in two ways: as ``_cap_candidates``'s
+    ``always_keep`` set (a capped re-verify RE-VERIFIES them rather than
+    silently pruning them — the cross-model No-ship catch), and to warn about
+    the remainder (pairs no longer in the candidates file at all, which WILL
+    drop). Tolerant read — an absent/unreadable/malformed existing palette
+    returns empty (the malformed case is preflight's business, not this
+    disclosure's).
     """
     try:
         data = yaml.safe_load(palette_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return []
+        return set()
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
-        return []
+        return set()
     existing: set[tuple[str, str]] = set()
     for entry in data["models"]:
         if isinstance(entry, dict):
             provider, model = entry.get("provider"), entry.get("model")
             if isinstance(provider, str) and isinstance(model, str):
                 existing.add((provider, model))
-    return sorted(existing - set(to_verify))
+    return existing
 
 
 def main(all_candidates: bool = False) -> int:
@@ -493,20 +507,30 @@ def main(all_candidates: bool = False) -> int:
         return 1
 
     total = len(candidates)
-    to_verify = candidates if all_candidates else _cap_candidates(candidates)
+    # Cross-model No-ship catch: a re-verify must never silently prune a
+    # previously-verified pair. Existing-palette pairs still in the candidates
+    # file are ALWAYS re-verified (exempt from the cap); the cap bounds only
+    # the discovery flood.
+    existing = _existing_palette_pairs(palette_path)
+    to_verify = (
+        candidates
+        if all_candidates
+        else _cap_candidates(candidates, always_keep=frozenset(existing))
+    )
 
-    # Pre-spend disclosure #2 (cross-model cascade catch): a re-verify rewrites
-    # the palette from THIS pass only, so previously-verified pairs outside
-    # this pass drop — and fleets composed from them start refusing. Warn
-    # loudly BEFORE the first paid call so the operator can abort/widen.
-    dropping = _pairs_dropping_from_palette(palette_path, to_verify)
+    # Pre-spend disclosure #2: pairs on the existing palette that are no
+    # longer in the candidates file at all cannot be re-verified and WILL
+    # drop when the palette is rewritten. Warn loudly BEFORE the first paid
+    # call so the operator can abort and re-add them.
+    dropping = sorted(existing - set(to_verify))
     if dropping:
         shown = ", ".join(f"{_sanitize(p)}/{_sanitize(m)}" for p, m in dropping)
         print(
-            f"[cadre] warning: {len(dropping)} previously-verified pair(s) are NOT "
-            f"in this verify pass and will DROP from the palette: {shown}\n"
-            "  The palette is rewritten from this pass only. To keep them: pass "
-            "--all, or add them back to ~/.cadre/palette-candidates.yaml first. "
+            f"[cadre] warning: {len(dropping)} previously-verified pair(s) are no "
+            f"longer in the candidates file and will DROP from the palette: {shown}\n"
+            "  The palette is rewritten from this pass only. To keep them, add "
+            "them back to ~/.cadre/palette-candidates.yaml first (re-running "
+            "`cadre discover` regenerates that file from the current inventory). "
             "Fleets composed from dropped pairs will be refused at preflight.",
             file=sys.stderr,
         )

@@ -217,11 +217,16 @@ verify-palette` otherwise. This gate never fires for an off-palette *toolset*
 
 **What you may do yourself about that refusal, and what you must not:**
 
-- You MAY run `cadre discover` yourself when the refusal names it. It is free
-  and read-only — no model call, no spend, no state destroyed beyond
-  regenerating the discovery-owned candidates file — and it self-verifies:
-  if Hermes's surface is not actually available it fails closed with the
-  manual fallback. Then re-preview and continue.
+- You MAY run `cadre discover` yourself when — and only when — the refusal
+  itself names it. The refusal only names `cadre discover` when NO candidates
+  file exists yet, so there is nothing to clobber: the command is free and
+  read-only (no model call, no spend) and self-verifies — if Hermes's surface
+  is not actually available it fails closed with the manual fallback. Then
+  re-preview and continue.
+- You MUST NOT run `cadre discover` over an EXISTING
+  `~/.cadre/palette-candidates.yaml` on your own initiative — it regenerates
+  the file and discards any hand-curated edits. If a refusal or error points
+  you at an existing candidates file, surface it to the human instead.
 - You MUST NOT run `cadre verify-palette` yourself. It makes real, paid model
   calls (one per verified candidate) and sits OUTSIDE the preview-bound
   approval gate — the same reason you never treat a plain preview as approval

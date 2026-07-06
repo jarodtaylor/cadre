@@ -821,14 +821,14 @@ class TestVerifyPaletteMainCapsByDefault(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("No candidates found.", out.getvalue())
 
-    def test_dropped_pairs_warning_lists_vanishing_pairs_before_spend(self):
-        """Cross-model cascade catch: a re-verify rewrites the palette from
-        THIS pass only, so previously-verified pairs outside the pass DROP —
-        the pre-spend stderr warning must name them, before any verify call."""
+    def test_existing_palette_pair_beyond_cap_is_reverified_not_pruned(self):
+        """Codex No-ship fold: a capped re-verify must never silently prune a
+        previously-verified pair that is still in the candidates file — it is
+        RE-VERIFIED (exempt from the cap), so it survives on its own merits."""
         self._write_candidates(
             [("xai", "grok-4.3"), ("xai", "grok-4.3-mini"), ("xai", "grok-4.3-extra")]
         )
-        # Existing palette carries a pair the capped pass (first 2) won't verify.
+        # Existing palette carries a pair beyond the capped first 2.
         self.palette_path.write_text(
             yaml.safe_dump(
                 {
@@ -843,14 +843,40 @@ class TestVerifyPaletteMainCapsByDefault(unittest.TestCase):
         )
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
+            _code, _out, calls = self._run_main()
+        # The cap still applies to NEW candidates (first 2 per provider); the
+        # existing-palette pair beyond it rides on always_keep. Exact order:
+        # candidates-file order throughout.
+        self.assertEqual(
+            calls[0],
+            [("xai", "grok-4.3"), ("xai", "grok-4.3-mini"), ("xai", "grok-4.3-extra")],
+        )
+        self.assertNotIn("will DROP", err.getvalue())
+
+    def test_dropped_pairs_warning_lists_pairs_gone_from_candidates(self):
+        """Pairs on the existing palette that are NO LONGER in the candidates
+        file cannot be re-verified and WILL drop — the pre-spend stderr
+        warning must name them, before any verify call."""
+        self._write_candidates([("xai", "grok-4.3")])
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": [
+                        {"provider": "xai", "model": "grok-4.3"},
+                        {"provider": "openrouter", "model": "gone/model"},
+                    ],
+                    "toolsets": ["web"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
             _code, out, _calls = self._run_main()
         warning = err.getvalue()
         self.assertIn("will DROP from the palette", warning)
-        self.assertIn("xai/grok-4.3-extra", warning)
-        self.assertNotIn("xai/grok-4.3-mini", warning)  # not previously verified
-        # Disclosure fires before the first paid call (stdout marker ordering:
-        # the banner precedes VERIFY_CALL_MARKER, and the warning was emitted
-        # during the same pre-spend window — main() returned with it present).
+        self.assertIn("openrouter/gone/model", warning)
+        # Disclosure fires in the pre-spend window (main also reached verify).
         self.assertIn("VERIFY_CALL_MARKER", out)
 
     def test_no_dropped_pairs_warning_without_existing_palette(self):

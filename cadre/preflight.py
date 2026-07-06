@@ -32,6 +32,7 @@ import importlib.util
 from pathlib import Path
 
 from cadre.config import FleetConfig
+from cadre.discover import _DEFAULT_CANDIDATES_PATH
 from cadre.preview_lint import load_palette, off_palette_model_pairs, resolve_palette_path
 from cadre.text_safety import sanitize as _sanitize
 
@@ -60,6 +61,27 @@ def _hermes_cli_available() -> bool:
     try:
         return importlib.util.find_spec("hermes_cli") is not None
     except Exception:  # noqa: BLE001 — any probe failure -> the conservative remedy
+        return False
+
+
+def _candidates_file_exists() -> bool:
+    """Best-effort presence probe for the candidates file the remedy names.
+
+    Selects ONLY the absent-palette remedy text below — when a (possibly
+    hand-curated) ``~/.cadre/palette-candidates.yaml`` already exists, the
+    remedy must point at `cadre verify-palette` directly, never at
+    `cadre discover`, which would REGENERATE the file and discard those edits
+    (the refusal text is a recipe an agent follows verbatim, and the skill
+    authorizes self-running discover exactly when this refusal names it).
+    Same patchable-seam pattern as ``_hermes_cli_available`` — tests force it
+    both ways because a provisioned host genuinely has the file. Any probe
+    failure degrades to False (the remedies that assume no file always work:
+    discover refuses create-or-overwrite loudly, and the manual edit path is
+    self-evident once the operator looks).
+    """
+    try:
+        return _DEFAULT_CANDIDATES_PATH.expanduser().exists()
+    except Exception:  # noqa: BLE001 — any probe failure -> the no-file remedies
         return False
 
 
@@ -127,7 +149,17 @@ def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = Non
         # sanitized like every other dynamic field this gate renders (CADRE_PALETTE
         # is a caller-set env var — a trust surface, not user-typed-and-trusted).
         location = f" at {_sanitize(str(resolved))}" if resolved is not None else ""
-        if _hermes_cli_available():
+        if _candidates_file_exists():
+            # A candidates file already exists (possibly hand-curated) — the
+            # remedy must NOT name `cadre discover`, which would regenerate it
+            # and discard those edits (Codex adversarial catch: the refusal is
+            # a recipe an agent follows verbatim, and the skill authorizes it
+            # to self-run discover when named here).
+            fix = (
+                "Fix: run `cadre verify-palette` — your existing "
+                "~/.cadre/palette-candidates.yaml will be verified as-is."
+            )
+        elif _hermes_cli_available():
             fix = (
                 "Fix: run `cadre discover` to auto-discover your authenticated "
                 "providers, then `cadre verify-palette` to confirm them on this host."

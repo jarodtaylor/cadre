@@ -118,7 +118,7 @@ If that path doesn't exist or the import fails, [`docs/RUNBOOK.md`](docs/RUNBOOK
 
 Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review **personas** (reusable, richer specialist definitions that fleets like `doc-review` use in place of an inline `focus` — see [CONCEPTS.md](CONCEPTS.md)), and `palette-candidates.yaml`, recording your Hermes Python to `~/.cadre/config`. Candidate seeding **auto-discovers your authenticated providers** straight from Hermes's own inventory when its CLI package is importable in this venv (the common case here, since `cadre` runs inside it) — no editing needed. If that surface isn't importable, it falls back to a placeholder file and says why on stderr; edit that file by hand instead. Re-run `cadre discover` any time afterward to refresh the candidates from Hermes's current inventory (it overwrites the file, so hand edits don't survive a re-run).
 
-**4. Verify your palette.** By default this verifies a capped subset (2 candidates per provider, in file order) rather than everything discovered — it prints the split before the first paid call:
+**4. Verify your palette.** By default this verifies a capped subset (2 candidates per provider, in file order) rather than everything discovered — it prints the split before the first paid call. A re-verify always re-verifies your previously-verified pairs too (they're exempt from the cap), so a routine re-run never silently shrinks your palette:
 
 ```bash
 "$PYBIN" -m cadre.cli verify-palette   # add --all to verify every discovered candidate instead
