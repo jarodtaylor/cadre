@@ -2895,5 +2895,43 @@ class TestInstallSkillCommandCLIWiring(unittest.TestCase):
         self.assertIn("boom", buf.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# U2 (#61 palette auto-discovery): `cadre discover` — a thin dispatch onto
+# cadre.discover.main(), which owns its own printing and exit code (mirrors
+# the verify-palette dispatch above). discover.main()'s own behavior (fetch,
+# write, sanitize-on-terminal) is covered by tests/test_discover.py; this only
+# proves the argparse wiring and exit-code propagation.
+# (docs/plans/2026-07-06-001-feat-palette-auto-discovery-plan.md)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverCommandCLIWiring(unittest.TestCase):
+    """`cadre discover` is reachable through cli.main()'s argparse dispatch
+    and propagates cadre.discover.main()'s exit code verbatim."""
+
+    def test_main_discover_subcommand_calls_discover_main(self):
+        with patch("cadre.discover.main", return_value=0) as fake_main:
+            code = cli_main(["discover"])
+        fake_main.assert_called_once_with()
+        self.assertEqual(code, 0)
+
+    def test_main_discover_propagates_nonzero_exit(self):
+        with patch("cadre.discover.main", return_value=1):
+            code = cli_main(["discover"])
+        self.assertEqual(code, 1)
+
+    def test_discover_help_text_matches_repo_style(self):
+        # A subparser's `help=` text (its one-line summary) renders in the
+        # PARENT parser's --help listing, not the subcommand's own --help
+        # (which only shows usage/options) -- so assert on `cadre --help`.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli_main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = buf.getvalue()
+        self.assertIn("discover", help_text)
+        self.assertIn("palette-candidates", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

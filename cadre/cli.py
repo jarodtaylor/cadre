@@ -8,6 +8,7 @@ Usage:
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..."
     python -m cadre.cli run cadre/data/fleets/research-swarm.example.yaml --task "..." --no-capture
     python -m cadre.cli setup
+    python -m cadre.cli discover
     python -m cadre.cli verify-palette
     HERMES_SKILLS_DIR=<dir> python -m cadre.cli install-skill
 """
@@ -21,7 +22,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from cadre import provision, verify_palette
+from cadre import discover, provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.exit_codes import ExitCode, status_to_exit
@@ -330,6 +331,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    sub.add_parser(
+        "discover",
+        help=(
+            "Discover authenticated Hermes providers and write "
+            "~/.cadre/palette-candidates.yaml (host-only; no model calls)"
+        ),
+    )
+
     p_verify_palette = sub.add_parser(
         "verify-palette",
         help=(
@@ -366,6 +375,11 @@ def main(argv: list[str] | None = None) -> int:
         code, out = validate_command(args.spec)
     elif args.cmd == "setup":
         code, out = setup_command(args.venv_python)
+    elif args.cmd == "discover":
+        # discover.main() owns its own printing (mirrors verify-palette's dispatch
+        # just below) -- propagate its exit code as-is rather than forcing it
+        # through the (code, out); print(out) shape.
+        return discover.main()
     elif args.cmd == "verify-palette":
         # verify_palette.main() streams its own live per-candidate progress lines
         # directly to stdout as it runs (unlike validate/setup's single end-of-call
