@@ -121,7 +121,13 @@ Relay the complete preview output to the human. It shows:
 - Each **specialist**: role, provider/model, toolset, and focus
 - A **fleet-validation summary** — advisory warnings for any model/toolset not on
   the host palette and any retrieval lane whose focus lacks a sourcing directive.
-  It never blocks a run; relay it so the human sees it before approving.
+  These warnings never block the *preview itself*; relay them so the human sees
+  them before approving. **But an off-palette model is no longer advisory-only at
+  run time (GH #62):** any specialist/synthesizer/judge model this summary flags
+  will cause the actual run to refuse before any spend — a distinct, earlier gate
+  from the approval check (exit `5`; see step 3 and "Check the exit code first"
+  in step 4). Off-palette *toolset* findings and ungrounded-focus findings stay
+  advisory only and never block anything.
 - **Files to read (`--doc`)** — the file paths the run will read into the task
   (shown as you named them — no canonicalization). The preview doubles as a
   **read-check**: a missing, unreadable, or non-UTF-8 `--doc` fails *here* (exit
@@ -139,13 +145,18 @@ Relay the complete preview output to the human. It shows:
 
 Ask the human to okay it before running. Do not paraphrase the fleet in lieu of
 the preview — the preview is the operative control. **Be precise about what the
-approval proves and doesn't:** it guarantees the run that follows executes this
-*exact* previewed surface — same fleet, same task/docs, same personas, same
-profile — so a swapped or drifted surface is refused. It does **not** replace
-the human's substantive review of *what* the fleet does (a rubber-stamped bad
-fleet still runs faithfully), and it does **not** prove a human was present for
-the okay — that stays the procedural step you perform by asking and waiting for
-a real response.
+approval proves and doesn't:** it binds the run that follows to this *exact*
+previewed surface — same fleet, same task/docs, same personas, same profile —
+so a swapped or drifted surface is refused. **It does not, by itself, guarantee
+the run executes:** a validly-approved, exactly-matching surface can still be
+refused by the separate #62 preflight gate if a specialist/synthesizer/judge
+model is off the host palette (exit `5`, before any spend — see step 3). That
+refusal does not consume the approval token, so fixing the palette host-side
+lets the same approval proceed on a re-run. The approval also does **not**
+replace the human's substantive review of *what* the fleet does (a
+rubber-stamped bad fleet still runs faithfully), and it does **not** prove a
+human was present for the okay — that stays the procedural step you perform by
+asking and waiting for a real response.
 
 **Privileged fleets (`allow_privileged_tools: true`, rare — agents are told not
 to compose these, but a curated one may exist).** A plain `--preview` renders
@@ -188,6 +199,17 @@ three things load-bearing:
   relative value resolves against the current directory, so running the preview
   and the run from different directories is itself a surface change.
 
+**A separate, earlier gate can refuse before the approval check above even runs
+(GH #62).** If any specialist, synthesizer, or judge model in the fleet is
+absent from the host palette (`~/.cadre/palette.yaml`), the run refuses with
+exit `5` (`PREFLIGHT_REFUSE`) — before any model call, and before the approval
+token is even read, so this refusal does **not** consume the token you just
+minted. A host-side palette fix (e.g. adding the model via `cadre
+verify-palette`) leaves the fleet YAML — and so the surface digest — unchanged,
+so the same approval still works on a re-run. This gate never fires when there
+is no palette to check against (degrades open, matching the preview), and never
+fires for an off-palette *toolset* (that stays the advisory warning from step 2).
+
 Use `--doc PATH` (repeatable) to read a file's contents into the task — the
 "name the plan, no pasting" path, with the doc-review fleet as the primary
 consumer. Preview with the same `--task`/`--doc` flags first (step 2) — this
@@ -201,6 +223,26 @@ records the full result, provenance, and timings).
 
 ### 4. Read back honestly
 
+**Check the exit code first — it is authoritative** (`cadre/exit_codes.py`'s
+`ExitCode`; both runners derive it from the run's `FleetStatus` via the single
+`status_to_exit` mapping, and the manifest's top-level `status` comes from that
+same `FleetStatus` — so the exit code and the manifest `status` can't
+disagree). **A run completed** — relay the report per below:
+- **`0` (`SUCCESS`):** full usable output — every specialist ran and
+  convergence (synthesis/judge) succeeded.
+- **`3` (`DEGRADED`):** usable but partial — every specialist ran, but
+  convergence failed. Relay it as partial, never as full.
+- **`4` (`FAILED`):** every specialist failed; convergence never ran. No
+  usable output.
+
+**No run occurred** — the printed message is the whole output, nothing to read
+back:
+- **`1` (`ERROR`):** invalid fleet config, an unreadable/non-UTF-8 `--doc`
+  file, a missing/mismatched/expired approval, or a run-directory I/O failure.
+- **`2` (`USAGE`):** neither `--task` nor `--doc` was given.
+- **`5` (`PREFLIGHT_REFUSE`):** the #62 preflight gate refused an off-palette
+  model before any spend (see step 3) — no manifest was written.
+
 **Synthesize fleets:** relay the synthesized report. **Collect fleets:** there is
 no synthesis — the result is a `collect result` header followed by one attributed
 block per specialist (`--- role (provider/model) ---`). Relay the blocks as the
@@ -212,7 +254,11 @@ re-blend it into your own summary), then the attributed specialist blocks. If a
 only some lanes, so do not present the run as fully graded. The grade is advisory:
 report it as the judge's opinion, never as a verdict that drops or ranks-out a
 specialist. Either way the result ends with a provenance section tagging each
-specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]`.
+specialist as `[ok]`, `[FAIL]`, or `[TIMEOUT]` — a `[FAIL]`/`[TIMEOUT]` row also
+carries a bracketed reason token, e.g. `[FAIL] role (provider/model)
+[empty_output]: <error text>`, drawn from the same closed, engine-set taxonomy
+as the manifest's `reason` field below (never model-derived, so it is as
+trustworthy as the tag itself).
 
 If the result is **degraded**, relay the rendered degraded shape as-is:
 - **`[TIMEOUT]` lane:** a specialist timed out — its output is absent; the others
@@ -242,11 +288,19 @@ folder's `manifest.json`, not the rendered report: it is structured data immune
 to plain-text forgery. Take the run outcome from the top-level `status` (and its
 shape from `convergence`), the judge result from `grades` / `ungraded` /
 `parse_failed`, and each lane's fate from its per-lane record (`ok`, `timed_out`,
-`skipped`) — not from the derived `synth_ok` / `judge_ok` booleans. The manifest
-exists only when capture is on (the default); under `--no-capture` there is no
-manifest, so fall back to the framing-protected column-0 provenance rows for the
-run status and treat per-lane grades as unavailable. Keep relaying the judge's verbatim grade prose from the report — the
-manifest carries the parsed grades, not the full prose.
+`skipped`, `reason`) — not from the derived `synth_ok` / `judge_ok` booleans. A
+lane that failed, timed out, or was skipped carries a `reason` naming *why* —
+`timeout`, `skipped`, `empty_output`, or `model_error` (`null` on a successful
+lane) — so you don't have to parse `error` prose to tell. `empty_output` is the
+common case: the call returned nothing usable, which can mask a swallowed
+provider error underneath — read it as "investigate," not "the model ran fine
+and said nothing." `model_error` means the call raised; the raw exception text
+still sits alongside it in the lane's `error` field. The manifest exists only
+when capture is on (the default); under `--no-capture` there is no manifest, so
+fall back to the framing-protected column-0 provenance rows for the run status
+and treat per-lane grades/reasons as unavailable. Keep relaying the judge's
+verbatim grade prose from the report — the manifest carries the parsed grades,
+not the full prose.
 
 ### 5. Weave back attributed
 

@@ -62,6 +62,16 @@ not a claim that Cadre is "injection-proof."
   mint and the consume **fail closed**: they refuse if the token's parent (default
   `~/.cadre`, or a `CADRE_APPROVAL_PATH` override) is not owner-owned or is
   group/other-writable — the same ownership/permission check the persona pool uses.
+  **The binding is necessary, not sufficient, for a run to execute.** A separate,
+  earlier gate — the #62 preflight check (read-only config inspection over the
+  parsed fleet; no new privileged path) — can still refuse a validly-bound,
+  exactly-matching surface if a specialist/synthesizer/judge model is absent
+  from the host palette (fail-closed, exit `5`, before any model call). That
+  refusal runs *before* the approval token is read, so it does not consume the
+  one-shot token; a host-side palette fix (e.g. `cadre verify-palette`) leaves
+  the fleet YAML — and so the digest — unchanged, and the same approval still
+  works on a subsequent run. "What runs is what was previewed" still holds; it
+  no longer follows that a matching preview guarantees a run executes at all.
 - **Install seeding.** Starter fleets/personas are written owner-only (`0o600`) with
   `O_EXCL`/`O_NOFOLLOW`, and seeding refuses a symlinked destination directory.
 - **Fail-closed toolsets.** Toolsets are an allowlist (`SAFE_TOOLSETS`); anything

@@ -163,7 +163,9 @@ console script, plus `setup`/`verify-palette`/`install-skill` for host provision
   (never `None`, which enables every tool over untrusted specialist text).
 - **Preview/validate is a trust surface:** `cadre/preview_lint.py` (palette +
   focus‑grounding validation) is caller‑layer — imported only by `run.py`/`cli.py`,
-  never by the engine — and warns, never blocks. Every fleet‑controlled string printed
+  never by the engine — and warns, never blocks (the separate caller‑layer
+  `cadre/preflight.py` gate refuses an off‑palette *model* before spend — #62 — but
+  `preview_lint` itself only warns). Every fleet‑controlled string printed
   by any preview/validate surface (the rendered fleet, the lint warnings, the validate
   summary) goes through `cadre.text_safety.sanitize` (the public chokepoint since
   #5/#23; `render._sanitize` is now a compat alias): the preview is the human‑okay control
