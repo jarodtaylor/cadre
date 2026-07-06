@@ -234,14 +234,14 @@ def setup_command(
     # runs — see the docstring's step 2. No side effect on a hostile value.
     if any(ch in recorded_python for ch in ("\n", "\r", "\x00")):
         return (
-            1,
+            ExitCode.ERROR,
             "error: invalid interpreter path (contains a newline or control "
             "character) — refusing to verify or record it. Nothing was written.",
         )
 
     if not provision.verify_importable(recorded_python):
         return (
-            1,
+            ExitCode.ERROR,
             f"error: `import cadre` does not resolve under {recorded_python}\n"
             "Install cadre into that interpreter first, e.g.:\n"
             f'  {recorded_python} -m pip install --force-reinstall --no-deps '
@@ -254,13 +254,13 @@ def setup_command(
     cadre_home = Path("~/.cadre").expanduser()
     if cadre_home.is_symlink():
         return (
-            1,
+            ExitCode.ERROR,
             f"error: {cadre_home} is a symlink — refusing (possible tampering); "
             "remove it and re-run. Nothing was written.",
         )
     if cadre_home.exists() and (cadre_home.stat().st_mode & 0o022):
         return (
-            1,
+            ExitCode.ERROR,
             f"error: {cadre_home} is group/other-writable — run `chmod 700 "
             f"{cadre_home}` and re-run. Nothing was written.",
         )

@@ -6,10 +6,16 @@ A single ``FailureReason(str, Enum)`` spans two producers:
   ``AgentResult``: a preflight refusal happens before any lane is constructed, so
   this member names a pre-run refusal, not a lane outcome.
 - ``TIMEOUT`` / ``SKIPPED`` / ``EMPTY_OUTPUT`` / ``MODEL_ERROR`` — the four ways a
-  runtime lane (a specialist, synthesizer, or judge call) can fail. Each is set at
-  its failure's construction site, never inferred later by parsing ``notes`` /
-  ``error`` text — see
+  runtime model call can fail. Each is set at its failure's construction site,
+  never inferred later by parsing ``notes`` / ``error`` text — see
   docs/solutions/design-patterns/populate-derived-field-eagerly-not-only-in-resolver.md.
+  These are stamped on every failing model call's ``AgentResult`` (a specialist,
+  the synthesizer, or the judge), but only the **per-lane (specialist)** reasons
+  are surfaced downstream: the manifest ``lanes[]`` / ``rounds[][]`` records and
+  the terminal render read ``result.specialists``. A synthesizer/judge failure is
+  reported at the run level via ``synth_ok`` / ``judge_ok`` + a ``notes`` entry —
+  its stamped reason is not surfaced (a run-level convergence reason is a possible
+  #70 follow-up, not built here).
 
 This module is a leaf: it imports nothing from ``cadre``, so ``model_client``,
 ``engine``, ``preflight``, ``capture``, and ``render`` can all import *from* it

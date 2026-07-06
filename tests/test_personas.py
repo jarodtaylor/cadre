@@ -657,6 +657,29 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import preflight (engine-purity constraint)",
         )
 
+    def test_engine_does_not_import_exit_codes(self):
+        """cadre/engine.py and model_client.py must NOT import exit_codes (U3, #70).
+
+        exit_codes.py is caller-layer (it maps a run's FleetStatus to a process
+        exit code for the two runners) — it may import FleetStatus FROM engine,
+        but the engine must never depend on exit codes. Guards the reverse
+        direction only, mirroring preflight above; the caller-reads-data
+        direction (exit_codes -> engine.FleetStatus) is intended.
+        """
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        self.assertNotIn(
+            "cadre.exit_codes",
+            _static_imports(e_mod),
+            "engine.py must not import exit_codes (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.exit_codes",
+            _static_imports(mc_mod),
+            "model_client.py must not import exit_codes (engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).
