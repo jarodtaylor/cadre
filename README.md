@@ -126,7 +126,7 @@ Scaffolds `~/.cadre` owner-only and seeds the seven starter fleets, the review *
 
 This makes a real call per candidate and writes the ones that resolve to `~/.cadre/palette.yaml` — your verified menu. (The seeded candidates are examples; a pair that isn't authenticated on your host is skipped, which is normal.)
 
-**5. Edit a fleet, validate it, then run.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml`, then `validate` before you run. Validate checks the YAML and flags any model that isn't in your palette, so a typo or a stray tab fails *there* — for free — instead of mid-run after a call's already been spent:
+**5. Edit a fleet, validate it, then run.** The starter fleets seed with **placeholder** model strings — open one and set the strings from *your* `~/.cadre/palette.yaml`, then `validate` before you run. Validate **fails** on malformed YAML (a stray tab, a missing field) and **flags** any model that isn't in your palette — so problems surface *before* you run, not mid-run after a call's been spent:
 
 ```bash
 # edit ~/.cadre/fleets/research-swarm.yaml → set each lane's provider/model to a verified pair
