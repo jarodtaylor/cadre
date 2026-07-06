@@ -24,6 +24,7 @@ from pathlib import Path
 from cadre import provision, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
+from cadre.exit_codes import ExitCode, status_to_exit
 from cadre.file_input import MAX_FILE_BYTES, compose
 from cadre.install_skill import install_skill
 from cadre.model_client import ModelClient
@@ -39,9 +40,9 @@ def validate_command(path: str) -> tuple[int, str]:
         cfg = FleetConfig.load(path)
         resolve(cfg, default_pool_dir())
     except ConfigError as err:
-        return 1, str(err)
+        return ExitCode.ERROR, str(err)
     except FileNotFoundError:
-        return 1, f"Fleet spec not found: {path}"
+        return ExitCode.ERROR, f"Fleet spec not found: {path}"
     # Fleet-controlled fields are _sanitize()d — validate output is a terminal surface,
     # same as the preview, so a tampered fleet must not inject escapes into it.
     lines = [f"OK: {_sanitize(cfg.name)}"]
@@ -64,7 +65,7 @@ def validate_command(path: str) -> tuple[int, str]:
     # unreadable palette yields a "validation skipped" note; validation
     # never causes a non-zero exit code from validate_command.
     lines.append(render_preview_warnings(cfg))
-    return 0, "\n".join(lines)
+    return ExitCode.SUCCESS, "\n".join(lines)
 
 
 def run_command(
@@ -93,9 +94,9 @@ def run_command(
         cfg = FleetConfig.load(path)
         resolve(cfg, default_pool_dir())
     except ConfigError as err:
-        return 1, str(err)
+        return ExitCode.ERROR, str(err)
     except FileNotFoundError:
-        return 1, f"Fleet spec not found: {path}"
+        return ExitCode.ERROR, f"Fleet spec not found: {path}"
 
     if capture:
         try:
@@ -105,7 +106,7 @@ def run_command(
             # raised before reassigning it); the OSError carries the attempted
             # path, so don't interpolate run_dir and risk printing "None".
             return (
-                1,
+                ExitCode.ERROR,
                 f"Cannot create run directory: {exc}\n"
                 "Use --no-capture to bypass run capture.",
             )
@@ -118,7 +119,7 @@ def run_command(
         progress_stream=progress_stream,
     )
     output = render_result(result)
-    exit_code = 0 if result.ok else 1
+    exit_code = status_to_exit(result.status)
 
     if capture:
         try:
@@ -360,18 +361,18 @@ def main(argv: list[str] | None = None) -> int:
         # error (not argparse's required-flag error, since --task is now optional).
         if args.task is None and not args.doc:
             print("Provide --task and/or --doc.")
-            return 2
+            return ExitCode.USAGE
         # Compose any --doc files into the task at the caller layer — the engine
         # stays path-free. compose raises ConfigError on an unreadable --doc, caught
-        # here so it exits cleanly (exit 1) rather than tracebacking (KTD5). The
-        # composed string is passed to run_command, whose signature is unchanged.
+        # here so it exits cleanly (ExitCode.ERROR) rather than tracebacking (KTD5).
+        # The composed string is passed to run_command, whose signature is unchanged.
         try:
             # cli.py has no --preview surface to disclose truncation, so the warn
             # below is the operator's only signal; the doc-paths list is unused here.
             task, _doc_paths, truncated = compose(args.task, args.doc)
         except ConfigError as err:
             print(str(err))
-            return 1
+            return ExitCode.ERROR
         # Surface oversize truncation on the run path too (run has no preview gate) —
         # the in-block note is model-facing, so without this the operator never knows
         # the review ran over a partial file.

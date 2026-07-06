@@ -147,17 +147,21 @@ class TestRun(unittest.TestCase):
         self.assertIn("PARTIAL", out)
 
     def test_run_total_failure_exits_nonzero(self):
+        # All specialists failed -> FleetStatus.FAILED -> ExitCode.FAILED (4), not
+        # the old binary 1 (#70 tri-state exit).
         client = FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
         code, out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertIn("partial result (no synthesis)", out)
 
     def test_run_synthesizer_failure_still_shows_specialist_text(self):
         # specialists succeed (default), synthesizer fails -> surviving lane output
-        # must still reach the user, not just provenance rows.
+        # must still reach the user, not just provenance rows. Specialists ok +
+        # convergence failed -> FleetStatus.DEGRADED -> ExitCode.DEGRADED (3), not
+        # the old binary 1 (#70 tri-state exit).
         client = FakeClient({"synthesizer": ("fail", "rate limited")})
         code, out = run_command(EXAMPLE, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 3)
         self.assertIn("social-output", out)
         self.assertIn("web-output", out)
         self.assertIn("synthesizer failed", out)
@@ -270,7 +274,7 @@ class TestRunCaptureSaveRunFailure(unittest.TestCase):
         with patch("cadre.cli.save_run", side_effect=OSError("disk full")):
             code, out = run_command(EXAMPLE, "task", client=client, run_dir=run_dir)
 
-        self.assertEqual(code, 1)  # run failed → non-zero even if save_run also failed
+        self.assertEqual(code, 4)  # all-failed → ExitCode.FAILED even if save_run also failed
 
     def test_run_folder_line_uses_save_run_return(self):
         """Gate (#4): cli prints the path save_run RETURNS (the possibly-renamed
@@ -1519,7 +1523,7 @@ class TestValidateCollectFleet(unittest.TestCase):
 
 
 class TestRunCommandCollectExitCodes(unittest.TestCase):
-    """Collect run: >=1 success → exit 0; all-failed → exit 1."""
+    """Collect run: >=1 success → exit 0; all-failed → exit 4 (FleetStatus.FAILED, #70)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1542,10 +1546,10 @@ class TestRunCommandCollectExitCodes(unittest.TestCase):
         self.assertNotIn("synthesis was not attempted", out)
 
     def test_collect_all_failed_exits_nonzero(self):
-        """A collect run with all specialists failed exits 1."""
+        """A collect run with all specialists failed exits 4 (all-failed, #70)."""
         client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
         code, _out = run_command(self.fleet_path, "find tools", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +1619,8 @@ class TestValidateJudgeFleet(unittest.TestCase):
 
 
 class TestRunCommandJudgeExitCodes(unittest.TestCase):
-    """Judge run exit codes: success→0; partial coverage→0; judge-fail→1; all-fail→1."""
+    """Judge run exit codes (#70 tri-state): success→0; partial coverage→0;
+    judge-fail→3 (DEGRADED, specialists survived); all-fail→4 (FAILED)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1632,16 +1637,18 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_judge_failure_exits_nonzero(self):
-        """Judge ran but returned an error → exit 1."""
+        """Judge ran but returned an error, specialists survived → FleetStatus.DEGRADED
+        → exit 3 (#70 tri-state, not the old binary 1)."""
         client = FakeClient({"judge": ("fail", "rate limited")})
         code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 3)
 
     def test_all_specialists_failed_exits_nonzero(self):
-        """All specialists failed (judge never ran) → exit 1."""
+        """All specialists failed (judge never ran) → FleetStatus.FAILED → exit 4
+        (#70 tri-state, not the old binary 1)."""
         client = FakeClient({r: ("fail", "down") for r in ("web", "social")})
         code, _out = run_command(self.fleet_path, "task", client=client, capture=False)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
 
     def test_low_grade_still_exits_zero(self):
         """Judge call succeeded (ok=True) with a low/critical grade text → exit 0.
@@ -1674,6 +1681,114 @@ class TestRunCommandJudgeExitCodes(unittest.TestCase):
             any(u["role"] == "social" for u in ungraded),
             f"manifest must list 'social' as ungraded; got: {ungraded}",
         )
+
+
+# ---------------------------------------------------------------------------
+# U3 (#70): centralized tri-state exit codes — both runners
+# ---------------------------------------------------------------------------
+
+
+def _status_fake_client(status):
+    """A FakeClient behavior dict driving EXAMPLE (research-swarm.example.yaml —
+    synthesize mode, specialists social/web/analysis + a synthesizer) to the
+    named FleetStatus:
+
+    - 'success'  — every call ok -> FleetStatus.SUCCESS.
+    - 'degraded' — specialists ok (default), synthesizer fails -> convergence
+                   failed but specialists survived -> FleetStatus.DEGRADED.
+    - 'failed'   — every specialist fails -> convergence never runs ->
+                   FleetStatus.FAILED.
+    """
+    if status == "success":
+        return FakeClient({"synthesizer": ("ok", "SYNTH OK")})
+    if status == "degraded":
+        return FakeClient({"synthesizer": ("fail", "rate limited")})
+    if status == "failed":
+        return FakeClient({r: ("fail", "down") for r in ("social", "web", "analysis")})
+    raise ValueError(f"unknown status: {status!r}")
+
+
+class TestRunCommandStatusToExit(unittest.TestCase):
+    """cadre run (cli.py run_command) maps FleetStatus -> the tri-state exit via
+    status_to_exit (#70): SUCCESS 0 / DEGRADED 3 / FAILED 4."""
+
+    def test_success_exits_0(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("success"), capture=False)
+        self.assertEqual(code, 0)
+
+    def test_degraded_exits_3(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("degraded"), capture=False)
+        self.assertEqual(code, 3)
+
+    def test_failed_exits_4(self):
+        code, _out = run_command(EXAMPLE, "task", client=_status_fake_client("failed"), capture=False)
+        self.assertEqual(code, 4)
+
+
+class TestSkillRunStatusToExit(unittest.TestCase):
+    """run.py's real-run path maps FleetStatus -> the SAME tri-state exit (#70),
+    via a valid preview-bound approval + a status-producing FakeClient."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _exit_code_for(self, status):
+        run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=_status_fake_client(status)):
+                # Mint the preview-bound approval for this exact surface first.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return self.run_mod.main(run_argv)
+
+    def test_success_exits_0(self):
+        self.assertEqual(self._exit_code_for("success"), 0)
+
+    def test_degraded_exits_3(self):
+        self.assertEqual(self._exit_code_for("degraded"), 3)
+
+    def test_failed_exits_4(self):
+        self.assertEqual(self._exit_code_for("failed"), 4)
+
+
+class TestExitCodeCouplingBothRunners(unittest.TestCase):
+    """KTD3's coupling requirement, made behavioral: cadre run (cli.py) and the
+    agent runner (run.py) must return the IDENTICAL exit code for the IDENTICAL
+    FleetStatus. Both runners route the run outcome through the one
+    status_to_exit(result.status) call — if either drifted back to its own
+    inline integer (or the two mappings diverged), this test catches the
+    mismatch directly, rather than relying on each runner's own tests
+    coincidentally agreeing."""
+
+    def setUp(self):
+        self.run_mod = _load_skill_module()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _skill_exit_code(self, status):
+        run_argv = ["--fleet", EXAMPLE, "--task", "task", "--no-capture"]
+        env = {"CADRE_APPROVAL_PATH": str(self.tmp / "approval")}
+        with patch.dict(os.environ, env):
+            with patch.object(self.run_mod, "ModelClient", return_value=_status_fake_client(status)):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.run_mod.main(run_argv + ["--preview"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return self.run_mod.main(run_argv)
+
+    def test_both_runners_return_the_same_code_for_every_status(self):
+        for status, expected in (("success", 0), ("degraded", 3), ("failed", 4)):
+            with self.subTest(status=status):
+                cli_code, _out = run_command(
+                    EXAMPLE, "task", client=_status_fake_client(status), capture=False
+                )
+                skill_code = self._skill_exit_code(status)
+                self.assertEqual(cli_code, expected, f"cli.py run_command diverged on {status}")
+                self.assertEqual(skill_code, expected, f"run.py main() diverged on {status}")
+                self.assertEqual(cli_code, skill_code, f"runners disagree with each other on {status}")
 
 
 class _PromptCapturingClient(FakeClient):
