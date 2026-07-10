@@ -20,8 +20,8 @@ Two rule shapes::
       - match: <model or family pattern, fnmatch glob>
         allowed_providers: [<provider-slug>]
 
-Tri-state load (KTD2): the file is ABSENT on a fresh or opted-out host —
-``load_policy`` returns ``Policy.permissive()`` (blocks nothing), so existing
+Tri-state load (KTD2): the DEFAULT file is ABSENT on a fresh or opted-out host
+— ``load_policy`` returns ``Policy.permissive()`` (blocks nothing), so existing
 users see zero behavior change until they opt in. The file is PRESENT and
 valid — ``load_policy`` returns the parsed ``Policy``. The file is PRESENT
 but cannot be trusted (a symlink, not a regular file (a directory, FIFO, or
@@ -31,6 +31,17 @@ raises ``PolicyError``. Every chokepoint
 that calls it must treat that raise as FAIL CLOSED (refuse the operation
 loudly), never as "no policy" — a broken safety file must never silently
 mean no safety.
+
+Absence is NOT uniform (the #85 fold). Only the DEFAULT path's absence is the
+opt-out above. A file named by an EXPLICIT override — a ``path`` argument, or
+``CADRE_POLICY`` — that does not exist instead raises ``PolicyError`` (fail
+closed): an operator who declared "policy lives HERE" and pointed at nothing
+has a misconfiguration, not an opt-out, and must not silently run ungated.
+``load_policy`` also refuses (before opening the leaf OR accepting its absence)
+a policy whose PARENT directory is present but foreign-owned or
+group/other-writable — a loose parent lets another user unlink the policy to
+force a silent permissive load; that parent check is best-effort/TOCTOU-limited
+(a path stat), atop the leaf's own fd-based ownership/mode check.
 
 Out of scope (per the issue): spend metering, budgets, per-run dollar caps,
 pricing awareness. This is allow/deny, not FinOps. Also out of scope: a
@@ -76,6 +87,55 @@ DEFAULT_POLICY_PATH = "~/.cadre/policy.yaml"
 def default_policy_path() -> str:
     """CADRE_POLICY env override -> DEFAULT_POLICY_PATH. No expanduser here."""
     return os.environ.get("CADRE_POLICY") or DEFAULT_POLICY_PATH
+
+
+def _policy_override_source(path: str | Path | None) -> str | None:
+    """Which EXPLICIT override named the policy path, or ``None`` for the default.
+
+    ``"param"`` — an explicit ``path`` argument was passed. ``"env"`` — no
+    argument, but ``CADRE_POLICY`` is set (non-empty). ``None`` — neither, i.e.
+    the built-in ``DEFAULT_POLICY_PATH``. This drives ``load_policy``'s
+    absent-file handling: an absent DEFAULT is the opt-out (permissive — the
+    operator never named a policy, so existing users see zero behavior change),
+    while an absent EXPLICIT override is a misconfiguration (fail closed — an
+    operator who declared "policy lives HERE" and pointed at nothing must not
+    silently run ungated). Empty ``CADRE_POLICY`` is treated as unset, matching
+    ``default_policy_path``'s ``or`` fallthrough.
+    """
+    if path is not None:
+        return "param"
+    if os.environ.get("CADRE_POLICY"):
+        return "env"
+    return None
+
+
+def _policy_parent_unsafe_reason(parent: Path) -> str | None:
+    """Return why ``parent`` is an unsafe directory for a policy file, or ``None``.
+
+    Mirrors ``approval._parent_is_safe``'s uid + ``0o022`` semantics, but stats
+    the parent HERE so an error can name the mode, and — unlike
+    ``_parent_is_safe`` — tells a NONEXISTENT parent (returns ``None``: the leaf
+    is simply absent, handled by the absent-file logic) apart from a
+    PRESENT-but-loose one (returns a reason: fail closed). A foreign-owned or
+    group/other-writable policy directory lets another user unlink the policy to
+    force a silent permissive load, or replant a file there — so an existing
+    unsafe parent is refused before the leaf is even opened or its absence
+    accepted. Best-effort and TOCTOU-limited: the parent could change between
+    this stat and the ``os.open`` in ``load_policy``; this raises the bar
+    against a silent unlink-to-absent on a loose directory, it is not a hard
+    guarantee. Non-POSIX (no ``os.getuid``) skips the ownership half but still
+    enforces the mode bits, exactly as ``approval._parent_is_safe`` does.
+    """
+    try:
+        st = os.stat(parent)
+    except OSError:
+        return None  # absent/unstattable parent: not itself unsafe (leaf absent)
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and st.st_uid != getuid():
+        return f"is not owned by you (it is owned by uid {st.st_uid})"
+    if st.st_mode & 0o022:
+        return f"is group- or other-writable (mode {oct(stat.S_IMODE(st.st_mode))})"
+    return None
 
 
 class PolicyError(Exception):
@@ -140,7 +200,11 @@ class Violation:
     fired, e.g. ``"deny_providers: prov-a"`` or
     ``"restrict_models: 'family-*' allows [prov-b]"`` — every chokepoint's
     disclosure/refusal text is built by naming ``provider``/``model``/``rule``
-    together, never just one.
+    together, never just one. When a model is caught by MULTIPLE
+    ``restrict_models`` rules at once, ``rule`` names them all, ``"; "``-joined
+    (the intersection composition), e.g. ``"restrict_models: 'family-*' allows
+    [prov-a]; 'family-premium' allows [prov-b]"`` — so the operator sees why
+    the intersection blocked the pair.
     """
 
     provider: str
@@ -223,12 +287,26 @@ class Policy:
         Pure — no I/O. ``deny_providers`` is an absolute veto, checked before
         ``restrict_models``: a provider that is both denied outright and
         listed as an allowed provider for some ``restrict_models`` rule is
-        still blocked. ``restrict_models`` rules are checked in file order;
-        the FIRST rule whose ``match`` glob matches ``model`` decides the
-        outcome for that model — a later rule that would also match is not
-        additionally consulted (first-match-wins, not most-permissive-wins).
-        A model matching no rule is unaffected by ``restrict_models``
-        entirely.
+        still blocked. ``restrict_models`` composes by INTERSECTION across
+        EVERY matching rule (NOT first-match-wins): ``model`` is tested
+        against all rules whose ``match`` glob matches it, and the provider is
+        allowed only if it appears in the ``allowed_providers`` of EVERY one
+        of those rules (the set intersection of their allowed lists,
+        casefolded). If any matching rule excludes the provider the pair is
+        blocked, and the returned ``Violation`` names every matching rule so
+        the operator sees the full composition. Rule ORDER does not affect the
+        outcome — a broad rule and a narrow rule that both match a model
+        compose the same regardless of which is written first. A model
+        matching no rule is unaffected by ``restrict_models`` entirely.
+
+        Intersection composes only in the SAFE direction: intersecting can
+        only NARROW the allowed set versus any single matching rule, so a pair
+        that a broad early rule alone would have allowed but a later stricter
+        rule forbids is now blocked (a loud, zero-spend refusal) rather than
+        silently routed to the wrong billing provider — the exact
+        wrong-billing-route spend this gate exists to prevent. First-match-
+        wins could shadow a stricter later rule behind a broad earlier one;
+        intersection cannot.
 
         A ``match`` glob is tested against BOTH the full ``model`` string AND
         its post-last-``/`` segment (``model.rsplit("/", 1)[-1]``) — a rule
@@ -264,19 +342,24 @@ class Policy:
             return Violation(provider, model, f"deny_providers: {configured_provider}")
         model_cf = model.casefold()
         segment_cf = model.rsplit("/", 1)[-1].casefold()
-        for rule in self.restrict_models:
-            if fnmatch.fnmatchcase(model_cf, rule._match_cf) or fnmatch.fnmatchcase(
-                segment_cf, rule._match_cf
-            ):
-                if provider_cf in rule._allowed_cf:
-                    return None
-                allowed = ", ".join(rule.allowed_providers)
-                return Violation(
-                    provider,
-                    model,
-                    f"restrict_models: {rule.match!r} allows [{allowed}]",
-                )
-        return None
+        matching = [
+            rule
+            for rule in self.restrict_models
+            if fnmatch.fnmatchcase(model_cf, rule._match_cf)
+            or fnmatch.fnmatchcase(segment_cf, rule._match_cf)
+        ]
+        if not matching:
+            return None
+        # Intersection, not first-match: the provider is allowed only if EVERY
+        # matching rule allows it. A single matching rule reduces to the old
+        # "provider must be in this rule's allowed list" behavior, byte-for-byte.
+        if all(provider_cf in rule._allowed_cf for rule in matching):
+            return None
+        composition = "; ".join(
+            f"{rule.match!r} allows [{', '.join(rule.allowed_providers)}]"
+            for rule in matching
+        )
+        return Violation(provider, model, f"restrict_models: {composition}")
 
 
 def filter_pairs(
@@ -307,8 +390,25 @@ _KNOWN_TOP_KEYS = frozenset({"deny_providers", "restrict_models"})
 _KNOWN_RESTRICT_KEYS = frozenset({"match", "allowed_providers"})
 
 
-def load_policy(path: str | Path) -> Policy:
+def load_policy(path: str | Path | None = None) -> Policy:
     """Load a policy file — tri-state (see module docstring for the contract).
+
+    Absence is NOT uniform (the #85 fold): an absent DEFAULT path (``path`` is
+    ``None`` and ``CADRE_POLICY`` is unset) is the opt-out — ``Policy.permissive()``,
+    zero behavior change. An absent file named by an EXPLICIT override (a passed
+    ``path``, or ``CADRE_POLICY``) instead raises ``PolicyError``: an operator who
+    declared where the policy lives and pointed at nothing has a misconfiguration,
+    not an opt-out, and must not silently run ungated. Pass ``path=None`` in
+    production (the runners do) so the override source is derived from the
+    environment; pass an explicit ``path`` only when the caller genuinely means
+    "the policy is exactly here."
+
+    Before the leaf is opened OR its absence accepted, the PARENT directory is
+    checked (``_policy_parent_unsafe_reason``): a present-but-loose parent
+    (foreign-owned or group/other-writable) is refused, because it would let
+    another user unlink the policy to force a silent permissive load. That check
+    is best-effort/TOCTOU-limited (a path-based stat, not an fd) — the leaf's own
+    ownership/mode is still enforced on the opened fd below.
 
     Read posture mirrors ``cadre.personas.resolve``'s confinement pattern —
     the repo's only precedent for reading a TRUSTED file (``provision.py`` /
@@ -338,34 +438,74 @@ def load_policy(path: str | Path) -> Policy:
     touches the filesystem.
 
     Args:
-        path: The policy file location — resolved via ``resolve_policy_path``
-            (an already-absolute ``Path`` passes through unchanged; the
-            caller is still expected to have picked ``path`` itself — e.g.
-            via ``default_policy_path()`` — this function does no env
-            lookup of its own beyond ``resolve_policy_path``'s expansion).
+        path: The policy file location — resolved via ``resolve_policy_path``.
+            ``None`` (the production default) resolves the override source from
+            the environment: ``CADRE_POLICY`` if set, else the built-in default.
+            A non-``None`` ``path`` is treated as an EXPLICIT override for
+            absence purposes (see above), whether it is a bare filename or an
+            already-absolute ``Path``.
 
     Returns:
-        ``Policy.permissive()`` (``source="absent"``) if ``path`` does not
-        exist, OR if it exists but its YAML top level parses to ``None``
-        (empty, or fully-commented like ``SEED_TEMPLATE`` — see the
-        ``Policy.source`` field comment for why this tri-state collapse is
-        deliberate). Otherwise a ``source="file"`` ``Policy`` reflecting the
-        parsed (possibly all-empty) rules.
+        ``Policy.permissive()`` (``source="absent"``) if the DEFAULT path is
+        absent (``path`` is ``None`` and ``CADRE_POLICY`` is unset), OR if the
+        file exists but its YAML top level parses to ``None`` (empty, or
+        fully-commented like ``SEED_TEMPLATE`` — see the ``Policy.source``
+        field comment for why this tri-state collapse is deliberate). Otherwise
+        a ``source="file"`` ``Policy`` reflecting the parsed (possibly
+        all-empty) rules.
 
     Raises:
         PolicyError: ``path`` cannot even be resolved (see
-            ``resolve_policy_path``), or exists but is a symlink, not a
-            regular file (a directory, FIFO, or device), foreign-owned,
-            group/other-writable, unreadable, not UTF-8, not valid YAML, a
-            non-mapping top level, carries an unrecognized top-level or
-            ``restrict_models`` entry key, or a rule is wrong-shaped.
+            ``resolve_policy_path``); the resolved PARENT directory is present
+            but foreign-owned or group/other-writable; the file is named by an
+            EXPLICIT override (a passed ``path`` or ``CADRE_POLICY``) yet does
+            not exist; or it exists but is a symlink, not a regular file (a
+            directory, FIFO, or device), foreign-owned, group/other-writable,
+            unreadable, not UTF-8, not valid YAML, a non-mapping top level,
+            carries an unrecognized top-level or ``restrict_models`` entry key,
+            or a rule is wrong-shaped.
     """
     resolved = resolve_policy_path(path)
+    source = _policy_override_source(path)
+
+    # Parent-directory safety BEFORE opening or accepting absence (#85): a
+    # present-but-loose parent could let another user unlink the policy to force
+    # a silent permissive load. A nonexistent parent returns None here (the leaf
+    # is simply absent — handled just below), so this never breaks the
+    # absent-DEFAULT opt-out on a fresh host with no ~/.cadre yet.
+    parent_reason = _policy_parent_unsafe_reason(resolved.parent)
+    if parent_reason is not None:
+        raise PolicyError(
+            f"the policy directory {resolved.parent} {parent_reason} — refusing "
+            f"to trust a safety-relevant policy file under a directory another "
+            f"user could unlink or replace it in. Fix its ownership/permissions "
+            f"(e.g. chmod go-w {resolved.parent}) or move the policy to an "
+            f"owner-only directory."
+        )
+
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(str(resolved), flags)
     except FileNotFoundError:
-        return Policy.permissive()
+        if source is None:
+            # DEFAULT path absent: the operator never opted in — permissive
+            # (zero behavior change; the absent default is the opt-out).
+            return Policy.permissive()
+        # An EXPLICIT override names a file that does not exist — a
+        # misconfiguration, NOT an opt-out. Fail closed, naming the source.
+        named = (
+            "the CADRE_POLICY environment variable"
+            if source == "env"
+            else "the explicit path argument"
+        )
+        undo = "unset CADRE_POLICY" if source == "env" else "omit the path"
+        raise PolicyError(
+            f"the policy file named by {named} does not exist: {resolved}. An "
+            f"explicit policy location whose target is missing is a "
+            f"misconfiguration, not an opt-out — refusing to run ungated. Create "
+            f"{resolved}, or {undo} to fall back to the default "
+            f"(~/.cadre/policy.yaml, whose absence IS a valid opt-out)."
+        ) from None
     except OSError as exc:
         # Covers ELOOP (a symlink refused by O_NOFOLLOW) and any other open
         # failure (e.g. EACCES) — all fail CLOSED, never silently permissive.
@@ -530,7 +670,10 @@ SEED_TEMPLATE = """\
 # checked against BOTH the full model id AND the bare segment after its last
 # "/" — so a `*` suffix like "example-family-*" still catches a
 # vendor-prefixed slug (e.g. "vendor/example-family-large"), not just a bare
-# model id. A model matching no rule here is unaffected.
+# model id. A model matching no rule here is unaffected. When a model matches
+# MORE THAN ONE rule, their allowed_providers INTERSECT — the model may run
+# only through a provider that every matching rule allows (a narrower rule
+# always tightens a broader one; order does not matter).
 #
 # restrict_models:
 #   - match: "example-family-*"

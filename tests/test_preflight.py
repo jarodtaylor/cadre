@@ -587,26 +587,48 @@ class TestPreflightRefusalPolicyBlocked(_PreflightTestBase):
         self.assertIsNone(preflight_refusal(cfg, palette_path=palette_path, policy_path=policy_path))
 
 
-class TestPreflightRefusalAbsentPolicyRegression(_PreflightTestBase):
-    """No policy file at all -> today's (pre-#78) behavior, unaffected."""
+class TestPreflightRefusalPermissivePolicyRegression(_PreflightTestBase):
+    """A PERMISSIVE policy (present-but-inert — the modern equivalent of the
+    pre-#78 no-policy state) blocks nothing: preflight proceeds, or refuses only
+    for palette reasons. (#85: an absent EXPLICIT policy_path now fails closed,
+    so "no policy" is expressed as a fully-commented file, not a missing path —
+    see TestPreflightRefusalAbsentExplicitPolicyFailsClosed.)"""
 
-    def test_absent_policy_all_on_palette_proceeds(self):
+    def test_permissive_policy_all_on_palette_proceeds(self):
+        palette_path = _write_palette(
+            self.tmp, models=[{"provider": "prov-a", "model": "model-x"}], toolsets=["web"],
+        )
+        policy_path = _write_policy(self.tmp, "# permissive — blocks nothing\n")
+        cfg = _make_config(convergence="collect", specialist_provider="prov-a", specialist_model="model-x")
+        self.assertIsNone(
+            preflight_refusal(cfg, palette_path=palette_path, policy_path=policy_path)
+        )
+
+    def test_permissive_policy_off_palette_still_refuses_for_palette_reason(self):
+        palette_path = _write_palette(self.tmp, models=[], toolsets=["web"])
+        policy_path = _write_policy(self.tmp, "# permissive — blocks nothing\n")
+        cfg = _make_config()
+        refusal = preflight_refusal(cfg, palette_path=palette_path, policy_path=policy_path)
+        self.assertIsNotNone(refusal)
+        self.assertIn("off-palette model", refusal)
+
+
+class TestPreflightRefusalAbsentExplicitPolicyFailsClosed(_PreflightTestBase):
+    """#85: an explicit policy_path pointing at a MISSING file fails closed —
+    a POLICY_BLOCKED refusal before any palette check, never a silent proceed
+    (an operator who named a policy location that does not exist has a
+    misconfiguration, not an opt-out)."""
+
+    def test_missing_explicit_policy_refuses_before_palette(self):
         palette_path = _write_palette(
             self.tmp, models=[{"provider": "prov-a", "model": "model-x"}], toolsets=["web"],
         )
         missing_policy = self.tmp / "no-policy.yaml"
         cfg = _make_config(convergence="collect", specialist_provider="prov-a", specialist_model="model-x")
-        self.assertIsNone(
-            preflight_refusal(cfg, palette_path=palette_path, policy_path=missing_policy)
-        )
-
-    def test_absent_policy_off_palette_still_refuses_for_palette_reason(self):
-        palette_path = _write_palette(self.tmp, models=[], toolsets=["web"])
-        missing_policy = self.tmp / "no-policy.yaml"
-        cfg = _make_config()
         refusal = preflight_refusal(cfg, palette_path=palette_path, policy_path=missing_policy)
         self.assertIsNotNone(refusal)
-        self.assertIn("off-palette model", refusal)
+        self.assertIn("policy_blocked", refusal)
+        self.assertIn("does not exist", refusal)
 
 
 class TestPreflightRefusalMalformedPolicy(_PreflightTestBase):

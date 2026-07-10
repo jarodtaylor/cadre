@@ -173,7 +173,12 @@ def preflight_refusal(
     resolved_policy_path = policy_path if policy_path is not None else default_policy_path()
     try:
         resolved_policy_path = resolve_policy_path(policy_path)
-        policy = load_policy(resolved_policy_path)
+        # Pass the ORIGINAL policy_path (not the resolved Path) so load_policy
+        # can derive the override source: None -> env/default (an absent default
+        # stays permissive), an explicit path -> a named override that fails
+        # closed if absent (#85). Passing the resolved Path would misclassify
+        # the production None-default as an explicit override.
+        policy = load_policy(policy_path)
     except PolicyError as exc:
         return (
             f"Refused ({FailureReason.POLICY_BLOCKED.value}) — no spend has "

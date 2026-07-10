@@ -487,7 +487,10 @@ def main() -> int:
 
     try:
         policy_path = resolve_policy_path()
-        policy = load_policy(policy_path)
+        # Pass no path so load_policy derives the override source from the env
+        # (CADRE_POLICY vs the default) — an absent DEFAULT stays permissive,
+        # while an absent CADRE_POLICY-named file fails closed (#85).
+        policy = load_policy()
     except PolicyError as exc:
         print(_sanitize(str(exc)))
         return 1
