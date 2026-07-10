@@ -55,10 +55,15 @@ class AgentResult:
     # Per-call usage/cost receipt (#76) — capture-don't-gate: recorded on success
     # AND on flagged failure (a failed call may still have burned tokens), and
     # NEVER consulted for ok/failure classification, exit codes, or convergence.
-    # None when the call produced no result dict at all (exception path, timeout,
-    # skipped lane) or the dict carried no whitelisted usage keys. Zero values are
-    # recorded honestly as 0 (OAuth/quota-billed rows may report 0 or nothing);
-    # cost_status/cost_source are the upstream honesty qualifiers, passed through.
+    # Sourced from the result dict when it carries the usage keys; when the dict
+    # omits them (some early-failure paths) OR the call raised after the agent was
+    # built, a fallback reads the agent instance's session counters and stamps
+    # receipt_source: agent-session-counters (its ABSENCE means result-dict-sourced).
+    # None only when neither source yields a receipt — the factory raised before an
+    # agent existed, a non-dict return, a skipped/never-run lane, or an agent with
+    # no readable counters. Zero values are recorded honestly as 0 (OAuth/quota-
+    # billed rows may report 0 or nothing); cost_status/cost_source are the upstream
+    # honesty qualifiers, passed through.
     usage: dict | None = None
 
     def __post_init__(self) -> None:
@@ -111,6 +116,35 @@ _USAGE_COST_STR_KEYS = frozenset({"cost_status", "cost_source"})
 # never approaches this; it only guards against a pathological upstream value.
 _MAX_USAGE_INT = 10**15
 
+# Agent-instance fallback candidate keys (folded cross-model review, 2026-07-10;
+# docs/reference/hermes/README.md fact 11). Some early-failure run_conversation
+# returns (repeated truncation / invalid-tool / compression paths) set the
+# turn-outcome flags but OMIT the usage keys from the result dict, while the
+# session-scoped counters remain on the AIAgent instance (Hermes's own gateway
+# reads them off the agent after the call). When the result-dict pass yields no
+# receipt, we probe these canonical names — and their ``session_``-prefixed
+# variants — on the agent object as a fallback. Only the token names the probe
+# banked by EXACT string (input/output) are probed: cache/reasoning counters were
+# named by category only, so their instance-attribute names are unknown and are
+# NOT guessed (a missing name reads None and is skipped; a wrong guess degrades to
+# today's absent receipt, never invents data). Pending host re-verification.
+_INSTANCE_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost_usd",
+    "cost_status",
+    "cost_source",
+)
+# Cadre-authored honesty qualifier (NOT a hermes field): stamped on a receipt
+# whose numbers came from the agent-instance fallback rather than the result
+# dict. Its ABSENCE on a receipt means the numbers came from the result dict (the
+# primary path) — so a manifest reader can tell recovered spend from reported spend.
+_RECEIPT_SOURCE_AGENT = "agent-session-counters"
+
+# Sentinel: a (key, value) pair is not a valid usage entry. Distinct from a
+# stored value of None so _classify_usage_entry can accept any value type.
+_SKIP = object()
+
 
 def _is_safe_usage_number(value: int | float) -> bool:
     # A float must be JSON-finite (NaN/Inf are not valid JSON per RFC 8259);
@@ -122,6 +156,29 @@ def _is_safe_usage_number(value: int | float) -> bool:
     if isinstance(value, float):
         return math.isfinite(value) and value >= 0
     return 0 <= value < _MAX_USAGE_INT
+
+
+def _classify_usage_entry(key: str, value: Any) -> Any:
+    """Return the value to store for one usage ``(key, value)``, or ``_SKIP`` to drop it.
+
+    The single per-entry gate shared by the result-dict pass (``_usage_receipt``)
+    and the agent-instance fallback (``_usage_from_agent``), so both apply identical
+    type/sanity discipline. ``bool`` is excluded first (an int subclass, but a flag
+    is never a counter); a token counter is a non-bool int matched by the
+    ``*_tokens`` suffix; the cost keys are exact-named and type-gated; every number
+    passes ``_is_safe_usage_number``. Strings (``cost_status``/``cost_source``) are
+    stored raw and sanitized at the manifest sink (``capture._usage_for_manifest``),
+    matching the pre-existing dict path. ``key`` is always a str at every call site.
+    """
+    if isinstance(value, bool):
+        return _SKIP
+    if key.endswith("_tokens") and isinstance(value, int) and _is_safe_usage_number(value):
+        return value
+    if key in _USAGE_COST_NUMBER_KEYS and isinstance(value, (int, float)) and _is_safe_usage_number(value):
+        return value
+    if key in _USAGE_COST_STR_KEYS and isinstance(value, str):
+        return value
+    return _SKIP
 
 
 def _usage_receipt(result: dict) -> dict | None:
@@ -137,15 +194,54 @@ def _usage_receipt(result: dict) -> dict | None:
     for key, value in result.items():
         if not isinstance(key, str):
             continue
-        if isinstance(value, bool):
-            continue  # bool is an int subclass; a flag is never a counter
-        if key.endswith("_tokens") and isinstance(value, int) and _is_safe_usage_number(value):
-            usage[key] = value
-        elif key in _USAGE_COST_NUMBER_KEYS and isinstance(value, (int, float)) and _is_safe_usage_number(value):
-            usage[key] = value
-        elif key in _USAGE_COST_STR_KEYS and isinstance(value, str):
-            usage[key] = value
+        stored = _classify_usage_entry(key, value)
+        if stored is not _SKIP:
+            usage[key] = stored
     return usage or None
+
+
+def _read_agent_attr(agent: Any, name: str) -> Any:
+    """Read one attribute off the agent, degrading any read failure to None.
+
+    ``getattr(..., None)`` only suppresses ``AttributeError``; a pathological
+    property could raise anything else. A counter that can't be read cleanly is
+    simply treated as absent — this runs outside ``.run()``'s classification path,
+    so it must never raise (a receipt is observational; classification is not).
+    """
+    try:
+        return getattr(agent, name, None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _usage_from_agent(agent: Any) -> dict | None:
+    """Fallback receipt read from the AIAgent instance's session counters (#76).
+
+    Used only when the result-dict pass yielded no receipt (some early-failure
+    returns omit the usage keys) or the call raised after the agent was built.
+    Probes the canonical usage names in ``_INSTANCE_USAGE_KEYS`` — each with its
+    ``session_``-prefixed variant — reusing the SAME ``_classify_usage_entry`` gate
+    as the dict path, and stamps ``receipt_source`` so a recovered receipt is
+    honestly distinguishable from a reported one. Returns None when ``agent`` is
+    None (the factory raised before an agent existed) or no counter reads cleanly.
+    Never raises — every attribute read is guarded (``_read_agent_attr``).
+    """
+    if agent is None:
+        return None
+    usage: dict = {}
+    for key in _INSTANCE_USAGE_KEYS:
+        for attr in (key, f"session_{key}"):
+            value = _read_agent_attr(agent, attr)
+            if value is None:
+                continue
+            stored = _classify_usage_entry(key, value)
+            if stored is not _SKIP:
+                usage[key] = stored
+                break  # first valid candidate (unprefixed preferred) wins
+    if not usage:
+        return None
+    usage["receipt_source"] = _RECEIPT_SOURCE_AGENT
+    return usage
 
 
 def _flagged_failure_detail(result: dict) -> str | None:
@@ -192,6 +288,10 @@ class ModelClient:
         prompt: str,
         toolset: Sequence[str] = (),
     ) -> AgentResult:
+        # Bound before the try so the except branch can attempt the #76 usage
+        # fallback iff an agent was actually constructed (stays None if the
+        # factory itself raised — nothing to read).
+        agent = None
         try:
             agent = self._factory(provider, model, list(toolset))
             # run_conversation, NOT chat (#76): chat() returns only
@@ -207,10 +307,14 @@ class ModelClient:
             # Catch-all resilience boundary: any agent failure becomes a typed
             # failure so the fleet degrades rather than crashes. Covers agent
             # construction errors and any raise out of run_conversation (e.g. the
-            # stale-response/client timeouts, which raise into the call).
+            # stale-response/client timeouts, which raise into the call). If the
+            # agent was built before the raise, recover any burned spend from its
+            # session counters (#76 fallback); the receipt is observational and
+            # _usage_from_agent never raises, so it cannot affect this failure.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error=f"{type(exc).__name__}: {exc}", reason=FailureReason.MODEL_ERROR,
+                usage=_usage_from_agent(agent),
             )
 
         if not isinstance(result, dict):
@@ -218,7 +322,11 @@ class ModelClient:
             # byte-compatible with the pre-#76 None path (the U1 2026-06-17 live
             # observation: AIAgent logs a non-retryable provider error rather than
             # raising). A drifted surface that stopped returning dicts lands here
-            # too: no usable output is a failure, never a guessed success.
+            # too: no usable output is a failure, never a guessed success. No
+            # agent-counter fallback here — the banked None shape is provider-
+            # unusable-at-resolution (pre-call, no spend); the #76 fallback
+            # deliberately covers only the dict-omits-usage and raised-after-
+            # construction paths named by the finding.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error="empty response from model", reason=FailureReason.EMPTY_OUTPUT,
@@ -226,8 +334,15 @@ class ModelClient:
 
         # Receipt extracted once, stamped on EVERY dict-shaped outcome below —
         # success, flagged failure, and empty output all may have burned tokens.
+        # Dict-first, then an agent-instance fallback (#76): some early-failure
+        # returns omit the usage keys from the dict while the session counters
+        # remain on the agent, so when the dict yields nothing we recover them from
+        # the agent (marked receipt_source: agent-session-counters). Dict wins when
+        # present — the fallback only runs on a None dict-pass result.
         try:
             usage = _usage_receipt(result)
+            if usage is None:
+                usage = _usage_from_agent(agent)
         except Exception:  # noqa: BLE001
             # Resilience boundary: a pathological result shape must degrade the receipt, not raise out of .run() (verify_palette._verify_one would abort its whole loop).
             usage = None

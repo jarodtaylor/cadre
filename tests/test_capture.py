@@ -3071,6 +3071,16 @@ class TestManifestUsageReceipts(unittest.TestCase):
         lane = self._web_lane_record(_lane("web", toolset=["web"], usage=dict(usage)))
         self.assertEqual(lane["usage"], usage)
 
+    def test_receipt_source_marker_round_trips(self):
+        # A fallback-sourced receipt (numbers recovered from the agent instance,
+        # #76 folded review) carries a cadre-authored receipt_source marker. It
+        # must survive the manifest sanitize/serialize path unchanged — no
+        # capture-side change needed, since _usage_for_manifest copies every
+        # receipt key — so a reader can tell recovered spend from reported spend.
+        usage = {"input_tokens": 128, "receipt_source": "agent-session-counters"}
+        lane = self._web_lane_record(_lane("web", usage=dict(usage)))
+        self.assertEqual(lane["usage"], usage)
+
     def test_usage_absent_serializes_null(self):
         lane = self._web_lane_record(_lane("web", toolset=["web"]))
         self.assertIsNone(lane["usage"])

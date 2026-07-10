@@ -13,11 +13,16 @@ class FakeAgent:
 
     ``result`` is returned verbatim (a dict, None, or any drifted shape a test
     wants to probe); ``raises`` raises instead — the construction/call error path.
+    ``counters`` sets arbitrary named attributes on the instance, standing in for
+    Hermes's session-scoped usage counters that the #76 agent-instance fallback
+    reads (e.g. ``counters={"input_tokens": 128}`` or a ``session_``-prefixed name).
     """
 
-    def __init__(self, *, result=None, raises=None):
+    def __init__(self, *, result=None, raises=None, counters=None):
         self._result = result
         self._raises = raises
+        for name, value in (counters or {}).items():
+            setattr(self, name, value)
 
     def run_conversation(self, prompt):
         if self._raises is not None:
@@ -33,10 +38,12 @@ def factory_returning(agent, captured=None):
     return factory
 
 
-def run_with(result=None, raises=None, **run_kwargs):
+def run_with(result=None, raises=None, counters=None, **run_kwargs):
     """One adapter call against a FakeAgent — the shared harness for the
-    classification matrix below."""
-    client = ModelClient(agent_factory=factory_returning(FakeAgent(result=result, raises=raises)))
+    classification matrix below. ``counters`` seeds agent-instance session
+    counters for the #76 fallback; ``run_kwargs`` are forwarded to ``.run``."""
+    client = ModelClient(agent_factory=factory_returning(
+        FakeAgent(result=result, raises=raises, counters=counters)))
     kwargs = {"role": "web", "provider": "prov-a", "model": "model-x", "prompt": "go"}
     kwargs.update(run_kwargs)
     return client.run(**kwargs)
@@ -318,6 +325,168 @@ class TestUsageReceiptNumberSanity(unittest.TestCase):
         # honestly report 0, and 0 is well within the sane-magnitude ceiling).
         r = run_with(result=run_conversation_ok("hi", input_tokens=0, estimated_cost_usd=0))
         self.assertEqual(r.usage, {"input_tokens": 0, "estimated_cost_usd": 0})
+
+
+class TestUsageReceiptAgentFallback(unittest.TestCase):
+    """#76 folded cross-model review: when the result dict OMITS the usage keys
+    (some early-failure paths do, while the session counters stay on the AIAgent
+    instance), the receipt falls back to reading the agent's session counters and
+    stamps ``receipt_source: agent-session-counters``. Dict-sourced receipts carry
+    no such marker. Classification (ok / reason) is never affected by any of this.
+    """
+
+    def test_early_failure_dict_omitting_usage_recovers_agent_counters(self):
+        # The finding's core case: failure flags set, NO usage keys in the dict,
+        # counters present on the agent instance → recover them, with the marker.
+        r = run_with(
+            result={"failed": True, "error": "repeated truncation"},
+            counters={"input_tokens": 128, "output_tokens": 64, "estimated_cost_usd": 0.02},
+        )
+        self.assertFalse(r.ok)                               # classification unchanged
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)   # classification unchanged
+        self.assertEqual(r.usage, {
+            "input_tokens": 128, "output_tokens": 64, "estimated_cost_usd": 0.02,
+            "receipt_source": "agent-session-counters",
+        })
+
+    def test_session_prefixed_counter_names_are_read(self):
+        # The instance may expose the counters under a session_ prefix — probed
+        # as a variant of each canonical name, stored under the canonical key.
+        r = run_with(
+            result={"failed": True, "error": "boom"},
+            counters={"session_input_tokens": 50, "session_output_tokens": 10},
+        )
+        self.assertEqual(r.usage, {
+            "input_tokens": 50, "output_tokens": 10,
+            "receipt_source": "agent-session-counters",
+        })
+
+    def test_dict_usage_wins_no_fallback_no_marker(self):
+        # Regression: a dict that DOES carry usage keys is authoritative — the
+        # fallback must not run, and no marker is added, even when the agent also
+        # exposes (different) counters.
+        r = run_with(
+            result={"failed": True, "error": "boom", "input_tokens": 5},
+            counters={"input_tokens": 999, "output_tokens": 999},
+        )
+        self.assertEqual(r.usage, {"input_tokens": 5})
+        self.assertNotIn("receipt_source", r.usage)
+
+    def test_success_with_no_dict_usage_recovers_counters(self):
+        # The fallback runs whenever the dict pass yields nothing — including a
+        # clean success whose dict omitted usage — without disturbing ok/text.
+        r = run_with(result=run_conversation_ok("answer"), counters={"input_tokens": 30})
+        self.assertTrue(r.ok)
+        self.assertEqual(r.text, "answer")
+        self.assertEqual(r.usage, {
+            "input_tokens": 30, "receipt_source": "agent-session-counters",
+        })
+
+    def test_empty_output_dict_recovers_counters(self):
+        # Clean flags, empty text (EMPTY_OUTPUT), no usage keys → the fallback
+        # still captures the burned spend.
+        r = run_with(
+            result={"final_response": "", "completed": True, "failed": False},
+            counters={"input_tokens": 12},
+        )
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.EMPTY_OUTPUT)
+        self.assertEqual(r.usage, {
+            "input_tokens": 12, "receipt_source": "agent-session-counters",
+        })
+
+    def test_raise_after_construction_carries_agent_counters(self):
+        # The exception path (item 3): the agent was built, then run_conversation
+        # raised — burned spend on its counters is still recovered.
+        r = run_with(
+            raises=RuntimeError("stale-response timeout"),
+            counters={"input_tokens": 200, "output_tokens": 20},
+        )
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+        self.assertIn("stale-response timeout", r.error)
+        self.assertEqual(r.usage, {
+            "input_tokens": 200, "output_tokens": 20,
+            "receipt_source": "agent-session-counters",
+        })
+
+    def test_factory_raise_yields_no_usage(self):
+        # The factory itself raised — no agent was ever constructed, so there is
+        # nothing to read: usage stays None (agent is unbound, guarded).
+        def exploding_factory(provider, model, toolset):
+            raise RuntimeError("factory boom")
+
+        r = ModelClient(agent_factory=exploding_factory).run(
+            role="web", provider="p", model="m", prompt="go")
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+        self.assertIsNone(r.usage)
+
+    def test_agent_without_counters_yields_no_usage(self):
+        # No usage keys in the dict AND no counters on the agent → None, exactly
+        # the pre-fallback behavior (a wrong/absent name never invents data).
+        r = run_with(result={"failed": True, "error": "boom"})
+        self.assertFalse(r.ok)
+        self.assertIsNone(r.usage)
+
+    def test_agent_cost_strings_captured(self):
+        # cost_status/cost_source string qualifiers are recovered from the
+        # instance too (stored raw here; sanitized at the manifest sink).
+        r = run_with(
+            result={"failed": True, "error": "boom"},
+            counters={"input_tokens": 10, "cost_status": "estimated", "cost_source": "pricing-table"},
+        )
+        self.assertEqual(r.usage, {
+            "input_tokens": 10, "cost_status": "estimated", "cost_source": "pricing-table",
+            "receipt_source": "agent-session-counters",
+        })
+
+    def test_pathological_agent_counters_dropped(self):
+        # Each candidate value passes the SAME sanity gate as the dict path: a bad
+        # reading is dropped, not recorded — a wrong counter degrades to no-receipt.
+        for bad in (float("nan"), float("inf"), 10**16, -5, True, "100", [1]):
+            r = run_with(
+                result={"failed": True, "error": "boom"},
+                counters={"input_tokens": bad},
+            )
+            self.assertIsNone(r.usage, f"input_tokens={bad!r} should be dropped -> no receipt")
+
+    def test_one_exploding_counter_does_not_lose_the_others(self):
+        # Per-attribute resilience: a counter whose read raises is skipped, but a
+        # sibling counter still lands — and classification is untouched.
+        class PartlyExplodingAgent:
+            output_tokens = 42
+
+            def run_conversation(self, prompt):
+                return {"failed": True, "error": "boom"}
+
+            @property
+            def input_tokens(self):
+                raise RuntimeError("counter boom")
+
+        r = ModelClient(agent_factory=factory_returning(PartlyExplodingAgent())).run(
+            role="web", provider="p", model="m", prompt="go")
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)   # classification intact
+        self.assertEqual(r.usage, {
+            "output_tokens": 42, "receipt_source": "agent-session-counters",
+        })
+
+    def test_every_counter_read_exploding_degrades_to_none(self):
+        # The whole fallback never raises out of .run(): if every attribute read
+        # raises, the receipt degrades to None and classification is unchanged.
+        class ExplodingAgent:
+            def run_conversation(self, prompt):
+                return {"failed": True, "error": "boom"}
+
+            def __getattr__(self, name):
+                raise RuntimeError(f"attr boom: {name}")
+
+        r = ModelClient(agent_factory=factory_returning(ExplodingAgent())).run(
+            role="web", provider="p", model="m", prompt="go")
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+        self.assertIsNone(r.usage)
 
 
 class TestClassificationExtractorResilience(unittest.TestCase):
