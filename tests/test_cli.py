@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -2563,7 +2564,7 @@ class TestSetupCommandCleanHome(unittest.TestCase):
         code, out = setup_command(None)
         self.assertEqual(code, 0, out)
         bin_dir = os.path.dirname(sys.executable)
-        self.assertIn(f'export PATH="{bin_dir}:$PATH"', out)
+        self.assertIn(f"export PATH={shlex.quote(bin_dir)}:$PATH", out)
 
 
 class TestSetupCommandKTD11FailClosed(unittest.TestCase):
@@ -2611,7 +2612,24 @@ class TestSetupCommandKTD11FailClosed(unittest.TestCase):
         stub = _make_stub_python(self, 0)
         code, out = setup_command(stub)
         self.assertEqual(code, 0, out)
-        self.assertIn(f'export PATH="{os.path.dirname(stub)}:$PATH"', out)
+        self.assertIn(f"export PATH={shlex.quote(os.path.dirname(stub))}:$PATH", out)
+
+    def test_path_hint_is_shell_quoted_for_metacharacter_dirs(self):
+        """PR #81 bot-review fold: a bin dir carrying shell metacharacters is
+        quoted so the pasted line can't expand or break, while the $PATH
+        reference stays outside the quoting and still expands."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        weird = Path(tmp) / "we ird$bin"
+        weird.mkdir()
+        stub = weird / "fake-python"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+        code, out = setup_command(str(stub))
+        self.assertEqual(code, 0, out)
+        quoted = shlex.quote(str(weird))
+        self.assertNotEqual(quoted, str(weird))  # quoting actually engaged
+        self.assertIn(f"export PATH={quoted}:$PATH", out)
 
 
 class TestSetupCommandNewlineRejection(unittest.TestCase):
