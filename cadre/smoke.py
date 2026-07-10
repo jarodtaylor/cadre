@@ -229,6 +229,11 @@ def check_fleet_validation() -> SmokeCheck:
     (``cadre.resources.personas_dir()``), not ``~/.cadre/personas`` — see the
     module docstring for why. Read-only: never touches ``~/.cadre``.
 
+    Globbing deliberately diverges from ``provision._STARTER_FLEETS``'s
+    explicit allowlist: for a pre-release gate, a new fleet file failing loud
+    beats a stale allowlist silently skipping it. (Only fleets live under
+    ``data/fleets/`` today; the ``.example.yaml`` suffix scopes the glob.)
+
     Returns:
         A ``SmokeCheck`` — ``ok=True`` iff every packaged fleet loads and
         resolves clean; otherwise ``ok=False`` naming each failing file and
