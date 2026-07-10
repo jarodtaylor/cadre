@@ -94,8 +94,10 @@ def _policy_override_source(path: str | Path | None) -> str | None:
 
     ``"param"`` — an explicit ``path`` argument was passed. ``"env"`` — no
     argument, but ``CADRE_POLICY`` is set (non-empty). ``None`` — neither, i.e.
-    the built-in ``DEFAULT_POLICY_PATH``. This drives ``load_policy``'s
-    absent-file handling: an absent DEFAULT is the opt-out (permissive — the
+    the built-in ``DEFAULT_POLICY_PATH``. This SPECIFIES the classification
+    ``load_policy`` applies to an absent file (``load_policy`` snapshots the
+    env once itself, so resolution and classification share a single read —
+    it does not call this helper): an absent DEFAULT is the opt-out (permissive — the
     operator never named a policy, so existing users see zero behavior change),
     while an absent EXPLICIT override is a misconfiguration (fail closed — an
     operator who declared "policy lives HERE" and pointed at nothing must not
@@ -465,8 +467,18 @@ def load_policy(path: str | Path | None = None) -> Policy:
             carries an unrecognized top-level or ``restrict_models`` entry key,
             or a rule is wrong-shaped.
     """
-    resolved = resolve_policy_path(path)
-    source = _policy_override_source(path)
+    # Snapshot CADRE_POLICY once: resolution and absence-source classification
+    # must derive from the SAME environment read — with two separate reads, a
+    # concurrent env change in between could resolve an env-named path while
+    # classifying it as the absent DEFAULT, turning a missing explicit override
+    # into a silent permissive load (the exact fail-open this split prevents).
+    if path is not None:
+        source = "param"
+        resolved = resolve_policy_path(path)
+    else:
+        env_override = os.environ.get("CADRE_POLICY")
+        source = "env" if env_override else None
+        resolved = resolve_policy_path(env_override or DEFAULT_POLICY_PATH)
 
     # Parent-directory safety BEFORE opening or accepting absence (#85): a
     # present-but-loose parent could let another user unlink the policy to force

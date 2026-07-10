@@ -73,7 +73,14 @@ from cadre.discover import _DEFAULT_CANDIDATES_PATH
 from cadre.failure import FailureReason
 from cadre.model_client import AgentResult, ModelClient
 from cadre.palette_fleet import write_palette_fleet
-from cadre.policy import Policy, PolicyError, filter_pairs, load_policy, resolve_policy_path
+from cadre.policy import (
+    Policy,
+    PolicyError,
+    Violation,
+    filter_pairs,
+    load_policy,
+    resolve_policy_path,
+)
 from cadre.text_safety import sanitize as _sanitize
 
 # Default palette output path.
@@ -511,25 +518,27 @@ def _existing_palette_pairs(palette_path: Path) -> set[tuple[str, str]]:
     return existing
 
 
-def _entry_policy_banned(entry: object, policy: Policy) -> bool:
-    """True iff a palette ``models`` entry is a well-formed pair the policy bans.
+def _entry_policy_violation(entry: object, policy: Policy) -> Violation | None:
+    """The ``Violation`` for a well-formed palette entry the policy bans, else ``None``.
 
     Checks the entry against ``policy.check`` — the SAME authoritative,
     case-insensitive gate preflight enforces — rather than a candidate-derived
     pair set, so the prune catches a policy-banned palette entry whatever its
-    casing and even if it is no longer in the candidates file. A non-dict or
+    casing and even if it is no longer in the candidates file. Returns the full
+    ``Violation`` (not a bool) so the caller can DISCLOSE the pair + rule — a
+    palette-only eviction has no candidate loop to speak for it. A non-dict or
     non-string-pair entry is never "banned" (it is preserved verbatim; it was
     never a runnable pair to begin with).
     """
     if not isinstance(entry, dict):
-        return False
+        return None
     provider, model = entry.get("provider"), entry.get("model")
     if not isinstance(provider, str) or not isinstance(model, str):
-        return False
-    return policy.check(provider, model) is not None
+        return None
+    return policy.check(provider, model)
 
 
-def _prune_banned_from_palette(palette_path: Path, policy: Policy) -> None:
+def _prune_banned_from_palette(palette_path: Path, policy: Policy) -> list[Violation]:
     """Rewrite an existing palette.yaml with its policy-banned entries removed.
 
     Called only from ``main``'s all-excluded branch (#85): every candidate is
@@ -565,18 +574,32 @@ def _prune_banned_from_palette(palette_path: Path, policy: Policy) -> None:
     palette, or when NONE of its entries is banned — a total ban that does not
     actually touch the palette must not perturb it. Never raises: a write
     failure warns to stderr, matching the already-exit-1 all-banned posture.
+
+    Returns:
+        The ``Violation`` for each entry actually pruned (empty on every no-op
+        or failed-write path), so the caller can disclose palette-only
+        evictions — an entry no longer among the candidates has no candidate
+        loop to name it, and a silent deletion would break the
+        provider/model/rule disclosure contract.
     """
     try:
         data = yaml.safe_load(palette_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return
+        return []
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
-        return
+        return []
 
     models = data["models"]
-    survivors = [entry for entry in models if not _entry_policy_banned(entry, policy)]
-    if len(survivors) == len(models):
-        return  # no in-palette pair is banned — nothing to prune, leave as-is
+    survivors: list = []
+    pruned: list[Violation] = []
+    for entry in models:
+        violation = _entry_policy_violation(entry, policy)
+        if violation is None:
+            survivors.append(entry)
+        else:
+            pruned.append(violation)
+    if not pruned:
+        return []  # no in-palette pair is banned — nothing to prune, leave as-is
 
     toolsets = data.get("toolsets")
     if not isinstance(toolsets, list):
@@ -596,7 +619,7 @@ def _prune_banned_from_palette(palette_path: Path, policy: Policy) -> None:
             f"[cadre] warning: could not prune banned pair(s) from {palette_path}: {exc}",
             file=sys.stderr,
         )
-        return
+        return []  # nothing was actually removed — nothing to disclose
 
     # Mirror the verify path's fleet hook on the pruned set: the survivors were
     # verified in a prior cycle and remain on the palette, so reconstruct ok
@@ -608,6 +631,7 @@ def _prune_banned_from_palette(palette_path: Path, policy: Policy) -> None:
     ]
     fleet_path = palette_path.parent / "fleets" / "palette-fleet.yaml"
     write_palette_fleet(survivor_records, path=fleet_path)
+    return pruned
 
 
 def main(all_candidates: bool = False) -> int:
@@ -696,13 +720,23 @@ def main(all_candidates: bool = False) -> int:
         # re-verified this cycle — but an existing palette (and its generated
         # fleet) may still advertise a now-banned pair. Prune those in-palette
         # violations before returning, so the TOTAL-ban case honors the same
-        # prune promise the partial-ban path already keeps. The per-pair
-        # "pruned from your palette" disclosure already fired in the loop above.
-        # The prune re-checks each existing entry against the policy directly
-        # (authoritative, case-insensitive) rather than the candidate-derived
-        # violation set, so it also evicts a banned palette entry no longer in
-        # the candidates file.
-        _prune_banned_from_palette(palette_path, policy)
+        # prune promise the partial-ban path already keeps. The prune re-checks
+        # each existing entry against the policy directly (authoritative,
+        # case-insensitive) rather than the candidate-derived violation set, so
+        # it also evicts a banned palette entry no longer in the candidates
+        # file — and THOSE evictions get their own notice here, because the
+        # candidate loop above never saw them (casefolded pair-compare: the
+        # prune is case-insensitive, so casing must not fake a "new" pair).
+        pruned = _prune_banned_from_palette(palette_path, policy)
+        disclosed = {(v.provider.casefold(), v.model.casefold()) for v in policy_violations}
+        for pv in pruned:
+            if (pv.provider.casefold(), pv.model.casefold()) in disclosed:
+                continue  # the candidate loop already named it, with the eviction suffix
+            print(
+                f"[cadre] policy: pruned {_sanitize(pv.provider)}/{_sanitize(pv.model)} "
+                f"from your palette ({_sanitize(pv.rule)}) — no longer a candidate",
+                file=sys.stderr,
+            )
         print(
             f"All {len(policy_violations)} candidate(s) are excluded by policy "
             f"({_sanitize(str(policy_path))}) — nothing to verify."

@@ -1311,10 +1311,19 @@ class TestVerifyPaletteMainAllBannedPrunesExistingPalette(_VerifyPalettePolicyTe
         )
         policy_path = self._write_policy("deny_providers:\n  - prov-a\n  - prov-c\n")
         with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
-            code, _out, _err, _calls = self._run_main()
+            code, _out, err, _calls = self._run_main()
         self.assertEqual(code, 1)
         loaded = yaml.safe_load(self.palette_path.read_text(encoding="utf-8"))
         self.assertEqual(loaded["models"], [{"provider": "prov-b", "model": "model-y"}])
+        # The palette-only eviction (prov-c/model-z was never a candidate, so the
+        # candidate loop can't disclose it) gets its own named notice — a silent
+        # deletion would break the provider/model/rule disclosure contract.
+        self.assertIn("pruned prov-c/model-z from your palette", err)
+        self.assertIn("deny_providers: prov-c", err)
+        # The candidate-derived violation was already disclosed with the eviction
+        # suffix by the candidate loop — it must NOT get a second, duplicate
+        # palette-only notice.
+        self.assertNotIn("pruned prov-a/model-x from your palette", err)
 
     def test_no_policy_run_never_prunes_normal_write_path_intact(self):
         """Regression: with no policy the all-excluded branch never fires, so
