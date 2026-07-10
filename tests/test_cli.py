@@ -3222,5 +3222,39 @@ class TestDiscoverCommandCLIWiring(unittest.TestCase):
         self.assertIn("palette-candidates", help_text)
 
 
+# ---------------------------------------------------------------------------
+# #79: `cadre smoke` — a thin dispatch onto cadre.smoke.main(), which owns its
+# own printing and exit code (mirrors the discover/verify-palette dispatch
+# above). smoke.main()'s own behavior (the three checks, aggregation,
+# non-destructiveness) is covered by tests/test_smoke.py; this only proves
+# the argparse wiring and exit-code propagation.
+# ---------------------------------------------------------------------------
+
+
+class TestSmokeCommandCLIWiring(unittest.TestCase):
+    """`cadre smoke` is reachable through cli.main()'s argparse dispatch and
+    propagates cadre.smoke.main()'s exit code verbatim."""
+
+    def test_main_smoke_subcommand_calls_smoke_main(self):
+        with patch("cadre.smoke.main", return_value=0) as fake_main:
+            code = cli_main(["smoke"])
+        fake_main.assert_called_once_with()
+        self.assertEqual(code, 0)
+
+    def test_main_smoke_propagates_nonzero_exit(self):
+        with patch("cadre.smoke.main", return_value=1):
+            code = cli_main(["smoke"])
+        self.assertEqual(code, 1)
+
+    def test_smoke_help_text_matches_repo_style(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli_main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = buf.getvalue()
+        self.assertIn("smoke", help_text)
+        self.assertIn("no model calls", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

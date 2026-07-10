@@ -612,12 +612,21 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import provision (engine-purity constraint)",
         )
 
-    def test_verify_palette_does_not_import_engine_or_model_client(self):
-        """cadre/verify_palette.py must NOT import engine or model_client (U5).
+    def test_verify_palette_imports_adapter_but_never_engine(self):
+        """cadre/verify_palette.py must NOT import engine — and since #76 it MUST
+        import model_client.
 
         verify_palette makes live host calls to confirm (provider, model)
         candidates and writes ~/.cadre/palette.yaml — caller-layer, same
-        posture as provision.py/install_skill.py.
+        posture as provision.py/install_skill.py, so the engine stays out.
+        But its call+classification now DELEGATE to the adapter
+        (ModelClient.run → run_conversation structured flags): the pre-#76
+        hand-rolled AIAgent-plus-truthy-text check is exactly how an SDK error
+        returned as response text false-verified two pairs. The positive
+        assertion pins the delegation so a future edit can't quietly fork
+        verification off the single classification chokepoint. The load-bearing
+        seam direction is unchanged — the engine/adapter never import
+        caller-layer (see test_engine_does_not_import_verify_palette below).
         """
         import cadre.verify_palette as vp_mod
 
@@ -627,10 +636,11 @@ class TestEngineIsolation(unittest.TestCase):
             imported,
             "verify_palette.py must not import engine (engine-purity constraint)",
         )
-        self.assertNotIn(
+        self.assertIn(
             "cadre.model_client",
             imported,
-            "verify_palette.py must not import model_client (engine-purity constraint)",
+            "verify_palette.py must delegate to model_client (#76 — "
+            "verification classifies via the adapter, never its own call path)",
         )
 
     def test_engine_does_not_import_verify_palette(self):
@@ -794,6 +804,49 @@ class TestEngineIsolation(unittest.TestCase):
             "cadre.palette_fleet",
             imported_mc,
             "model_client.py must not import palette_fleet (engine-purity constraint)",
+        )
+
+    def test_smoke_does_not_import_engine_or_model_client(self):
+        """cadre/smoke.py must NOT import engine or model_client (#79).
+
+        smoke.py is the zero-spend pre-release host smoke gate -- caller-layer,
+        same posture as verify_palette.py/preflight.py/discover.py/
+        palette_fleet.py, all of which it composes. It imports cadre.discover
+        (for _fetch_inventory), which itself imports cadre.capture, which
+        imports engine -- but that is a transitive dependency of discover.py,
+        not a direct import in smoke.py's own source, so it does not trip this
+        AST check.
+        """
+        import cadre.smoke as s_mod
+
+        imported = _static_imports(s_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "smoke.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "smoke.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_smoke(self):
+        """cadre/engine.py and model_client.py must NOT import smoke (#79)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.smoke",
+            imported_engine,
+            "engine.py must not import smoke (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.smoke",
+            imported_mc,
+            "model_client.py must not import smoke (engine-purity constraint)",
         )
 
 

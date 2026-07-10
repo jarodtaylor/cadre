@@ -77,6 +77,22 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
 
 12. **Baseline gut-check.** Run the swarm vs a single strong model on a few real tasks; confirm the synthesized output visibly wins. Efficacy signal — calibration, not CI.
 
+## Release checklist — zero-spend pre-release smoke gate (mandatory, #79)
+
+Before tagging any release, run the smoke gate on the Hermes host — it makes **zero model calls, zero spend**, and is strictly non-destructive (writes nothing to `~/.cadre`, reads only):
+
+```bash
+"$PYBIN" -m cadre.cli smoke
+```
+
+It runs three checks and reports one `[cadre] smoke: <check> ... PASS` / `FAIL (<reason>)` line per check on stderr, then a one-line `✓`/`✗` verdict on stdout:
+
+1. **Inventory shape** — fetches Hermes's live provider inventory in-process (the same `hermes_cli.inventory` read `cadre discover` uses, zero-cost) and asserts it still matches the shape this package expects (`docs/reference/hermes/README.md` facts 7–8: top-level keys, per-provider-row required keys/types, model-entry shapes). Catches a silent Hermes API drift before it breaks discovery on an operator's host. On a machine without `hermes_cli` importable, this check fails gracefully (clearly naming that) while the other two still run.
+2. **Fleet validation** — the same load-and-resolve pass `cadre validate` performs, in-process, over every packaged starter fleet (`cadre/data/fleets/*.example.yaml`) — the release artifacts this package ships — resolved against the packaged persona pool, independent of this host's own provisioning.
+3. **Preflight resolution** — the generated `~/.cadre/fleets/palette-fleet.yaml` (from step 6) is preflighted against the live host palette through the exact same `cadre.preflight` gate a real run uses. Because that fleet is derived from a successful `cadre verify-palette`, it should always resolve clean; a refusal here is real drift signal (the palette and the fleet have gone stale relative to each other), not a fixture gap.
+
+Exit `0` means all three passed — the tag gate is clear. Any `FAIL` names exactly what drifted (never content-sniffed, never invented prose — check 3's refusal text is `cadre.preflight`'s own). Treat a FAIL as a release blocker: it usually means either this host's provisioning is stale (re-run step 6, `cadre verify-palette`) or something upstream genuinely drifted (re-verify the banked facts in `docs/reference/hermes/README.md` before assuming the check itself is wrong).
+
 ## Host conventions — the fleet library (`~/.cadre/fleets/`)
 
 A Hermes agent selects a fleet to run from a **host-local fleet library**, separate from the installed package:

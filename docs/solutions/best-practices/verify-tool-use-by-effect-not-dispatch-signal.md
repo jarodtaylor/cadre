@@ -22,7 +22,7 @@ Cadre's palette builder records the toolsets a Hermes profile *declares*, but a 
 
 A paid host dogfood on `silas` proved the fire-signal is *structurally* wrong. Grok's **native** web search grounded the answer — real live date, cited URLs that training data cannot produce — but returned in a single round-trip, `finish_reason=stop`, with **no tool-call message**. The probe false-negatived `web` and would have *dropped a working toolset* from the palette — strictly worse than the declared baseline. `x_search` (an explicitly dispatched tool: `finish_reason=tool_calls`, tool messages present) detected correctly. Same probe, opposite verdicts, decided entirely by *how the provider happens to implement the capability*.
 
-A free source read of Hermes (`agent/conversation_loop.py`, `run_agent.py` on the host) explained why, and set the ceiling: `run_conversation()` returns only `{final_response, messages, api_calls, ...}`. `api_calls` is a **round-trip counter** — a natively-grounded answer is one round-trip, identical by that count to answering from memory. The raw provider `usage` (which might carry a native-tool indicator such as a sources count) is normalized to token buckets and dropped from the return dict. So no mechanical signal Hermes exposes distinguishes "grounded via a server-side tool" from "answered from memory."
+A free source read of Hermes (`agent/conversation_loop.py`, `run_agent.py` on the host) explained why, and set the ceiling: `run_conversation()` returns only `{final_response, messages, api_calls, ...}`. `api_calls` is a **round-trip counter** — a natively-grounded answer is one round-trip, identical by that count to answering from memory. The raw provider `usage` payload (which might carry a native-tool indicator such as a sources count) is normalized to bare token/cost counters — and nothing tool-shaped survives that normalization. *(Correction, 2026-07-10 / #76: the counters themselves — `input_tokens`, `output_tokens`, cache/reasoning counts, `estimated_cost_usd`, `cost_status`, `cost_source` — ARE returned on the result dict; the original "dropped from the return dict" reading was true of `chat()`, which discards everything but `final_response`. The ceiling this doc argues from is unchanged: no field distinguishes native grounding from a memory answer.)* So no mechanical signal Hermes exposes distinguishes "grounded via a server-side tool" from "answered from memory."
 
 ## Guidance
 
@@ -70,7 +70,9 @@ The ceiling, established for free by reading the source (why no fix to the scan 
 run_conversation() -> {final_response, messages, api_calls, completed, failed, error}
   api_calls  = round-trip COUNTER   (native grounding = 1 = a memory answer)
   messages   = only DISPATCHED tools leave a tool-call / role:tool entry
-  usage      = normalized to token buckets, dropped from the return dict
+  usage      = normalized to token/cost counters — returned on the dict, but
+               nothing tool-shaped survives (chat() discards even the counters;
+               corrected 2026-07-10, #76)
 ∴ no return-dict field distinguishes native grounding from a memory answer.
 ```
 
