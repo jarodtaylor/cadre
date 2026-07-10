@@ -93,6 +93,18 @@ def _default_fleet_path() -> Path:
     return _DEFAULT_FLEET_PATH.expanduser()
 
 
+def default_fleet_path() -> Path:
+    """Public accessor for the generated palette-fleet location (expanded).
+
+    For consumers OUTSIDE the palette-fleet write path (e.g. ``cadre smoke``'s
+    preflight check, which reads the file this module generates) — importing
+    the private helper across that boundary couples them to an internal
+    detail. Mirrors ``discover.default_candidates_path()``, added for the
+    identical reason (CodeRabbit #74).
+    """
+    return _default_fleet_path()
+
+
 def _first_verified_per_provider(records: list[VerifyRecord]) -> list[VerifyRecord]:
     """Return the FIRST ``ok=True`` record per distinct provider, in ``records``
     order, capped at ``_MAX_LANES`` distinct providers.
