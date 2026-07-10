@@ -418,7 +418,7 @@ class TestCheckPreflight(unittest.TestCase):
         """
         import cadre.palette_fleet as palette_fleet_module
 
-        self.assertEqual(smoke.default_fleet_path(), palette_fleet_module._default_fleet_path())
+        self.assertEqual(smoke.default_fleet_path(), palette_fleet_module.default_fleet_path())
 
     def test_string_fleet_path_accepted(self):
         fleet_path = self._write_fleet()
