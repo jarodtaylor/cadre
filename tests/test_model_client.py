@@ -267,11 +267,13 @@ class TestUsageReceipt(unittest.TestCase):
 
 
 class TestUsageReceiptNumberSanity(unittest.TestCase):
-    """Folded review finding: a usage/cost number must be safe to serialize.
+    """Folded review finding: a usage/cost number must be safe and sane.
     NaN/Inf floats are not valid JSON (RFC 8259); a pathological int magnitude
-    risks CPython's int-to-str conversion cap. A value that fails the check is
-    dropped, not substituted — capture-don't-gate: a missing receipt entry is
-    honest, a manifest write that later blows up is not.
+    risks CPython's int-to-str conversion cap; a negative value is never a
+    legitimate token count or cost, so it's upstream drift too. A value that
+    fails the check is dropped, not substituted — capture-don't-gate: a
+    missing receipt entry is honest, a manifest write that later blows up or
+    misrepresents spend is not.
     """
 
     def test_nan_cost_dropped(self):
@@ -289,6 +291,16 @@ class TestUsageReceiptNumberSanity(unittest.TestCase):
 
     def test_huge_input_tokens_dropped(self):
         r = run_with(result=run_conversation_ok("hi", input_tokens=10**16))
+        self.assertIsNone(r.usage)
+
+    def test_negative_input_tokens_dropped(self):
+        # Folded review finding: a token counter is inherently non-negative;
+        # a negative value is upstream drift, not a legitimate reading.
+        r = run_with(result=run_conversation_ok("hi", input_tokens=-5))
+        self.assertIsNone(r.usage)
+
+    def test_negative_cost_dropped(self):
+        r = run_with(result=run_conversation_ok("hi", estimated_cost_usd=-0.01))
         self.assertIsNone(r.usage)
 
     def test_normal_values_kept(self):

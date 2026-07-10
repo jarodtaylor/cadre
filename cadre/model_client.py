@@ -116,10 +116,12 @@ def _is_safe_usage_number(value: int | float) -> bool:
     # A float must be JSON-finite (NaN/Inf are not valid JSON per RFC 8259);
     # an int must stay under a sane magnitude so a pathological upstream value
     # can't later blow past CPython's int-to-str conversion cap when the
-    # manifest is serialized.
+    # manifest is serialized. Token counters and cost are inherently
+    # non-negative, so a negative value is upstream drift too — dropped, not
+    # gated, same as NaN/Inf or an oversized magnitude.
     if isinstance(value, float):
-        return math.isfinite(value)
-    return abs(value) < _MAX_USAGE_INT
+        return math.isfinite(value) and value >= 0
+    return 0 <= value < _MAX_USAGE_INT
 
 
 def _usage_receipt(result: dict) -> dict | None:
