@@ -35,6 +35,15 @@ Out of scope (per the issue): spend metering, budgets, per-run dollar caps,
 pricing awareness. This is allow/deny, not FinOps. Also out of scope: a
 policy CLI editor, per-fleet policy overrides.
 
+The policy file location resolves via ``resolve_policy_path`` (below): an
+explicit path -> the ``CADRE_POLICY`` env var -> ``DEFAULT_POLICY_PATH``
+(``~/.cadre/policy.yaml``). The env override exists for hermetic tests and
+callers that need to inject a path (mirroring ``CADRE_PALETTE`` /
+``CADRE_PERSONAS_DIR``) — a same-user env var is trivially writable by
+anyone who can already run code as that user, so controlling it is OUTSIDE
+this module's threat model, which is about an untrusted FILE's
+content/ownership, not an untrusted environment.
+
 Engine purity (KTD7): this module is never imported by ``cadre.engine`` or
 ``cadre.model_client`` (``TestEngineIsolation`` in ``tests/test_personas.py``
 guards both directions) — policy enforcement is entirely caller-layer,
@@ -78,6 +87,49 @@ class PolicyError(Exception):
     """
 
 
+def resolve_policy_path(path: str | Path | None = None) -> Path:
+    """Resolve the policy file path, mirroring
+    ``cadre.preview_lint.resolve_palette_path``: explicit ``path`` ->
+    ``CADRE_POLICY`` env -> ``DEFAULT_POLICY_PATH``, then ``expanduser()``.
+
+    Every chokepoint that needs the policy path — ``load_policy`` itself,
+    plus preflight/verify-palette/discover's own resolution before they call
+    it — goes through this ONE function, so a HOME-less host or a NUL-byte
+    path degrades identically everywhere instead of several hand-rolled
+    ``Path(...).expanduser()`` call sites silently drifting apart.
+
+    Unlike ``resolve_palette_path`` (which returns ``None`` on an
+    unresolvable path), this RAISES ``PolicyError``. Every caller of this
+    function already fail-closes on ``PolicyError`` — it's what
+    ``load_policy`` raises for an untrustworthy file — so routing an
+    unresolvable *path* through the same exception lets that existing
+    handling catch it with no new branch, rather than a raw traceback on a
+    HOME-less host (a container with no ``$HOME`` and no passwd entry).
+
+    Raises:
+        PolicyError: ``path`` is a non-str/Path, ``expanduser()`` cannot
+            resolve a leading ``~`` (HOME unresolvable), or the resolved
+            path carries an embedded NUL byte (survives ``Path()``/
+            ``expanduser()`` but raises at every filesystem op that would
+            follow — reading, stat-ing, opening).
+    """
+    if path is None:
+        path = default_policy_path()
+    try:
+        resolved = Path(path).expanduser()
+    except (ValueError, TypeError, RuntimeError) as exc:
+        raise PolicyError(
+            f"the policy path {path!r} could not be resolved ({exc}). This "
+            "is a safety-relevant setting — fix or unset CADRE_POLICY."
+        ) from None
+    if "\x00" in str(resolved):
+        raise PolicyError(
+            f"the policy path {path!r} could not be resolved (embedded NUL "
+            "byte). This is a safety-relevant setting — fix or unset CADRE_POLICY."
+        )
+    return resolved
+
+
 @dataclass(frozen=True)
 class Violation:
     """One (provider, model) pair blocked by a policy rule, and which rule.
@@ -113,11 +165,24 @@ class Policy:
 
     deny_providers: frozenset[str] = field(default_factory=frozenset)
     restrict_models: tuple[_RestrictRule, ...] = ()
-    source: str = "absent"  # "absent" (no file) | "file" (loaded from disk)
+    # "absent": no file AT ALL, OR a file that exists but whose YAML top level
+    # parses to None (empty, or fully-commented like SEED_TEMPLATE) — a
+    # deliberate tri-state simplification (KTD2, see load_policy's docstring):
+    # an inert on-disk file is policy-EFFECT-equivalent to no file, so both
+    # collapse to the same value here. A future `policy show` verb wanting to
+    # tell "no file" apart from "a file that does nothing" must stat the path
+    # itself; `source` alone cannot distinguish them.
+    # "file": loaded from disk with a parsed (possibly all-empty) mapping.
+    source: str = "absent"
 
     @classmethod
     def permissive(cls) -> "Policy":
-        """The absent-file default: blocks nothing."""
+        """The permissive default (``source="absent"``): blocks nothing.
+
+        Returned by ``load_policy`` for a missing file AND for a present but
+        inert one (see the ``source`` field comment above) — this
+        classmethod itself is source-agnostic and always yields "absent".
+        """
         return cls()
 
     def check(self, provider: str, model: str) -> "Violation | None":
@@ -131,16 +196,37 @@ class Policy:
         outcome for that model — a later rule that would also match is not
         additionally consulted (first-match-wins, not most-permissive-wins).
         A model matching no rule is unaffected by ``restrict_models``
-        entirely. Provider slugs and model ids are host-defined identifiers,
-        compared exactly as written: ``fnmatch.fnmatchcase`` is used (never
-        the bare ``fnmatch.fnmatch``, whose case sensitivity silently
-        depends on the host OS's path-casing convention).
+        entirely.
+
+        A ``match`` glob is tested against BOTH the full ``model`` string AND
+        its post-last-``/`` segment (``model.rsplit("/", 1)[-1]``) — a rule
+        either matches on its own, so a bare-model glob like ``"family-*"``
+        still catches a routing provider's vendor-prefixed slug (e.g.
+        ``"vendor/family-large"``), not just a bare model id. This can only
+        WIDEN which models a rule catches versus checking the full string
+        alone: a false-block just refuses a fleet loudly (fail-safe), while a
+        false-allow (missing a vendor-prefixed match) is the actual
+        wrong-billing-route spend this feature exists to prevent.
+
+        Provider and model comparisons are CASE-INSENSITIVE by design: both
+        sides of every comparison are ``.casefold()``ed before matching
+        (``fnmatch.fnmatchcase`` — never the bare ``fnmatch.fnmatch``, whose
+        case sensitivity silently depends on the host OS's path-casing
+        convention — supplies the glob semantics; casefolding supplies
+        case-insensitivity explicitly rather than incidentally). This can
+        only WIDEN blocking too: a case-mismatched rule (the policy author
+        wrote one casing, the host reports another) would otherwise be a
+        SILENT NO-OP — the harmful direction for a money-safety file.
         """
-        if provider in self.deny_providers:
+        provider_cf = provider.casefold()
+        if provider_cf in {p.casefold() for p in self.deny_providers}:
             return Violation(provider, model, f"deny_providers: {provider}")
+        model_cf = model.casefold()
+        segment_cf = model.rsplit("/", 1)[-1].casefold()
         for rule in self.restrict_models:
-            if fnmatch.fnmatchcase(model, rule.match):
-                if provider in rule.allowed_providers:
+            match_cf = rule.match.casefold()
+            if fnmatch.fnmatchcase(model_cf, match_cf) or fnmatch.fnmatchcase(segment_cf, match_cf):
+                if provider_cf in {p.casefold() for p in rule.allowed_providers}:
                     return None
                 allowed = ", ".join(rule.allowed_providers)
                 return Violation(
@@ -201,21 +287,29 @@ def load_policy(path: str | Path) -> Policy:
     touches the filesystem.
 
     Args:
-        path: The policy file location (already resolved by the caller —
-            e.g. via ``default_policy_path()`` — this function does no env
-            lookup of its own).
+        path: The policy file location — resolved via ``resolve_policy_path``
+            (an already-absolute ``Path`` passes through unchanged; the
+            caller is still expected to have picked ``path`` itself — e.g.
+            via ``default_policy_path()`` — this function does no env
+            lookup of its own beyond ``resolve_policy_path``'s expansion).
 
     Returns:
-        ``Policy.permissive()`` if ``path`` does not exist, or a
-        ``source="file"`` ``Policy`` if it exists and parses.
+        ``Policy.permissive()`` (``source="absent"``) if ``path`` does not
+        exist, OR if it exists but its YAML top level parses to ``None``
+        (empty, or fully-commented like ``SEED_TEMPLATE`` — see the
+        ``Policy.source`` field comment for why this tri-state collapse is
+        deliberate). Otherwise a ``source="file"`` ``Policy`` reflecting the
+        parsed (possibly all-empty) rules.
 
     Raises:
-        PolicyError: ``path`` exists but is a symlink, foreign-owned,
-            group/other-writable, unreadable, not UTF-8, not valid YAML, a
-            non-mapping top level, carries an unrecognized top-level or
-            ``restrict_models`` entry key, or a rule is wrong-shaped.
+        PolicyError: ``path`` cannot even be resolved (see
+            ``resolve_policy_path``), or exists but is a symlink,
+            foreign-owned, group/other-writable, unreadable, not UTF-8, not
+            valid YAML, a non-mapping top level, carries an unrecognized
+            top-level or ``restrict_models`` entry key, or a rule is
+            wrong-shaped.
     """
-    resolved = Path(path).expanduser()
+    resolved = resolve_policy_path(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(str(resolved), flags)
@@ -375,8 +469,11 @@ SEED_TEMPLATE = """\
 #   - example-provider
 #
 # restrict_models: pin an expensive model or family to the one provider whose
-# billing you actually intend — `match` is a glob (fnmatch), so a `*` suffix
-# covers a whole family. A model matching no rule here is unaffected.
+# billing you actually intend — `match` is a glob (fnmatch, case-insensitive),
+# checked against BOTH the full model id AND the bare segment after its last
+# "/" — so a `*` suffix like "example-family-*" still catches a
+# vendor-prefixed slug (e.g. "vendor/example-family-large"), not just a bare
+# model id. A model matching no rule here is unaffected.
 #
 # restrict_models:
 #   - match: "example-family-*"

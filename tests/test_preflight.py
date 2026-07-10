@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 from cadre.config import FleetConfig, JudgeSpec, SpecialistSpec, SynthesisSpec
 from cadre.personas import resolve
+from cadre.policy import PolicyError
 from cadre.preflight import _hermes_cli_available, preflight_refusal
 from cadre.preview_lint import Palette
 
@@ -641,6 +642,34 @@ class TestPreflightRefusalMalformedPolicy(_PreflightTestBase):
         cfg = _make_config(convergence="collect", specialist_provider="prov-a", specialist_model="model-x")
         refusal = preflight_refusal(cfg, palette_path=palette_path, policy_path=policy_path)
         self.assertIsNotNone(refusal)
+
+
+class TestPreflightRefusalPolicyPathResolutionFailure(_PreflightTestBase):
+    """An unresolvable policy path (HOME unset, an embedded NUL byte) is now
+    a ``PolicyError`` like any other untrustworthy policy file
+    (``cadre.policy.resolve_policy_path``) — the SAME ``except PolicyError``
+    handling that already covers a malformed file must catch it and refuse
+    legibly, not crash with an unbound-variable error while building the
+    refusal message (the resolved path is normally bound by the time the
+    except block runs; a resolution failure is the one case where it never
+    gets that far)."""
+
+    def test_resolution_failure_refuses_not_raises(self):
+        cfg = _make_config()
+        with patch("cadre.preflight.resolve_policy_path", side_effect=PolicyError("boom")):
+            refusal = preflight_refusal(cfg)
+        self.assertIsNotNone(refusal)
+        self.assertIn("policy_blocked", refusal)
+
+    def test_resolution_failure_with_explicit_policy_path_refuses_not_raises(self):
+        """Same failure mode, but with an explicit policy_path param (still
+        never reaches a bound resolved path) — the fallback message-building
+        must not crash regardless of which resolution branch failed."""
+        cfg = _make_config()
+        with patch("cadre.preflight.resolve_policy_path", side_effect=PolicyError("boom")):
+            refusal = preflight_refusal(cfg, policy_path="~/.cadre/policy.yaml")
+        self.assertIsNotNone(refusal)
+        self.assertIn("policy_blocked", refusal)
 
 
 class TestPreflightRefusalPolicyPathResolution(_PreflightTestBase):

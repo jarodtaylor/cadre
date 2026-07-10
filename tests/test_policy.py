@@ -29,6 +29,7 @@ from cadre.policy import (
     default_policy_path,
     filter_pairs,
     load_policy,
+    resolve_policy_path,
 )
 
 
@@ -220,9 +221,11 @@ class TestPolicyCheckDenyProviders(unittest.TestCase):
         v = pol.check("prov-a", "model-x")
         self.assertEqual(v.rule, "deny_providers: prov-a")
 
-    def test_provider_slug_comparison_is_case_sensitive(self):
+    def test_provider_slug_comparison_is_case_insensitive(self):
+        """#78 fold: a case-mismatched rule must BLOCK, not silently no-op —
+        the harmful direction for a money-safety file."""
         pol = Policy(deny_providers=frozenset({"prov-a"}))
-        self.assertIsNone(pol.check("Prov-A", "model-x"))
+        self.assertIsNotNone(pol.check("Prov-A", "model-x"))
 
 
 # ---------------------------------------------------------------------------
@@ -271,9 +274,13 @@ class TestPolicyCheckRestrictModels(unittest.TestCase):
         v = pol.check("prov-a", "fam-large")
         self.assertIsNotNone(v)
 
-    def test_model_id_comparison_is_case_sensitive(self):
+    def test_model_id_comparison_is_case_insensitive(self):
+        """#78 fold: "Fam-*" now matches "fam-large" case-insensitively — a
+        blocked violation (prov-a is not in the rule's allowed_providers),
+        not a silent no-op."""
         pol = self._policy(match="Fam-*", allowed=("prov-b",))
-        self.assertIsNone(pol.check("prov-a", "fam-large"))  # does not match "Fam-*"
+        self.assertIsNotNone(pol.check("prov-a", "fam-large"))
+        self.assertIsNone(pol.check("prov-b", "fam-large"))  # allowed provider still passes
 
     def test_multiple_allowed_providers(self):
         pol = self._policy(match="fam-*", allowed=("prov-a", "prov-b"))
@@ -293,6 +300,57 @@ class TestPolicyCheckRestrictModels(unittest.TestCase):
         self.assertIsNone(pol.check("prov-a", "fam-special"))
         v = pol.check("prov-b", "fam-special")
         self.assertIsNotNone(v)
+
+
+class TestPolicyCheckRestrictModelsSlugSegment(unittest.TestCase):
+    """#78 fold (money-relevant): a ``restrict_models`` glob must match a
+    vendor-prefixed slug (some providers report a "vendor/model" id), not
+    just a bare model id — the exact wrong-billing-route spend this feature
+    exists to stop. ``match`` is tested against the full model string AND
+    its post-last-"/" segment; matching only WIDENS versus the full-string-only
+    check (a false-block just refuses loudly; a false-allow is the bug)."""
+
+    def _policy(self, match="fam-*", allowed=("prov-a",)):
+        return Policy(
+            restrict_models=(
+                policy_mod._RestrictRule(match=match, allowed_providers=tuple(allowed)),
+            )
+        )
+
+    def test_bare_model_id_allowed_provider_passes(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-a", "fam-x"))
+
+    def test_bare_model_id_disallowed_provider_blocked(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNotNone(pol.check("prov-b", "fam-x"))
+
+    def test_vendor_prefixed_slug_disallowed_provider_blocked(self):
+        """The regression case: a "vendor/fam-x" slug must be caught by a
+        "fam-*" rule exactly as its bare-id sibling is — a rule that only
+        checked the full string would silently miss this and let the run
+        proceed on the wrong (disallowed) billing route."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNotNone(pol.check("prov-b", "vendor/fam-x"))
+
+    def test_vendor_prefixed_slug_allowed_provider_passes(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-a", "vendor/fam-x"))
+
+    def test_unrelated_model_unaffected_by_segment_matching(self):
+        """Segment matching only widens what a rule catches — it must not
+        make an unrelated model start matching."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-b", "other-y"))
+        self.assertIsNone(pol.check("prov-b", "vendor/other-y"))
+
+    def test_violation_rule_text_for_vendor_prefixed_slug(self):
+        """The violation still names the rule and allowed list normally —
+        segment matching changes WHETHER a rule fires, not what it reports."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        v = pol.check("prov-b", "vendor/fam-x")
+        self.assertEqual(v.rule, "restrict_models: 'fam-*' allows [prov-a]")
+        self.assertEqual(v.model, "vendor/fam-x")
 
 
 class TestPolicyCheckDenyBeatsRestrict(unittest.TestCase):
@@ -461,6 +519,90 @@ class TestDefaultPolicyPath(unittest.TestCase):
     def test_empty_env_falls_through_to_default(self):
         with patch.dict(os.environ, {"CADRE_POLICY": ""}):
             self.assertEqual(default_policy_path(), DEFAULT_POLICY_PATH)
+
+
+# ---------------------------------------------------------------------------
+# resolve_policy_path — path -> CADRE_POLICY env -> default -> expanduser;
+# raises PolicyError (never returns None, unlike resolve_palette_path) on an
+# unresolvable path, so every existing PolicyError handler at each chokepoint
+# fail-closes on it with no new branch.
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePolicyPath(_PolicyTestBase):
+    def test_explicit_path_param_used(self):
+        result = resolve_policy_path(self.tmp / "policy.yaml")
+        self.assertEqual(result, (self.tmp / "policy.yaml").expanduser())
+
+    def test_cadre_policy_env_override(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": str(self.tmp / "env-policy.yaml")}):
+            result = resolve_policy_path(None)
+        self.assertEqual(result, self.tmp / "env-policy.yaml")
+
+    def test_explicit_param_takes_priority_over_env(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": str(self.tmp / "env-policy.yaml")}):
+            result = resolve_policy_path(self.tmp / "param-policy.yaml")
+        self.assertEqual(result, self.tmp / "param-policy.yaml")
+
+    def test_no_env_no_param_uses_default_path(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True):
+            result = resolve_policy_path(None)
+        self.assertEqual(result, Path(DEFAULT_POLICY_PATH).expanduser())
+
+    def test_expanduser_runtimeerror_raises_policy_error(self):
+        """Path.expanduser() raises RuntimeError when a path starts with ~
+        and HOME is unresolvable (a container case) — resolve_policy_path
+        must degrade to a PolicyError, not crash (mirrors
+        test_preview_lint.py's identical resolve_palette_path pin, but this
+        function RAISES rather than returning None — see its docstring)."""
+        with patch.object(Path, "expanduser", side_effect=RuntimeError("home unresolvable")):
+            with self.assertRaises(PolicyError):
+                resolve_policy_path("~/.cadre/policy.yaml")
+
+    def test_nul_byte_path_raises_policy_error(self):
+        """A NUL byte survives Path()/expanduser() but raises at every
+        filesystem op that would follow — reject it here so load_policy and
+        every chokepoint's resolution treat it uniformly as untrustworthy."""
+        with self.assertRaises(PolicyError):
+            resolve_policy_path("/tmp/\x00bad-policy.yaml")
+
+    def test_policy_error_names_the_attempted_path(self):
+        with self.assertRaises(PolicyError) as ctx:
+            resolve_policy_path("/tmp/\x00bad-policy.yaml")
+        self.assertIn("bad-policy.yaml", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Policy.source tri-state boundary: "absent" covers a missing file AND a
+# present file whose YAML parses to None; anything else that parses (even an
+# explicitly-empty mapping) is "file" — see the Policy.source field comment.
+# ---------------------------------------------------------------------------
+
+
+class TestPolicySourceTriState(_PolicyTestBase):
+    def test_missing_file_is_source_absent(self):
+        pol = load_policy(self.tmp / "does-not-exist.yaml")
+        self.assertEqual(pol.source, "absent")
+
+    def test_fully_commented_file_is_source_absent(self):
+        path = self._write("# nothing active here\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "absent")
+
+    def test_empty_mapping_file_is_source_file_not_absent(self):
+        """Pins the exact boundary the clarified `source` docstring
+        describes: a file present on disk that parses to an (explicitly
+        empty) MAPPING — as opposed to parsing to None — is still `source
+        == "file"`, even though it carries zero active rules like the
+        fully-commented case above. `source` alone cannot tell these two
+        "blocks nothing" cases apart by design (KTD2); a future `policy
+        show` verb must stat the path itself."""
+        path = self._write("{}\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "file")
+        self.assertEqual(pol.deny_providers, frozenset())
+        self.assertEqual(pol.restrict_models, ())
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from unittest.mock import patch
 import yaml
 
 import cadre.verify_palette as verify_palette
+from cadre.policy import PolicyError
 
 
 # ---------------------------------------------------------------------------
@@ -1055,6 +1056,9 @@ class TestVerifyPaletteMainPolicyRefusesBeforeCall(_VerifyPalettePolicyTestBase)
             _code, _out, err, _calls = self._run_main()
         self.assertIn("prov-a/model-x", err)
         self.assertIn("deny_providers: prov-a", err)
+        # No existing palette in this test — model-x was never admitted in
+        # the first place, so this is a plain exclusion, not an eviction.
+        self.assertNotIn("pruned from your palette", err)
 
     def test_banned_pair_absent_from_written_palette(self):
         self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
@@ -1113,6 +1117,11 @@ class TestVerifyPaletteMainPolicyPrunesInPaletteViolation(_VerifyPalettePolicyTe
         # It must NOT ALSO trigger the generic "no longer in candidates file /
         # will DROP" warning — it's still in the file; policy is why it's gone.
         self.assertNotIn("will DROP", err)
+        # It WAS on the existing palette — this is an EVICTION, and must read
+        # differently from skipping a new candidate that was never admitted.
+        self.assertIn("prov-a/model-old (restrict_models: 'model-old' allows "
+                       "[prov-other]) — not sent for verification — pruned "
+                       "from your palette", err)
 
     def test_written_palette_no_longer_contains_pruned_pair(self):
         """The write-side proof: the rewritten palette.yaml does not contain
@@ -1207,6 +1216,43 @@ class TestVerifyPaletteMainMalformedPolicyRefuses(_VerifyPalettePolicyTestBase):
         with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
             self._run_main()
         self.assertEqual(self.palette_path.read_text(encoding="utf-8"), original)
+
+
+class TestVerifyPaletteMainPolicyPathResolutionFailure(_VerifyPalettePolicyTestBase):
+    """An unresolvable policy path (HOME unset, an embedded NUL byte) is now
+    a ``PolicyError`` like any other untrustworthy policy file
+    (``cadre.policy.resolve_policy_path``) — the SAME ``except PolicyError``
+    handling that already covers a malformed file must catch it and exit
+    cleanly, not crash — no candidates file even needs to exist for this."""
+
+    def test_resolution_failure_exits_nonzero_before_any_call(self):
+        with patch.object(verify_palette, "resolve_policy_path", side_effect=PolicyError("boom")):
+            code, _out, _err, calls = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+
+    def test_resolution_failure_prints_clean_message_not_traceback(self):
+        with patch.object(verify_palette, "resolve_policy_path", side_effect=PolicyError("boom")):
+            _code, out, _err, _calls = self._run_main()
+        self.assertIn("boom", out)
+
+
+class TestVerifyPaletteMainPolicyExcludedMessageSanitized(_VerifyPalettePolicyTestBase):
+    """The "all candidates excluded by policy (<path>)" message interpolates
+    the resolved policy path — a caller-controlled trust surface (CADRE_POLICY
+    is an env var, same rule as every other dynamic field this module
+    renders), so an escape byte in it must not forge terminal output."""
+
+    def test_hostile_policy_path_sanitized_in_all_excluded_message(self):
+        self._write_candidates([("prov-a", "model-x")])
+        hostile_name = "poli\x1b[2Kcy.yaml"
+        policy_path = self.tmp / hostile_name
+        policy_path.write_text("deny_providers:\n  - prov-a\n", encoding="utf-8")
+        policy_path.chmod(0o600)
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, out, _err, _calls = self._run_main()
+        self.assertNotIn("\x1b", out)
+        self.assertIn("nothing to verify", out)
 
 
 if __name__ == "__main__":

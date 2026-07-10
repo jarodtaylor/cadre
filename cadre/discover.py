@@ -56,7 +56,7 @@ import yaml
 
 from cadre.approval import _write_owner_only
 from cadre.capture import resolved_hermes_home
-from cadre.policy import Policy, PolicyError, Violation, default_policy_path, load_policy
+from cadre.policy import Policy, PolicyError, Violation, load_policy, resolve_policy_path
 from cadre.resources import palette_example_path
 from cadre.text_safety import sanitize as _sanitize
 
@@ -479,8 +479,8 @@ def main() -> int:
     """
     print("[cadre] discovering authenticated providers from Hermes...", file=sys.stderr)
 
-    policy_path = Path(default_policy_path()).expanduser()
     try:
+        policy_path = resolve_policy_path()
         policy = load_policy(policy_path)
     except PolicyError as exc:
         print(_sanitize(str(exc)))

@@ -46,7 +46,7 @@ from pathlib import Path
 from cadre.config import FleetConfig
 from cadre.discover import default_candidates_path
 from cadre.failure import FailureReason
-from cadre.policy import PolicyError, default_policy_path, load_policy
+from cadre.policy import PolicyError, default_policy_path, load_policy, resolve_policy_path
 from cadre.preview_lint import Palette, load_palette, off_palette_model_pairs, resolve_palette_path
 from cadre.text_safety import sanitize as _sanitize
 
@@ -166,12 +166,13 @@ def preflight_refusal(
     on. Off-palette *toolsets* are never refused here (R4) — this checks
     models only.
     """
-    resolved_policy_path = (
-        Path(policy_path).expanduser()
-        if policy_path is not None
-        else Path(default_policy_path()).expanduser()
-    )
+    # Best-effort fallback for the refusal message below, in case resolution
+    # itself fails before reassigning this to the real resolved Path — an
+    # unresolvable path (e.g. HOME unset, an embedded NUL byte) is now a
+    # PolicyError like any other untrustworthy policy file (resolve_policy_path).
+    resolved_policy_path = policy_path if policy_path is not None else default_policy_path()
     try:
+        resolved_policy_path = resolve_policy_path(policy_path)
         policy = load_policy(resolved_policy_path)
     except PolicyError as exc:
         return (

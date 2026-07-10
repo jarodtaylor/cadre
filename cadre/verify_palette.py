@@ -71,7 +71,7 @@ from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
 from cadre.discover import _DEFAULT_CANDIDATES_PATH
 from cadre.palette_fleet import write_palette_fleet
-from cadre.policy import PolicyError, default_policy_path, filter_pairs, load_policy
+from cadre.policy import PolicyError, filter_pairs, load_policy, resolve_policy_path
 from cadre.text_safety import sanitize as _sanitize
 
 # Default palette output path.
@@ -518,9 +518,9 @@ def main(all_candidates: bool = False) -> int:
     """
     candidates_path = _DEFAULT_CANDIDATES_PATH.expanduser()
     palette_path = _DEFAULT_PALETTE_PATH.expanduser()
-    policy_path = Path(default_policy_path()).expanduser()
 
     try:
+        policy_path = resolve_policy_path()
         policy = load_policy(policy_path)
     except PolicyError as exc:
         print(_sanitize(str(exc)))
@@ -538,21 +538,31 @@ def main(all_candidates: bool = False) -> int:
         )
         return 1
 
+    # Read once, early: both the policy-exclusion disclosure right below (to
+    # tell an EVICTION of a previously-trusted pair apart from skipping a new
+    # candidate) and the cap/always-keep logic further down need the existing
+    # palette's pairs.
+    existing = _existing_palette_pairs(palette_path)
+
     # #78: banned candidates are refused BEFORE any paid call — filtered out
     # of the working list here, before the cap/always-keep logic below ever
     # runs, so verify_candidates() is never even invoked for them.
     candidates, policy_violations = filter_pairs(candidates, policy)
     for v in policy_violations:
+        # A violating pair already on the existing palette is being EVICTED —
+        # that must read differently from merely skipping a new candidate
+        # that was never admitted in the first place.
+        eviction = " — pruned from your palette" if (v.provider, v.model) in existing else ""
         print(
             f"[cadre] policy: excluded {_sanitize(v.provider)}/{_sanitize(v.model)} "
-            f"({_sanitize(v.rule)}) — not sent for verification",
+            f"({_sanitize(v.rule)}) — not sent for verification{eviction}",
             file=sys.stderr,
         )
 
     if not candidates:
         print(
             f"All {len(policy_violations)} candidate(s) are excluded by policy "
-            f"({policy_path}) — nothing to verify."
+            f"({_sanitize(str(policy_path))}) — nothing to verify."
         )
         return 1
 
@@ -561,7 +571,6 @@ def main(all_candidates: bool = False) -> int:
     # previously-verified pair. Existing-palette pairs still in the candidates
     # file are ALWAYS re-verified (exempt from the cap); the cap bounds only
     # the discovery flood.
-    existing = _existing_palette_pairs(palette_path)
     to_verify = (
         candidates
         if all_candidates

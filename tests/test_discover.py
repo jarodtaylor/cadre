@@ -26,6 +26,7 @@ from unittest.mock import patch
 import yaml
 
 import cadre.discover as discover
+from cadre.policy import PolicyError
 
 # ---------------------------------------------------------------------------
 # Fixtures — mirror the LIVE-VERIFIED payload shape (probed on the Hermes host
@@ -949,6 +950,25 @@ class TestDiscoverMainMalformedPolicyRefuses(_DiscoverPolicyTestBase):
             _code, out, _err = self._run_main(_two_provider_result())
         self.assertIn(str(policy_path), out)
         self.assertIn("Fix or remove", out)
+
+
+class TestDiscoverMainPolicyPathResolutionFailure(_DiscoverPolicyTestBase):
+    """An unresolvable policy path (HOME unset, an embedded NUL byte) is now
+    a ``PolicyError`` like any other untrustworthy policy file
+    (``cadre.policy.resolve_policy_path``) — the SAME ``except PolicyError``
+    handling that already covers a malformed file must catch it and exit
+    cleanly, not crash — no candidates write, same as the malformed case."""
+
+    def test_resolution_failure_exits_nonzero_no_write(self):
+        with patch.object(discover, "resolve_policy_path", side_effect=PolicyError("boom")):
+            code, _out, _err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 1)
+        self.assertFalse(self.candidates_path.exists())
+
+    def test_resolution_failure_prints_clean_message_not_traceback(self):
+        with patch.object(discover, "resolve_policy_path", side_effect=PolicyError("boom")):
+            _code, out, _err = self._run_main(_two_provider_result())
+        self.assertIn("boom", out)
 
 
 if __name__ == "__main__":
