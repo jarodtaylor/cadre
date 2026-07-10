@@ -61,12 +61,13 @@ def _cfg(**overrides):
 
 def _lane(role="web", provider="openrouter", model="google/gemini-3-flash",
           ok=True, text=None, error=None, elapsed_s=1.23,
-          toolset=None, timed_out=False, reason=None) -> AgentResult:
+          toolset=None, timed_out=False, reason=None, usage=None) -> AgentResult:
     """Build an AgentResult with U1 capture fields populated.
 
     ``reason`` (U5, #70) defaults to None — a caller building a failed lane
     passes the FailureReason member it wants surfaced; a successful lane never
-    needs one.
+    needs one. ``usage`` (#76) defaults to None — pass a receipt dict to
+    exercise the manifest's per-lane usage serialization.
     """
     r = AgentResult(
         role=role,
@@ -79,6 +80,7 @@ def _lane(role="web", provider="openrouter", model="google/gemini-3-flash",
         toolset=list(toolset) if toolset is not None else [],
         timed_out=timed_out,
         reason=reason,
+        usage=usage,
     )
     return r
 
@@ -2307,11 +2309,13 @@ class TestSaveLaneSubdir(unittest.TestCase):
 
 
 def _iterative_lane(role, *, round_num=1, ok=True, provider="openrouter", model="a/m",
-                    toolset=None, reason=None) -> AgentResult:
+                    toolset=None, reason=None, usage=None) -> AgentResult:
     """AgentResult for an iterative round lane — toolset defaults to [] (not None).
 
     ``reason`` (U5, #70) defaults to None; pass a FailureReason member for a
     failed round-lane to exercise the rounds[][] manifest's reason parity.
+    ``usage`` (#76) mirrors ``_lane`` — a receipt dict for the rounds[][]
+    manifest's usage parity.
     """
     if toolset is None:
         toolset = []
@@ -2320,6 +2324,7 @@ def _iterative_lane(role, *, round_num=1, ok=True, provider="openrouter", model=
     return AgentResult(
         role=role, provider=provider, model=model, ok=ok,
         text=text, error=error, elapsed_s=0.5, toolset=toolset, reason=reason,
+        usage=usage,
     )
 
 
@@ -3030,6 +3035,85 @@ class TestSpecialistMdReasonField(unittest.TestCase):
         self.assertIn("## Skipped", md)
         self.assertNotIn("**Reason:**", md)
         self.assertNotIn("## Error", md)
+
+
+class TestManifestUsageReceipts(unittest.TestCase):
+    """Per-lane usage/cost receipts (#76) — capture-don't-gate: the manifest
+    records whatever receipt the adapter stamped (success, flagged failure, or
+    honest zeros) and serializes null when the call produced none (the schema's
+    existing optional-field convention, matching error/reason). String-typed
+    subfields are provider-library output on a persisted trust surface —
+    sanitized like every other model-derived manifest field.
+    """
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+
+    def _web_lane_record(self, web_lane):
+        """Manifest lanes[] record for ``web_lane`` after a save_run round-trip."""
+        result = _result(specialists=[
+            web_lane,
+            _lane("social", provider="xai", model="grok-4.3", toolset=["x_search"]),
+        ])
+        save_run(_cfg(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        return next(lane for lane in manifest["lanes"] if lane["role"] == "web")
+
+    def test_usage_present_round_trips(self):
+        usage = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "estimated_cost_usd": 0.0042,
+            "cost_status": "estimated",
+            "cost_source": "prov-a",
+        }
+        lane = self._web_lane_record(_lane("web", toolset=["web"], usage=dict(usage)))
+        self.assertEqual(lane["usage"], usage)
+
+    def test_usage_absent_serializes_null(self):
+        lane = self._web_lane_record(_lane("web", toolset=["web"]))
+        self.assertIsNone(lane["usage"])
+
+    def test_zero_usage_values_preserved(self):
+        # OAuth/quota-billed rows may honestly report 0 — the manifest must keep
+        # the 0, never collapse it to null/absent.
+        lane = self._web_lane_record(
+            _lane("web", usage={"input_tokens": 0, "estimated_cost_usd": 0})
+        )
+        self.assertEqual(lane["usage"], {"input_tokens": 0, "estimated_cost_usd": 0})
+
+    def test_failed_lane_usage_still_recorded(self):
+        # A failed call may still have burned tokens — the receipt survives.
+        lane = self._web_lane_record(_lane(
+            "web", ok=False, reason=FailureReason.MODEL_ERROR,
+            usage={"input_tokens": 64},
+        ))
+        self.assertFalse(lane["ok"])
+        self.assertEqual(lane["reason"], "model_error")
+        self.assertEqual(lane["usage"], {"input_tokens": 64})
+
+    def test_usage_string_fields_sanitized(self):
+        # cost_status/cost_source are provider-library strings — a control byte
+        # must render defanged on the persisted manifest (text_safety chokepoint).
+        lane = self._web_lane_record(
+            _lane("web", usage={"cost_status": "est\x1b[31mimated"})
+        )
+        self.assertNotIn("\x1b", lane["usage"]["cost_status"])
+        self.assertIn("est", lane["usage"]["cost_status"])
+
+    def test_rounds_manifest_carries_usage(self):
+        # Schema parity: iterative rounds[][] records carry the same usage field
+        # as top-level lanes[] — an iterative fleet must not silently lack receipts.
+        alpha = _iterative_lane("alpha", usage={"input_tokens": 7})
+        beta = _iterative_lane("beta")
+        result = _iterative_result_for_manifest(rounds=[[alpha, beta]])
+        save_run(_iterative_cfg_for_manifest(), result, self.run_dir)
+        manifest = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        alpha_rec = next(rec for rec in manifest["rounds"][0] if rec["role"] == "alpha")
+        beta_rec = next(rec for rec in manifest["rounds"][0] if rec["role"] == "beta")
+        self.assertEqual(alpha_rec["usage"], {"input_tokens": 7})
+        self.assertIsNone(beta_rec["usage"])
 
 
 if __name__ == "__main__":

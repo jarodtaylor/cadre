@@ -613,6 +613,25 @@ def _representative_file(result: FleetResult, lane, fmap: dict[str, str]) -> str
     )
 
 
+def _usage_for_manifest(usage: dict | None) -> dict | None:
+    """The per-lane usage/cost receipt as it lands in the manifest (#76).
+
+    ``None`` stays ``None`` (JSON null — the schema's existing optional-field
+    convention, matching ``error``/``reason``). Values are whitelist-copied and
+    type-gated upstream (``model_client._usage_receipt``), but the string-typed
+    subfields (``cost_status``/``cost_source``) and any provider-derived key
+    names are still model/provider-library output landing on a persisted trust
+    surface — so they go through the sanitize chokepoint like every other
+    model-derived sink field. Numeric counters pass as-is.
+    """
+    if usage is None:
+        return None
+    return {
+        _sanitize(key): _sanitize(value) if isinstance(value, str) else value
+        for key, value in usage.items()
+    }
+
+
 def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[dict]]:
     """Build the rounds array for the manifest (iterative topology only).
 
@@ -649,6 +668,11 @@ def _build_rounds_manifest(cfg: FleetConfig, result: FleetResult) -> list[list[d
                 "elapsed_s": lane.elapsed_s,
                 "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
                 "timed_out": lane.timed_out,
+                # Per-lane usage/cost receipt (#76) — schema parity with the
+                # top-level lanes[] record; iterative fleets must not silently
+                # lack receipts. Capture-don't-gate; null when the call produced
+                # no receipt.
+                "usage": _usage_for_manifest(lane.usage),
                 "file": f"{subdir}/{fmap[lane.role]}",
             })
         rounds_out.append(round_out)
@@ -692,6 +716,11 @@ def _build_manifest(cfg: FleetConfig, result: FleetResult, lane_filenames: list[
             "toolset": [_sanitize(t) for t in lane.toolset],  # sanitize entries; [] stays [] (never None)
             "timed_out": lane.timed_out,
             "skipped": lane.skipped,   # True = chain never ran this lane; distinct from a real failure
+            # Per-lane usage/cost receipt (#76) — capture-don't-gate: recorded on
+            # success AND flagged failure (a failed call may still have burned
+            # tokens); null when the call produced no receipt (exception/timeout/
+            # skip, or no usage keys on the result). Never affects status.
+            "usage": _usage_for_manifest(lane.usage),
             "file": filename,
         })
 

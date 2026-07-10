@@ -15,8 +15,13 @@ from typing import Any, Callable, Sequence
 from cadre.failure import FailureReason
 
 # A factory builds a live agent: given (provider, model, toolset) it returns an
-# object exposing ``.chat(prompt) -> str``. Injecting it is what makes the engine
-# testable without live calls — tests pass a fake; production uses the default.
+# object exposing ``.run_conversation(prompt) -> dict``. Injecting it is what makes
+# the engine testable without live calls — tests pass a fake; production uses the
+# default. (#76: the adapter reads the full result dict, never bare chat()
+# text — chat() returns only ``final_response`` and discards the structured
+# turn-outcome flags AND the usage/cost fields, which is exactly how an SDK-level
+# failure whose error text came back as a normal assistant message passed as a
+# healthy lane.)
 AgentFactory = Callable[[str, str, list[str]], Any]
 
 
@@ -46,6 +51,14 @@ class AgentResult:
     toolset: list[str] = field(default_factory=list)
     timed_out: bool = False
     skipped: bool = False
+    # Per-call usage/cost receipt (#76) — capture-don't-gate: recorded on success
+    # AND on flagged failure (a failed call may still have burned tokens), and
+    # NEVER consulted for ok/failure classification, exit codes, or convergence.
+    # None when the call produced no result dict at all (exception path, timeout,
+    # skipped lane) or the dict carried no whitelisted usage keys. Zero values are
+    # recorded honestly as 0 (OAuth/quota-billed rows may report 0 or nothing);
+    # cost_status/cost_source are the upstream honesty qualifiers, passed through.
+    usage: dict | None = None
 
     def __post_init__(self) -> None:
         # Normalize a raw-string reason to the FailureReason enum, mirroring
@@ -82,6 +95,70 @@ def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any
     )
 
 
+# Usage/cost whitelist (#76). Exact key names from the banked 2026-07-09 host
+# probe (issue #76 comment; docs/reference/hermes/README.md fact 11):
+# input_tokens / output_tokens / estimated_cost_usd / cost_status / cost_source.
+# The probe also names cache + reasoning token COUNTERS without pinning their
+# exact key strings, so token counters are matched structurally — any
+# ``*_tokens`` key with a non-bool int value — rather than by guessed names.
+# Every value is type-gated so a drifted upstream can't smuggle an arbitrary
+# payload into the manifest under a known key; anything else in the result dict
+# (messages, api_calls, ...) is deliberately NOT copied.
+_USAGE_COST_NUMBER_KEYS = frozenset({"estimated_cost_usd"})
+_USAGE_COST_STR_KEYS = frozenset({"cost_status", "cost_source"})
+
+
+def _usage_receipt(result: dict) -> dict | None:
+    """The whitelist-copied usage/cost subset of a result dict, or None if empty.
+
+    Pure capture (#76): the receipt never influences classification. Zero values
+    survive as 0 — dropping them would make a quota-billed lane's honest "0 cost
+    accounted" indistinguishable from "no receipt at all".
+    """
+    usage: dict = {}
+    for key, value in result.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, bool):
+            continue  # bool is an int subclass; a flag is never a counter
+        if key.endswith("_tokens") and isinstance(value, int):
+            usage[key] = value
+        elif key in _USAGE_COST_NUMBER_KEYS and isinstance(value, (int, float)):
+            usage[key] = value
+        elif key in _USAGE_COST_STR_KEYS and isinstance(value, str):
+            usage[key] = value
+    return usage or None
+
+
+def _flagged_failure_detail(result: dict) -> str | None:
+    """The structured failure detail for a flagged result dict, or None if clean.
+
+    Classification reads ONLY AIAgent's structured turn-outcome markers (#76):
+    ``failed`` truthy, a non-empty ``error``, or ``interrupted`` truthy. The
+    response text NEVER participates — a model legitimately QUOTING an error
+    message (clean flags) must classify as success, so this must never grow a
+    content check. ``turn_exit_reason`` is included as detail when present but
+    is never a trigger by itself: successful turns carry an exit reason too.
+    """
+    failed = bool(result.get("failed"))
+    interrupted = bool(result.get("interrupted"))
+    error = result.get("error")
+    has_error = error is not None and str(error).strip() != ""
+    if not (failed or interrupted or has_error):
+        return None
+    parts = []
+    if failed:
+        parts.append("failed=True")
+    if interrupted:
+        parts.append("interrupted=True")
+    if has_error:
+        parts.append(f"error: {error}")
+    exit_reason = result.get("turn_exit_reason")
+    if exit_reason:
+        parts.append(f"turn_exit_reason: {exit_reason}")
+    return "AIAgent reported a failed turn — " + "; ".join(parts)
+
+
 class ModelClient:
     """Runs a single agent and returns a typed result, never raising on model failure."""
 
@@ -99,27 +176,64 @@ class ModelClient:
     ) -> AgentResult:
         try:
             agent = self._factory(provider, model, list(toolset))
-            text = agent.chat(prompt)
+            # run_conversation, NOT chat (#76): chat() returns only
+            # result["final_response"], discarding the structured turn-outcome
+            # flags — so an SDK-level failure whose error text came back as a
+            # normal assistant message counted as a healthy lane (false-verified
+            # palette pairs, [ok] lanes, exit 0). If this method is absent or its
+            # signature drifts (AIAgent is volatile), the call raises into the
+            # boundary below and fails LOUD as MODEL_ERROR — never a silent
+            # downgrade back to chat().
+            result = agent.run_conversation(prompt)
         except Exception as exc:  # noqa: BLE001
             # Catch-all resilience boundary: any agent failure becomes a typed
-            # failure so the fleet degrades rather than crashes. U1 (live, Hermes
-            # host, 2026-06-17) found AIAgent does NOT raise on a non-retryable API
-            # error — it logs and returns None — so the None/empty check below is the
-            # PRIMARY dead-lane detector; this except covers the cases where chat()
-            # does raise (e.g. agent construction). Both land on a typed failure.
+            # failure so the fleet degrades rather than crashes. Covers agent
+            # construction errors and any raise out of run_conversation (e.g. the
+            # stale-response/client timeouts, which raise into the call).
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error=f"{type(exc).__name__}: {exc}", reason=FailureReason.MODEL_ERROR,
             )
 
-        if text is None or not str(text).strip():
-            # Empty/None/whitespace output is a failure, not a labeled success — it
-            # must never reach the synthesizer as silent ungrounded provenance. This
-            # is the PRIMARY failure path: U1 confirmed AIAgent returns None on a
-            # failed/non-retryable provider call rather than raising.
+        if not isinstance(result, dict):
+            # None or any non-dict return carries no structured flags and no text —
+            # byte-compatible with the pre-#76 None path (the U1 2026-06-17 live
+            # observation: AIAgent logs a non-retryable provider error rather than
+            # raising). A drifted surface that stopped returning dicts lands here
+            # too: no usable output is a failure, never a guessed success.
             return AgentResult(
                 role=role, provider=provider, model=model, ok=False,
                 error="empty response from model", reason=FailureReason.EMPTY_OUTPUT,
             )
 
-        return AgentResult(role=role, provider=provider, model=model, ok=True, text=str(text))
+        # Receipt extracted once, stamped on EVERY dict-shaped outcome below —
+        # success, flagged failure, and empty output all may have burned tokens.
+        usage = _usage_receipt(result)
+
+        failure = _flagged_failure_detail(result)
+        if failure is not None:
+            # Structured flags take precedence over everything, including a
+            # non-empty final_response: on this path the text is AIAgent's own
+            # error prose (the post-loop "I apologize, but I encountered repeated
+            # errors: ..." fall-through), not an answer — it must never reach a
+            # consumer as one. error carries the structured detail, never the text.
+            return AgentResult(
+                role=role, provider=provider, model=model, ok=False,
+                error=failure, reason=FailureReason.MODEL_ERROR, usage=usage,
+            )
+
+        text = result.get("final_response")
+        if text is None or not str(text).strip():
+            # Clean flags but no usable text (missing/None/whitespace
+            # final_response) is a failure, not a labeled success — it must never
+            # reach the synthesizer as silent ungrounded provenance.
+            return AgentResult(
+                role=role, provider=provider, model=model, ok=False,
+                error="empty response from model", reason=FailureReason.EMPTY_OUTPUT,
+                usage=usage,
+            )
+
+        return AgentResult(
+            role=role, provider=provider, model=model, ok=True, text=str(text),
+            usage=usage,
+        )
