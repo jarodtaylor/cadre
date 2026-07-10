@@ -69,7 +69,10 @@ A toolset that lets an agent act beyond reading or searching — running shell c
 Persisting a fleet run's artifacts to disk so the run is auditable after the fact — each specialist's raw output and the synthesis as markdown, plus a run manifest — instead of only printing the synthesized result. On by default; a run that partially fails or times out still produces a folder holding whatever completed.
 
 ### Run manifest
-The structured, machine-readable record of one run's health: per specialist, its outcome (success or failure, elapsed time, the toolset it was asked for, whether it timed out, and the file holding its output), plus run-level facts (the synthesizer model, whether synthesis succeeded, the active Hermes profile). It is the seam a later auditing or agent-handoff layer reads; the markdown files are for reading by hand.
+The structured, machine-readable record of one run's health: per specialist, its outcome (success or failure, a structured failure reason, elapsed time, the toolset it was asked for, whether it timed out, its spend receipt, and the file holding its output), plus run-level facts (the synthesizer model, whether synthesis succeeded, the active Hermes profile). It is the seam a later auditing or agent-handoff layer reads; the markdown files are for reading by hand.
+
+### Spend receipt
+The per-lane usage/cost record (token counts, estimated cost, and the upstream honesty qualifiers) captured from the runtime's structured result into the run manifest. Purely observational: a receipt never affects a lane's success/failure classification, exit codes, or convergence. Zero and absent values are recorded honestly (quota-billed routes may legitimately report nothing), and a receipt recovered from the agent's session counters — rather than reported in the result itself — is marked as such, so a reader can tell reported spend from recovered spend.
 
 ## Report trust surfaces
 
@@ -96,6 +99,9 @@ The host-confirmed menu an agent composes a new fleet from — `~/.cadre/palette
 
 ### Palette fleet
 A tool-less *collect* fleet, one lane per verified provider, generated automatically once a `cadre verify-palette` run confirms two or more providers — the first fleet an operator or agent can run with zero manual editing. Unlike the seeded starter fleets, the palette fleet is discovery-owned: it is regenerated on every verify cycle rather than preserved once and left alone, and it is not one of the curated starters `cadre setup` seeds.
+
+### Policy gate
+The operator's local allow/deny rules over `(provider, model)` pairs — deny a provider outright, or restrict a model family to the providers whose billing route is intended — enforced at every admission and spend chokepoint: palette discovery (banned pairs never become candidates), palette verification (banned pairs are refused unverified and evicted from an existing palette), and preflight (a fleet referencing a banned pair refuses before any spend, even if the pair is on the palette). An absent policy on the default path is a permissive opt-out; a policy named by an explicit override that is missing, or a policy present but malformed, fails closed. When multiple restriction rules match one model, the pair must satisfy every matching rule (intersection), so rule order never widens what is allowed.
 
 ### Fleet preview
 The mechanically rendered view of a *parsed* fleet config — synthesizer (with a cost flag for API-billed models), `allow_privileged_tools`, the verbatim synthesis prompt, and every lane's role/provider/model/toolset — printed by the runner's `--preview` mode without making any model call. It is the operative control of the agent-run handoff: a human approves this rendered fleet, not the agent's paraphrase of it, so a tampered or privileged fleet cannot slip through unseen.
