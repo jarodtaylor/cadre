@@ -10,6 +10,7 @@ Usage:
     python -m cadre.cli setup
     python -m cadre.cli discover
     python -m cadre.cli verify-palette
+    python -m cadre.cli smoke
     HERMES_SKILLS_DIR=<dir> python -m cadre.cli install-skill
 """
 
@@ -23,7 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from cadre import discover, provision, verify_palette
+from cadre import discover, provision, smoke, verify_palette
 from cadre.capture import prepare_run_dir, save_run
 from cadre.config import ConfigError, FleetConfig
 from cadre.exit_codes import ExitCode, status_to_exit
@@ -378,6 +379,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    sub.add_parser(
+        "smoke",
+        help=(
+            "Zero-spend pre-release host smoke gate: inventory shape + packaged-fleet "
+            "validate + preflight resolution (host-only; no model calls, no writes)"
+        ),
+    )
+
     p_install_skill = sub.add_parser(
         "install-skill",
         help="Materialize the Hermes cadre-fleet skill into a skills directory",
@@ -408,6 +417,11 @@ def main(argv: list[str] | None = None) -> int:
         # message) — so it owns its own printing; propagate its exit code as-is
         # rather than forcing it through the (code, out); print(out) shape below.
         return verify_palette.main(all_candidates=args.all)
+    elif args.cmd == "smoke":
+        # smoke.main() owns its own printing (per-check [cadre] breadcrumbs on
+        # stderr, one verdict line on stdout) -- same propagate-as-is dispatch as
+        # discover/verify-palette just above.
+        return smoke.main()
     elif args.cmd == "install-skill":
         code, out = install_skill(args.skills_dir)
     else:

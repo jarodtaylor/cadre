@@ -763,6 +763,49 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import palette_fleet (engine-purity constraint)",
         )
 
+    def test_smoke_does_not_import_engine_or_model_client(self):
+        """cadre/smoke.py must NOT import engine or model_client (#79).
+
+        smoke.py is the zero-spend pre-release host smoke gate -- caller-layer,
+        same posture as verify_palette.py/preflight.py/discover.py/
+        palette_fleet.py, all of which it composes. It imports cadre.discover
+        (for _fetch_inventory), which itself imports cadre.capture, which
+        imports engine -- but that is a transitive dependency of discover.py,
+        not a direct import in smoke.py's own source, so it does not trip this
+        AST check.
+        """
+        import cadre.smoke as s_mod
+
+        imported = _static_imports(s_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "smoke.py must not import engine (engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "smoke.py must not import model_client (engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_smoke(self):
+        """cadre/engine.py and model_client.py must NOT import smoke (#79)."""
+        import cadre.engine as e_mod
+        import cadre.model_client as mc_mod
+
+        imported_engine = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.smoke",
+            imported_engine,
+            "engine.py must not import smoke (engine-purity constraint)",
+        )
+        imported_mc = _static_imports(mc_mod)
+        self.assertNotIn(
+            "cadre.smoke",
+            imported_mc,
+            "model_client.py must not import smoke (engine-purity constraint)",
+        )
+
 
 class TestPoolDirTildeExpansion(unittest.TestCase):
     """resolve() expanduser's a ~-prefixed pool_dir before realpath (regression).
