@@ -6,6 +6,8 @@ The engine is built and unit-tested on a dev machine, but it only runs **live** 
 
 ## Phase A — on the dev machine
 
+> **Installing Cadre on your own Hermes host? Skip to Phase B.** Phase A is the *author-side* path — it publishes this repository (step 2 creates the GitHub repo). A consumer never runs it; the public repo already exists.
+
 1. **Pre-flight:** suite green (`unittest`), on a feature branch. The engine is hardened — a per-call wall-clock timeout (a backstop over AIAgent's own request timeout; see the timeout note below) and a fail-closed toolset gate — so the pushed version is resilient.
 2. **Publish to GitHub:**
    ```bash
