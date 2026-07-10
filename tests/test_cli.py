@@ -2556,6 +2556,15 @@ class TestSetupCommandCleanHome(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(str(Path(self.tmp) / ".cadre"), out)
 
+    def test_success_message_prints_path_hint(self):
+        """#66: success output carries the exact export-PATH one-liner for the
+        recorded interpreter's bin dir — the bare `cadre` command is one
+        copy-paste away."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        bin_dir = os.path.dirname(sys.executable)
+        self.assertIn(f'export PATH="{bin_dir}:$PATH"', out)
+
 
 class TestSetupCommandKTD11FailClosed(unittest.TestCase):
     """A recorded Python that cannot `import cadre` fails setup closed — nothing written."""
@@ -2595,6 +2604,14 @@ class TestSetupCommandKTD11FailClosed(unittest.TestCase):
         self.assertEqual(code, 0, out)
         config_path = Path(self.tmp) / ".cadre" / "config"
         self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+    def test_path_hint_names_the_recorded_pythons_bin_dir(self):
+        """#66: the hint points at the RECORDED interpreter's directory (the venv
+        bin holding the console script), not this test process's."""
+        stub = _make_stub_python(self, 0)
+        code, out = setup_command(stub)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f'export PATH="{os.path.dirname(stub)}:$PATH"', out)
 
 
 class TestSetupCommandNewlineRejection(unittest.TestCase):
