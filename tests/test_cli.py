@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -2556,6 +2557,15 @@ class TestSetupCommandCleanHome(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(str(Path(self.tmp) / ".cadre"), out)
 
+    def test_success_message_prints_path_hint(self):
+        """#66: success output carries the exact export-PATH one-liner for the
+        recorded interpreter's bin dir — the bare `cadre` command is one
+        copy-paste away."""
+        code, out = setup_command(None)
+        self.assertEqual(code, 0, out)
+        bin_dir = os.path.dirname(sys.executable)
+        self.assertIn(f"export PATH={shlex.quote(bin_dir)}:$PATH", out)
+
 
 class TestSetupCommandKTD11FailClosed(unittest.TestCase):
     """A recorded Python that cannot `import cadre` fails setup closed — nothing written."""
@@ -2595,6 +2605,31 @@ class TestSetupCommandKTD11FailClosed(unittest.TestCase):
         self.assertEqual(code, 0, out)
         config_path = Path(self.tmp) / ".cadre" / "config"
         self.assertEqual(config_path.read_text(encoding="utf-8"), f"CADRE_HERMES_PYTHON={stub}\n")
+
+    def test_path_hint_names_the_recorded_pythons_bin_dir(self):
+        """#66: the hint points at the RECORDED interpreter's directory (the venv
+        bin holding the console script), not this test process's."""
+        stub = _make_stub_python(self, 0)
+        code, out = setup_command(stub)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"export PATH={shlex.quote(os.path.dirname(stub))}:$PATH", out)
+
+    def test_path_hint_is_shell_quoted_for_metacharacter_dirs(self):
+        """PR #81 bot-review fold: a bin dir carrying shell metacharacters is
+        quoted so the pasted line can't expand or break, while the $PATH
+        reference stays outside the quoting and still expands."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        weird = Path(tmp) / "we ird$bin"
+        weird.mkdir()
+        stub = weird / "fake-python"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+        code, out = setup_command(str(stub))
+        self.assertEqual(code, 0, out)
+        quoted = shlex.quote(str(weird))
+        self.assertNotEqual(quoted, str(weird))  # quoting actually engaged
+        self.assertIn(f"export PATH={quoted}:$PATH", out)
 
 
 class TestSetupCommandNewlineRejection(unittest.TestCase):

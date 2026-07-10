@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -284,13 +285,29 @@ def setup_command(
         # clean error, never a raw traceback.
         return (ExitCode.ERROR, f"error provisioning ~/.cadre: {exc}")
 
+    # The venv's bin dir holds the `cadre` console script on the load-bearing
+    # install path (pip into the recorded interpreter's env — verified above).
+    # recorded_python is absolute by now on every real path, but dirname of a
+    # bare PATH name is "" — suppress the hint rather than print a broken line.
+    # shlex.quote keeps the pasted line intact when the dir carries shell
+    # metacharacters ($, quotes, spaces) while $PATH stays outside the quoting
+    # and still expands; a dir containing the PATH separator itself cannot be
+    # expressed as a PATH entry at all, so suppress the hint then too.
+    bin_dir = os.path.dirname(recorded_python)
+    path_hint = (
+        "Optional — for the bare `cadre` command in this shell:\n"
+        f"  export PATH={shlex.quote(bin_dir)}:$PATH\n"
+        if bin_dir and os.pathsep not in bin_dir
+        else ""
+    )
     return (
         ExitCode.SUCCESS,
         f"Provisioned {home} from the installed cadre package.\n"
         f"Recorded Hermes Python: {recorded_python}\n"
+        + path_hint
         # Path-neutral next step: the seeding line above (stderr) already said
         # whether discovery populated real pairs or the placeholder was seeded.
-        "Next: review ~/.cadre/palette-candidates.yaml (auto-discovered from "
+        + "Next: review ~/.cadre/palette-candidates.yaml (auto-discovered from "
         "Hermes when available — edit only if needed), then run `cadre verify-palette`.",
     )
 
