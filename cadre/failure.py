@@ -38,16 +38,22 @@ class FailureReason(str, Enum):
     TIMEOUT      — the engine's outer wall-clock backstop fired on a wedged call.
     SKIPPED      — a sequential-chain lane the engine never ran because an
                    upstream lane failed.
-    EMPTY_OUTPUT — the model call returned None/empty/whitespace text. Cadre's
-                   contract: no usable output is a failure. In practice this is
-                   the PRIMARY runtime failure reason, because AIAgent was
-                   observed (U1 live spike, 2026-06-17) to return None rather
-                   than raise on a dead, unauthorized, or unresolvable model —
-                   so most real failures land here, not on MODEL_ERROR. (If a
-                   future AIAgent version raised instead, they'd surface as
-                   MODEL_ERROR; the taxonomy holds, only the distribution shifts.)
-    MODEL_ERROR  — the model call raised an exception; the raw exception text
-                   still lives in AgentResult.error alongside this reason.
+    EMPTY_OUTPUT — the model call produced no usable text (a None/non-dict
+                   result, or a missing/None/whitespace ``final_response``) with
+                   CLEAN failure flags. Cadre's contract: no usable output is a
+                   failure. This was the primary runtime reason in the chat()
+                   era (U1 live spike, 2026-06-17: AIAgent logs a dead,
+                   unauthorized, or unresolvable model and returns None rather
+                   than raising); since #76 the adapter reads run_conversation's
+                   structured flags, so flagged failures land on MODEL_ERROR and
+                   only the genuinely-unmarked empty shapes land here. (The
+                   taxonomy holds either way; only the distribution shifts.)
+    MODEL_ERROR  — the model call failed with a signal: it raised an exception,
+                   OR AIAgent's structured turn-outcome flags marked the turn
+                   failed/interrupted/errored (#76 — e.g. the error-text-as-
+                   response fall-through). AgentResult.error carries the raw
+                   exception text or the structured flag detail alongside this
+                   reason — never the response text.
     """
 
     OFF_PALETTE = "off_palette"

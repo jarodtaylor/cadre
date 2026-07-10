@@ -24,6 +24,7 @@ from unittest.mock import patch
 import yaml
 
 import cadre.verify_palette as verify_palette
+from tests.palette_fixtures import run_conversation_ok
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +419,7 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         import unittest.mock as mock
         # Patch _agent so no live AIAgent import is attempted
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.return_value = "ok"
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok()
             result = verify_palette.verify_candidates([])
         self.assertIsInstance(result, list)
 
@@ -426,7 +427,7 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         """With one candidate, returns a list with one VerifyRecord."""
         import unittest.mock as mock
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.return_value = "ok"
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok()
             result = verify_palette.verify_candidates([("xai", "grok-4.3")])
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], verify_palette.VerifyRecord)
@@ -435,10 +436,10 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         self.assertTrue(result[0].ok)
 
     def test_failed_call_returns_ok_false_record(self):
-        """An exception from _agent.chat() results in ok=False record."""
+        """An exception from the agent call results in ok=False record."""
         import unittest.mock as mock
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.side_effect = RuntimeError("no auth")
+            fake_agent.return_value.run_conversation.side_effect = RuntimeError("no auth")
             result = verify_palette.verify_candidates([("openrouter", "bad/model")])
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0].ok)
@@ -586,16 +587,71 @@ class TestVerifyCandidatesBlankResponse(unittest.TestCase):
     """verify_candidates treats blank/empty response as ok=False."""
 
     def test_empty_response_yields_ok_false_with_detail(self):
-        """_agent.chat() returning '' → VerifyRecord(ok=False, detail='empty response')."""
+        """A blank final_response → VerifyRecord(ok=False, detail='empty response')."""
         import unittest.mock as mock
 
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.return_value = ""
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok("")
             result = verify_palette.verify_candidates([("xai", "grok-4.3")])
 
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0].ok)
         self.assertEqual(result[0].detail, "empty response")
+
+
+class TestVerifyStructuredFlagClassification(unittest.TestCase):
+    """#76 regression at the verify layer: verification delegates to the same
+    adapter classification as a fleet lane (ModelClient.run → structured flags),
+    so the U9 false-verify shape — an SDK error string returned as normal
+    response text — can never verify a pair again, while a model legitimately
+    QUOTING an error message (clean flags) still can.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _verify_single(self, rc_result):
+        import unittest.mock as mock
+        with mock.patch.object(verify_palette, "_agent") as fake_agent:
+            fake_agent.return_value.run_conversation.return_value = rc_result
+            with contextlib.redirect_stdout(io.StringIO()):
+                return verify_palette.verify_candidates([("prov-a", "model-x")])
+
+    def test_failed_flag_response_is_not_verified(self):
+        # The exact U9 shape: the error text comes back as response text, with
+        # the structured failure markers set — must be an honest skip.
+        records = self._verify_single({
+            "final_response": "I apologize, but I encountered repeated errors: could not resolve auth",
+            "completed": False,
+            "failed": True,
+            "error": "could not resolve auth",
+        })
+        self.assertFalse(records[0].ok)
+        self.assertIn("could not resolve auth", records[0].detail)
+        # ... and the pair is NOT admitted to a palette: zero ok records means
+        # write_palette refuses before any filesystem side effect.
+        with self.assertRaises(ValueError):
+            verify_palette.write_palette(records, ["web"], self.tmp / "palette.yaml")
+
+    def test_clean_flags_quoting_error_text_is_verified(self):
+        # Anti-content-sniff at the verify layer: quoting an error message with
+        # clean flags is a legitimate answer and must still verify.
+        records = self._verify_single(run_conversation_ok(
+            'I apologize, but I encountered repeated errors: "quota" — quoting your log verbatim'
+        ))
+        self.assertTrue(records[0].ok)
+        out = self.tmp / "palette.yaml"
+        verify_palette.write_palette(records, ["web"], out)
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        self.assertEqual(data["models"], [{"provider": "prov-a", "model": "model-x"}])
+
+    def test_none_final_response_still_skipped(self):
+        # Regression for the OTHER AIAgent failure shape (fact 10's None return —
+        # e.g. a provider with no key at resolution time): still an honest skip.
+        records = self._verify_single({"final_response": None, "completed": True, "failed": False})
+        self.assertFalse(records[0].ok)
+        self.assertEqual(records[0].detail, "empty response")
 
 
 class TestVerifyCandidatesSanitizedStatusLines(unittest.TestCase):
@@ -629,12 +685,12 @@ class TestVerifyOneVerboseModeSanitizes(unittest.TestCase):
     def test_verbose_provider_output_is_sanitized_not_raw(self):
         def noisy_ok(*_a, **_k):
             print("provider says\x1b[31m RED")
-            return "ok"
+            return run_conversation_ok()
 
         out = io.StringIO()
         with patch.object(verify_palette, "_agent") as fake_agent, \
              patch.dict(os.environ, {"CADRE_VERIFY_VERBOSE": "1"}):
-            fake_agent.return_value.chat.side_effect = noisy_ok
+            fake_agent.return_value.run_conversation.side_effect = noisy_ok
             with contextlib.redirect_stdout(out):
                 ok, _detail = verify_palette._verify_one("xai", "grok-4.3")
         self.assertTrue(ok)
@@ -650,7 +706,7 @@ class TestVerifyOneVerboseModeSanitizes(unittest.TestCase):
         out = io.StringIO()
         with patch.object(verify_palette, "_agent") as fake_agent, \
              patch.dict(os.environ, {"CADRE_VERIFY_VERBOSE": "1"}):
-            fake_agent.return_value.chat.side_effect = noisy_boom
+            fake_agent.return_value.run_conversation.side_effect = noisy_boom
             with contextlib.redirect_stdout(out):
                 ok, detail = verify_palette._verify_one("xai", "grok-4.3")
         self.assertFalse(ok)
@@ -674,10 +730,10 @@ class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
         def noisy_ok(*_a, **_k):
             print("SCARY PROVIDER STACK DUMP")
             print("❌ Non-retryable error — Aborting", file=_sys.stderr)
-            return "ok"
+            return run_conversation_ok()
 
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.side_effect = noisy_ok
+            fake_agent.return_value.run_conversation.side_effect = noisy_ok
             out = _io.StringIO()
             with ctx.redirect_stdout(out):
                 records = verify_palette.verify_candidates([("xai", "grok-4.3")])
@@ -698,10 +754,12 @@ class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
 
         def noisy_none(*_a, **_k):
             print("   📝 Error: HTTP 400: The requested model is not supported.", file=_sys.stderr)
-            return None
+            # The dead-model shape through run_conversation: clean flags, no text
+            # (fact 10's None-return, as the result dict carries it).
+            return {"final_response": None, "completed": True, "failed": False}
 
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.chat.side_effect = noisy_none
+            fake_agent.return_value.run_conversation.side_effect = noisy_none
             with ctx.redirect_stdout(_io.StringIO()):
                 records = verify_palette.verify_candidates([("copilot", "claude-opus-4.5")])
 
