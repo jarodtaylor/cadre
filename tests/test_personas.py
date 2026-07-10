@@ -457,6 +457,39 @@ class TestEngineIsolation(unittest.TestCase):
             "model_client.py must not import file_input (R8 — engine gains no file I/O)",
         )
 
+    def test_policy_does_not_import_engine_or_model_client(self):
+        """cadre/policy.py must NOT import engine or model_client (KTD7, #78)."""
+        import cadre.policy as policy_mod
+
+        imported = _static_imports(policy_mod)
+        self.assertNotIn(
+            "cadre.engine",
+            imported,
+            "policy.py must not import engine (KTD7 — engine-purity constraint)",
+        )
+        self.assertNotIn(
+            "cadre.model_client",
+            imported,
+            "policy.py must not import model_client (KTD7 — engine-purity constraint)",
+        )
+
+    def test_engine_does_not_import_policy(self):
+        """cadre/engine.py must NOT import policy (KTD7, #78).
+
+        The engine must never gain policy/allow-deny knowledge — enforcement
+        happens entirely at the caller-layer chokepoints (discover,
+        verify-palette, preflight), before any lane is constructed. A stray
+        import here is the architecture regression this guards.
+        """
+        import cadre.engine as e_mod
+
+        imported = _static_imports(e_mod)
+        self.assertNotIn(
+            "cadre.policy",
+            imported,
+            "engine.py must not import policy (KTD7 — engine stays policy-free)",
+        )
+
     def test_approval_does_not_import_engine_or_model_client(self):
         """cadre/approval.py must NOT import engine or model_client (KTD5).
 

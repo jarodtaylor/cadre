@@ -560,6 +560,109 @@ class TestSeedPaletteCandidates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# New (#78 policy gate): seed_policy
+# ---------------------------------------------------------------------------
+
+
+class TestSeedPolicy(unittest.TestCase):
+    """seed_policy seeds ~/.cadre/policy.yaml idempotently — a fully-commented,
+    generic default (create-only O_EXCL, never discovery-owned, never clobbered)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cadre_home = Path(self.tmp) / "cadre"
+        self.cadre_home.mkdir(mode=0o700)
+
+    def test_seeds_policy_file(self):
+        provision.seed_policy(self.cadre_home)
+        dest = self.cadre_home / "policy.yaml"
+        self.assertTrue(dest.exists())
+
+    def test_seeded_content_matches_seed_template(self):
+        provision.seed_policy(self.cadre_home)
+        dest = self.cadre_home / "policy.yaml"
+        self.assertEqual(dest.read_text(encoding="utf-8"), provision.SEED_TEMPLATE)
+
+    def test_seeded_file_permissions_0o600(self):
+        provision.seed_policy(self.cadre_home)
+        dest = self.cadre_home / "policy.yaml"
+        mode = stat.S_IMODE(dest.stat().st_mode)
+        self.assertEqual(mode, 0o600, f"expected 0o600, got 0o{mode:03o}")
+
+    def test_seeded_content_parses_as_permissive(self):
+        """Round-trips through the real loader — proves the ACTUAL seeded
+        bytes are inert, not just the constant in isolation."""
+        from cadre.policy import load_policy
+
+        provision.seed_policy(self.cadre_home)
+        dest = self.cadre_home / "policy.yaml"
+        pol = load_policy(dest)
+        self.assertEqual(pol.source, "absent")
+        self.assertEqual(pol.deny_providers, frozenset())
+        self.assertEqual(pol.restrict_models, ())
+
+    def test_seeded_content_has_no_real_provider_or_model_strings(self):
+        lowered = provision.SEED_TEMPLATE.lower()
+        for banned in ("anthropic", "claude", "openai", "xai", "grok", "openrouter", "copilot"):
+            self.assertNotIn(banned, lowered)
+
+    def test_idempotent_preserves_operator_edits(self):
+        """A pre-existing policy.yaml is NOT overwritten (operator edits preserved)."""
+        dest = self.cadre_home / "policy.yaml"
+        dest.write_text("deny_providers:\n  - prov-a\n", encoding="utf-8")
+        dest.chmod(0o600)
+        provision.seed_policy(self.cadre_home)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "deny_providers:\n  - prov-a\n")
+
+    def test_idempotent_preserved_message_on_stderr(self):
+        dest = self.cadre_home / "policy.yaml"
+        dest.write_text("deny_providers:\n  - prov-a\n", encoding="utf-8")
+        dest.chmod(0o600)
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            provision.seed_policy(self.cadre_home)
+        self.assertIn("exists — preserved", stderr_buf.getvalue())
+
+    def test_symlink_at_destination_not_followed(self):
+        """A symlink planted at the destination is not followed/overwritten
+        (O_EXCL/O_NOFOLLOW, via approval._write_owner_only)."""
+        sentinel = self.cadre_home / "sentinel.txt"
+        sentinel.write_text("OPERATOR SECRET")
+        (self.cadre_home / "policy.yaml").symlink_to(sentinel)
+        provision.seed_policy(self.cadre_home)  # must not raise
+        self.assertEqual(sentinel.read_text(), "OPERATOR SECRET")
+
+    def test_stdout_silence(self):
+        """seed_policy writes NOTHING to stdout."""
+        stdout_buf = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buf):
+            provision.seed_policy(self.cadre_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+    def test_never_raises_on_bad_cadre_home(self):
+        """seed_policy does NOT raise when cadre_home is unwritable/nonexistent."""
+        bad_home = Path("/nonexistent/unwritable/xyz")
+        stdout_buf = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buf):
+            provision.seed_policy(bad_home)
+        self.assertEqual(stdout_buf.getvalue(), "")
+
+    def test_never_raises_on_group_writable_parent(self):
+        """A pre-existing loose (group/other-writable) parent is refused by
+        _write_owner_only's _parent_is_safe guard — warned and skipped, never
+        raised (mirrors every other seed function's never-raises contract)."""
+        d = Path(self.tmp) / "loose"
+        d.mkdir(mode=0o770)
+        os.chmod(d, 0o770)
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            provision.seed_policy(d)  # must not raise
+        self.assertFalse((d / "policy.yaml").exists())
+        self.assertIn("warning", stderr_buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
 # New in U3 (#61 palette auto-discovery): seed_or_discover_palette_candidates
 #
 # HERMETICITY (load-bearing): a provisioned host HAS hermes_cli importable;

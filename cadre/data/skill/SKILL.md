@@ -215,7 +215,18 @@ host, or hand-edit `~/.cadre/palette-candidates.yaml` then `cadre
 verify-palette` otherwise. This gate never fires for an off-palette *toolset*
 (that stays the advisory warning from step 2).
 
-**What you may do yourself about that refusal, and what you must not:**
+**A second, independent gate can also refuse here (GH #78).** If the operator
+maintains a local allow/deny policy (`~/.cadre/policy.yaml` — absent on most
+hosts, in which case this never fires), a specialist/synthesizer/judge
+`(provider, model)` pair the policy blocks refuses the same way — exit `5`
+(`PREFLIGHT_REFUSE`), before any spend — **even if that pair IS on the host
+palette**: the policy gate is a separate, independently-tightenable control,
+not palette membership. The message names the blocked pair and the rule that
+fired. There is no self-service remedy for this one: policy is an operator
+decision, not something to work around — surface the refusal to the human
+verbatim.
+
+**What you may do yourself about an off-palette refusal, and what you must not:**
 
 - You MAY run `cadre discover` yourself when — and only when — the refusal
   itself names it. The refusal only names `cadre discover` when NO candidates
@@ -269,9 +280,10 @@ back:
 - **`1` (`ERROR`):** invalid fleet config, an unreadable/non-UTF-8 `--doc`
   file, a missing/mismatched/expired approval, or a run-directory I/O failure.
 - **`2` (`USAGE`):** neither `--task` nor `--doc` was given.
-- **`5` (`PREFLIGHT_REFUSE`):** the #62 preflight gate refused — an
-  off-palette model, or no palette at all (GH #61/#62) — before any spend
-  (see step 3); no manifest was written.
+- **`5` (`PREFLIGHT_REFUSE`):** the preflight gate refused — an off-palette
+  model, no palette at all (GH #61/#62), or a policy-blocked pair (GH #78,
+  `~/.cadre/policy.yaml` — independent of palette membership) — before any
+  spend (see step 3); no manifest was written.
 
 **Synthesize fleets:** relay the synthesized report. **Collect fleets:** there is
 no synthesis — the result is a `collect result` header followed by one attributed

@@ -14,6 +14,7 @@ touch the real ~/.cadre.
 import copy
 import json
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -158,6 +159,55 @@ class TestSurfaceDigestAxesFlipIndependently(unittest.TestCase):
         base = surface_digest(cfg, "task", "default")
         changed = surface_digest(cfg, "task", "other-profile")
         self.assertNotEqual(base, changed)
+
+
+class TestSurfaceDigestExcludesPolicy(unittest.TestCase):
+    """KTD6 (#78): the policy gate is chokepoint enforcement, not approval-
+    surface content — a policy file's presence or content must NEVER affect
+    the previewed-surface digest. surface_digest's signature carries no
+    policy-shaped parameter at all, so this is close to tautological by
+    construction; both a static and a behavioral pin guard the invariant
+    anyway, so a future edit that starts threading policy into the hashed
+    payload fails loudly here rather than silently widening the approval
+    binding's trust surface."""
+
+    def test_approval_module_does_not_import_policy(self):
+        """Static guard: cadre.policy can never leak into the digest payload
+        if cadre.approval never imports it in the first place."""
+        import ast
+        import inspect
+
+        import cadre.approval as approval_mod
+
+        tree = ast.parse(inspect.getsource(approval_mod))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+        self.assertNotIn("cadre.policy", imported)
+
+    def test_digest_identical_regardless_of_on_disk_policy_content(self):
+        """Behavioral pin: two policy.yaml files with DIFFERENT (in fact
+        conflicting) rules, pointed to via CADRE_POLICY, must not change the
+        digest for the same (cfg, task, profile) — surface_digest takes no
+        policy input, so nothing on disk can reach it."""
+        cfg = _make_cfg()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+
+        permissive = Path(tmp) / "permissive-policy.yaml"
+        permissive.write_text("# no rules\n", encoding="utf-8")
+        restrictive = Path(tmp) / "restrictive-policy.yaml"
+        restrictive.write_text("deny_providers:\n  - p\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"CADRE_POLICY": str(permissive)}):
+            digest_permissive = surface_digest(cfg, "task", "profile")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(restrictive)}):
+            digest_restrictive = surface_digest(cfg, "task", "profile")
+
+        self.assertEqual(digest_permissive, digest_restrictive)
 
 
 # ---------------------------------------------------------------------------

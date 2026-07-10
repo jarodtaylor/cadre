@@ -191,12 +191,13 @@ def setup_command(
 
     Only once all four pass does it scaffold + seed + write config:
     ensure_cadre_dirs() -> seed_starter_fleets() -> seed_personas() ->
-    seed_or_discover_palette_candidates() -> write_config(). The palette-candidates
-    step seeds REAL discovered (provider, model) pairs when Hermes is importable,
-    falling back to the placeholder example otherwise (#61) — either way it never
-    overwrites an existing candidates file. Idempotent overall (each step
-    preserves existing operator edits; write_config overwrites the single
-    config line every run).
+    seed_or_discover_palette_candidates() -> seed_policy() -> write_config(). The
+    palette-candidates step seeds REAL discovered (provider, model) pairs when
+    Hermes is importable, falling back to the placeholder example otherwise
+    (#61); seed_policy() seeds a fully-commented, generic ~/.cadre/policy.yaml
+    default (#78) — either way it never overwrites an existing file. Idempotent
+    overall (each step preserves existing operator edits; write_config
+    overwrites the single config line every run).
 
     Args:
         venv_python: Explicit Hermes Python path (highest precedence).
@@ -276,6 +277,7 @@ def setup_command(
         provision.seed_starter_fleets(home)
         provision.seed_personas(home)
         provision.seed_or_discover_palette_candidates(home)
+        provision.seed_policy(home)
         provision.write_config(recorded_python)
     except OSError as exc:
         # The pre-#11 scripts/resolve_venv.py wrapped this identical

@@ -56,6 +56,7 @@ import yaml
 
 from cadre.approval import _write_owner_only
 from cadre.capture import resolved_hermes_home
+from cadre.policy import Policy, PolicyError, Violation, load_policy, resolve_policy_path
 from cadre.resources import palette_example_path
 from cadre.text_safety import sanitize as _sanitize
 
@@ -410,27 +411,71 @@ def write_candidates(
 
 
 # ---------------------------------------------------------------------------
-# `cadre discover` CLI entrypoint (U2)
+# `cadre discover` CLI entrypoint (U2) + the #78 policy chokepoint
 # ---------------------------------------------------------------------------
 
 
+def _apply_policy(result: DiscoveryResult, policy: Policy) -> tuple[DiscoveryResult, list[Violation]]:
+    """Split a discovery result into (policy-allowed, banned) — pure, no I/O.
+
+    Preserves each surviving provider's own model order; a provider left with
+    zero allowed models is dropped entirely, so ``main``'s summary line
+    (provider count) stays accurate rather than counting a fully-denied
+    provider that contributed nothing. Operates on the provider-grouped
+    ``DiscoveredProvider`` shape directly (rather than round-tripping through
+    ``cadre.policy.filter_pairs``' flat-pair-list shape, which
+    ``cadre.verify_palette`` uses instead) since that shape is what this
+    module already has and what it needs to reconstruct; both routes share
+    the same underlying rule logic, ``Policy.check``.
+    """
+    kept_providers: list[DiscoveredProvider] = []
+    violations: list[Violation] = []
+    for provider in result.providers:
+        kept_models: list[str] = []
+        for model in provider.models:
+            violation = policy.check(provider.provider, model)
+            if violation is None:
+                kept_models.append(model)
+            else:
+                violations.append(violation)
+        if kept_models:
+            kept_providers.append(DiscoveredProvider(provider=provider.provider, models=kept_models))
+    return DiscoveryResult(providers=kept_providers, hermes_home=result.hermes_home), violations
+
+
 def main() -> int:
-    """``cadre discover``: fetch, write, report — or fail legibly.
+    """``cadre discover``: fetch, filter by policy, write, report — or fail legibly.
 
     Fetches a fresh inventory from Hermes (no injected payload — this is the
-    real CLI path) and writes it via ``write_candidates`` (which owns the
-    loud discovery-owned overwrite notice, KTD6). A ``DiscoveryError`` —
-    Hermes absent, unauthenticated, or its internal surface having drifted —
+    real CLI path), filters it against the local policy gate (#78,
+    ``cadre.policy`` — a banned pair never reaches the candidates file), then
+    writes what's left via ``write_candidates`` (which owns the loud
+    discovery-owned overwrite notice, KTD6). A ``DiscoveryError`` — Hermes
+    absent, unauthenticated, or its internal surface having drifted —
     degrades to its own legible message and exit 1, never a raw traceback
     (KTD10); a write-posture failure (an unsafe parent, a planted symlink)
-    degrades the same way. No new ``ExitCode``/``FailureReason`` member:
-    returns the same integer values as ``cadre.exit_codes.ExitCode.SUCCESS``
-    (0) / ``.ERROR`` (1) as bare ints — mirroring
-    ``verify_palette.main()``'s established convention of not importing the
-    enum for a single-verb entrypoint.
+    degrades the same way. A malformed policy file (``PolicyError``) ALSO
+    degrades to exit 1, checked BEFORE the (free, but still worth skipping on
+    a broken safety file) discovery fetch — a broken safety file must never
+    silently mean no safety. If every discovered candidate is excluded by an
+    otherwise-valid policy (zero survive ``_apply_policy``), ``main`` also
+    degrades to exit 1 — refusing before ``write_candidates`` is ever called,
+    so a previously-curated or discovery-owned candidates file already on
+    disk is never clobbered with an empty result (mirrors
+    ``verify_palette.main()``'s identical all-excluded guard). No new
+    ``ExitCode``/``FailureReason`` member for
+    discovery's own outcomes: returns the same integer values as
+    ``cadre.exit_codes.ExitCode.SUCCESS`` (0) / ``.ERROR`` (1) as bare ints —
+    mirroring ``verify_palette.main()``'s established convention of not
+    importing the enum for a single-verb entrypoint (the
+    ``FailureReason.POLICY_BLOCKED`` token lives on the PREFLIGHT refusal
+    surface, not here).
 
     Transient progress goes to the ``[cadre]``-prefixed stderr stream (R9
-    discipline, matching ``provision.py``'s seeding messages); the final
+    discipline, matching ``provision.py``'s seeding messages) — including
+    each policy exclusion (pair + rule) and a trailing count; zero exclusions
+    means zero extra noise, so a host with no policy file (or one that
+    excludes nothing) sees byte-identical output to before #78. The final
     result — success summary or failure message — prints to stdout, matching
     every other verb's eventual stdout destination (``cli.py``'s shared
     ``print(out)``) even though this function, like
@@ -439,12 +484,45 @@ def main() -> int:
     display input (KTD9): the summary line sanitizes each one individually.
     """
     print("[cadre] discovering authenticated providers from Hermes...", file=sys.stderr)
+
+    try:
+        policy_path = resolve_policy_path()
+        # Pass no path so load_policy derives the override source from the env
+        # (CADRE_POLICY vs the default) — an absent DEFAULT stays permissive,
+        # while an absent CADRE_POLICY-named file fails closed (#85).
+        policy = load_policy()
+    except PolicyError as exc:
+        print(_sanitize(str(exc)))
+        return 1
+
     try:
         result = discover_candidates()
     except DiscoveryError as exc:
         # DiscoveryError text can embed payload-derived strings (slugs, entry
         # reprs, hermes exception text) — untrusted display input (KTD9).
         print(_sanitize(str(exc)))
+        return 1
+
+    result, violations = _apply_policy(result, policy)
+    for v in violations:
+        # v.provider/v.model come from the untrusted Hermes discovery payload
+        # (KTD9 display input, same as elsewhere in this module); only
+        # v.rule is derived from the local policy file. All three go through
+        # the same sanitize() chokepoint regardless — one auditable call per
+        # sink, not a source-dependent branch.
+        print(
+            f"[cadre] policy: excluded {_sanitize(v.provider)}/{_sanitize(v.model)} "
+            f"({_sanitize(v.rule)})",
+            file=sys.stderr,
+        )
+    if violations:
+        print(f"[cadre] policy: {len(violations)} pair(s) excluded", file=sys.stderr)
+
+    if violations and not result.providers:
+        print(
+            f"All {len(violations)} candidate(s) excluded by policy "
+            f"({_sanitize(str(policy_path))}) — candidates file NOT written."
+        )
         return 1
 
     path = _DEFAULT_CANDIDATES_PATH.expanduser()

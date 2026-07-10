@@ -20,12 +20,14 @@ Exported functions:
   seed_or_discover_palette_candidates(home)  — #61: seeds REAL discovered candidates when
                                                 Hermes is importable, else falls back to
                                                 seed_palette_candidates(); never raises
+  seed_policy(cadre_home)                    — #78: idempotent policy.yaml seeding (a fully
+                                                commented, generic default), never raises
   verify_importable(python_path)             — KTD11: subprocess check, `import cadre` under python_path
 
 ``cadre setup`` (cadre/cli.py) orchestrates these: verify_importable() gates
 (fail-closed, before any write) the rest — ensure_cadre_dirs() then
 seed_starter_fleets(), seed_personas(), seed_or_discover_palette_candidates(),
-then write_config().
+seed_policy(), then write_config().
 """
 
 from __future__ import annotations
@@ -36,8 +38,9 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from cadre.approval import _parent_is_safe
+from cadre.approval import _parent_is_safe, _write_owner_only
 from cadre.discover import DiscoveryError, discover_candidates, write_candidates
+from cadre.policy import DEFAULT_POLICY_PATH, SEED_TEMPLATE
 from cadre.resources import fleets_dir, palette_example_path, personas_dir
 from cadre.text_safety import sanitize as _sanitize
 
@@ -331,6 +334,53 @@ def seed_or_discover_palette_candidates(cadre_home: Path) -> None:
             f"({n_pairs} candidate(s), {len(result.providers)} provider(s))",
             file=sys.stderr,
         )
+
+
+def seed_policy(cadre_home: Path) -> None:
+    """Seed ``<cadre_home>/policy.yaml`` with a fully-commented generic default (#78).
+
+    Source content is ``cadre.policy.SEED_TEMPLATE`` — co-located with the
+    schema it documents (not a ``cadre/data/`` package file like the other
+    seeds here, since it's a small, code-adjacent string rather than an
+    editable example a maintainer would tweak independently of the loader).
+    The template is entirely comments, so it parses via
+    ``cadre.policy.load_policy`` as ``Policy.permissive()`` — a fresh or
+    upgraded host sees ZERO behavior change until the operator uncomments a
+    rule (KTD2's absent/fully-commented tri-state branch).
+
+    Uses ``cadre.approval._write_owner_only`` with ``exclusive=True`` — the
+    SAME create-only ``O_EXCL`` + owner-only + symlink-refusing posture
+    ``discover.write_candidates(..., create_only=True)`` uses for its own
+    setup-time seed (KTD3), rather than ``_seed_files`` (which is shaped for
+    copying a NAMED-file list out of a source directory; this seed has no
+    source file, just a string constant).
+
+    Idempotent: an existing ``policy.yaml`` (operator-edited, or seeded by a
+    prior run) is NOT overwritten — ``FileExistsError`` from the O_EXCL open
+    is caught and reported as preserved, mirroring every other seed
+    function's idempotent posture. This file is NEVER discovery-owned
+    (unlike palette-candidates.yaml, nothing ever regenerates it): once
+    seeded, only the operator (or a hand-applied upgrade) changes it.
+    Owner-only: written 0o600 under a tightened umask.
+    Never raises: any I/O error (a symlink, an unsafe parent, a permission
+    failure) is caught, warned to stderr, and skipped.
+    Never writes to stdout: all messages go to sys.stderr.
+
+    Args:
+        cadre_home: Resolved ~/.cadre home directory (returned by ensure_cadre_dirs).
+    """
+    # The canonical filename, derived from DEFAULT_POLICY_PATH (not the
+    # env-aware default_policy_path()) — seeding always writes into
+    # cadre_home under its fixed name, independent of any CADRE_POLICY
+    # override a caller might have set for READ-time resolution.
+    path = cadre_home / Path(DEFAULT_POLICY_PATH).name
+    try:
+        _write_owner_only(path, SEED_TEMPLATE, exclusive=True)
+        print(f"[cadre] seeded {path.name}", file=sys.stderr)
+    except FileExistsError:
+        print(f"[cadre] {path.name}: exists — preserved", file=sys.stderr)
+    except OSError as exc:
+        print(f"[cadre] warning: could not seed {path.name}: {_sanitize(str(exc))}", file=sys.stderr)
 
 
 def ensure_cadre_dirs(home: str = "~/.cadre") -> Path:

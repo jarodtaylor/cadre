@@ -2543,6 +2543,7 @@ class TestSetupCommandCleanHome(unittest.TestCase):
         self.assertEqual(len(fleets), 7, f"expected 7 starter fleets, got {[f.name for f in fleets]}")
         self.assertEqual(len(personas), 5, f"expected 5 personas, got {[p.name for p in personas]}")
         self.assertTrue((cadre_home / "palette-candidates.yaml").exists())
+        self.assertTrue((cadre_home / "policy.yaml").exists())  # #78
         self.assertTrue((cadre_home / "config").exists())
 
     def test_config_line_is_exact_and_records_sys_executable(self):

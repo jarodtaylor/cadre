@@ -11,6 +11,7 @@ class TestFailureReasonValues(unittest.TestCase):
 
     def test_members_have_lowercase_string_values(self):
         self.assertEqual(FailureReason.OFF_PALETTE.value, "off_palette")
+        self.assertEqual(FailureReason.POLICY_BLOCKED.value, "policy_blocked")
         self.assertEqual(FailureReason.TIMEOUT.value, "timeout")
         self.assertEqual(FailureReason.SKIPPED.value, "skipped")
         self.assertEqual(FailureReason.EMPTY_OUTPUT.value, "empty_output")
@@ -36,6 +37,14 @@ class TestFailureReasonCoercion(unittest.TestCase):
     def test_unknown_value_raises(self):
         with self.assertRaises(ValueError):
             FailureReason("bogus")
+
+    def test_policy_blocked_raw_string_round_trips(self):
+        """#78: the new member coerces and round-trips exactly like every
+        pre-existing one — a dedicated pin, not just coverage-by-mechanism."""
+        self.assertIs(FailureReason("policy_blocked"), FailureReason.POLICY_BLOCKED)
+        self.assertIs(FailureReason(FailureReason.POLICY_BLOCKED), FailureReason.POLICY_BLOCKED)
+        self.assertEqual(FailureReason.POLICY_BLOCKED, "policy_blocked")
+        self.assertIsInstance(FailureReason.POLICY_BLOCKED, str)
 
 
 class TestFailureModuleIsALeaf(unittest.TestCase):

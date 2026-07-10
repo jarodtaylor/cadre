@@ -1,0 +1,891 @@
+"""Tests for cadre/policy.py — the #78 local allow/deny policy loader + matcher.
+
+All tests use tempfile paths or in-memory Policy construction; the real
+~/.cadre is NEVER touched (load_policy always receives an explicit path).
+
+Fixtures use neutral, non-real strings throughout (prov-a, prov-b, model-x,
+example-family-*, ...) — never a real provider/model name, matching this
+repo's hard rule against real provider strings in fixtures.
+
+Test-first: these tests define the contract; the implementation must satisfy them.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import cadre.policy as policy_mod
+from cadre.policy import (
+    DEFAULT_POLICY_PATH,
+    Policy,
+    PolicyError,
+    Violation,
+    default_policy_path,
+    filter_pairs,
+    load_policy,
+    resolve_policy_path,
+)
+
+
+class _PolicyTestBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(_rmtree_writable, self.tmp)
+
+    def _write(self, content: str, name: str = "policy.yaml") -> Path:
+        path = self.tmp / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+
+def _rmtree_writable(tmp: Path) -> None:
+    """Restore permissions before cleanup so shutil.rmtree can always delete
+    (a test below deliberately locks a file/dir down)."""
+    for root, dirs, files in os.walk(tmp):
+        for name in dirs + files:
+            try:
+                os.chmod(os.path.join(root, name), 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Tri-state load: absent -> permissive
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyAbsent(_PolicyTestBase):
+    def test_default_path_absent_is_permissive(self):
+        """The absent DEFAULT path (no explicit param, no CADRE_POLICY) is the
+        opt-out — permissive, zero behavior change (#85). resolve_policy_path is
+        patched to a controlled absent path so this drives the None-source
+        (default) branch without ever touching the real ~/.cadre."""
+        absent = self.tmp / "does-not-exist.yaml"
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True), patch(
+            "cadre.policy.resolve_policy_path", return_value=absent
+        ):
+            pol = load_policy(None)
+        self.assertEqual(pol.source, "absent")
+        self.assertEqual(pol.deny_providers, frozenset())
+        self.assertEqual(pol.restrict_models, ())
+
+    def test_explicit_missing_param_fails_closed(self):
+        """An explicit path= argument pointing at a missing file is a
+        misconfiguration, not an opt-out (#85) — fail closed, not permissive."""
+        missing = self.tmp / "does-not-exist.yaml"
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(missing)
+        self.assertIn("does not exist", str(ctx.exception))
+
+    def test_permissive_blocks_nothing(self):
+        pol = Policy.permissive()
+        self.assertIsNone(pol.check("prov-a", "model-x"))
+        self.assertIsNone(pol.check("anything", "anything"))
+
+    def test_empty_file_returns_permissive(self):
+        """An empty file (yaml.safe_load -> None) loads as permissive."""
+        path = self._write("")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "absent")
+
+    def test_fully_commented_file_returns_permissive(self):
+        """A fully-commented file (yaml.safe_load -> None) — the seeded shape."""
+        path = self._write("# just a comment\n# another comment\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "absent")
+
+
+# ---------------------------------------------------------------------------
+# Tri-state load: malformed -> PolicyError, fail closed
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyMalformed(_PolicyTestBase):
+    def test_invalid_yaml_raises_policy_error(self):
+        path = self._write("deny_providers: [unterminated\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_non_mapping_top_level_raises(self):
+        for content in ("- a\n- b\n", "justascalar\n", "42\n"):
+            path = self._write(content)
+            with self.assertRaises(PolicyError):
+                load_policy(path)
+
+    def test_deny_providers_as_string_raises(self):
+        """A scalar `deny_providers: prov-a` (not a list) must not be
+        char-iterated into ['p','r','o',...] — it's a wrong shape, fail closed."""
+        path = self._write("deny_providers: prov-a\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_deny_providers_with_non_string_entry_raises(self):
+        path = self._write("deny_providers:\n  - 123\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_deny_providers_false_value_raises_not_silently_empty(self):
+        """A wrong-shaped-but-falsy value must be caught by validation, not
+        silently coerced to 'no rules' by an `or []` idiom."""
+        path = self._write("deny_providers: false\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_not_a_list_raises(self):
+        path = self._write("restrict_models: not-a-list\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_entry_not_a_mapping_raises(self):
+        path = self._write("restrict_models:\n  - just-a-string\n")
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_missing_match_raises(self):
+        path = self._write(
+            "restrict_models:\n  - allowed_providers: [prov-a]\n"
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_missing_allowed_providers_raises(self):
+        path = self._write(
+            'restrict_models:\n  - match: "model-*"\n'
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_empty_allowed_providers_raises(self):
+        path = self._write(
+            'restrict_models:\n  - match: "model-*"\n    allowed_providers: []\n'
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_non_string_match_raises(self):
+        path = self._write(
+            "restrict_models:\n  - match: 42\n    allowed_providers: [prov-a]\n"
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_restrict_models_unrecognized_key_raises(self):
+        path = self._write(
+            'restrict_models:\n  - match: "model-*"\n    allowed_providers: [prov-a]\n'
+            "    extra_key: oops\n"
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_unknown_top_level_key_raises(self):
+        """Unknown keys are a misspelled rule until proven otherwise — fail closed."""
+        path = self._write("deny_providrs:\n  - prov-a\n")  # typo'd key
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_unknown_top_level_key_alongside_valid_ones_raises(self):
+        path = self._write(
+            "deny_providers:\n  - prov-a\nallow_providers:\n  - prov-b\n"
+        )
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_malformed_error_names_path_and_remedy(self):
+        path = self._write("deny_providers: prov-a\n")
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        msg = str(ctx.exception)
+        self.assertIn(str(path), msg)
+        self.assertIn("Fix or remove", msg)
+
+    def test_non_utf8_file_raises(self):
+        path = self.tmp / "policy.yaml"
+        path.write_bytes(b"\xff\xfe not utf-8 \x80")
+        path.chmod(0o600)
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+
+# ---------------------------------------------------------------------------
+# #85 absence-semantics split: absent DEFAULT -> permissive (opt-out); absent
+# EXPLICIT override (CADRE_POLICY or a passed path) -> PolicyError (fail closed).
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyAbsenceSplit(_PolicyTestBase):
+    def test_env_override_absent_fails_closed_names_env_var(self):
+        """CADRE_POLICY set to a missing file fails closed, naming the env var
+        and the missing path — an explicit "policy lives here" pointing at
+        nothing is a misconfiguration, not an opt-out."""
+        missing = self.tmp / "no-such-policy.yaml"
+        with patch.dict(os.environ, {"CADRE_POLICY": str(missing)}):
+            with self.assertRaises(PolicyError) as ctx:
+                load_policy(None)
+        msg = str(ctx.exception)
+        self.assertIn("CADRE_POLICY", msg)
+        self.assertIn(str(missing), msg)
+        self.assertIn("does not exist", msg)
+
+    def test_param_override_absent_fails_closed_names_path(self):
+        missing = self.tmp / "no-such-policy.yaml"
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(missing)
+        msg = str(ctx.exception)
+        self.assertIn("explicit path", msg)
+        self.assertIn(str(missing), msg)
+
+    def test_absent_override_error_names_opt_out_remedy(self):
+        """The fail-closed message points at the real remedy: create the file,
+        or drop the override to fall back to the (opt-out) default."""
+        missing = self.tmp / "no-such-policy.yaml"
+        with patch.dict(os.environ, {"CADRE_POLICY": str(missing)}):
+            with self.assertRaises(PolicyError) as ctx:
+                load_policy(None)
+        self.assertIn("unset CADRE_POLICY", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# #85 parent-directory safety: a present-but-loose parent is refused before the
+# leaf is opened or its absence accepted; a NONEXISTENT parent falls through.
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyParentSafety(_PolicyTestBase):
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_group_or_other_writable_parent_refused(self):
+        """A present policy file under a group/other-writable parent is refused
+        before the leaf is even read — a loose parent lets another user unlink
+        the policy to force a silent permissive load."""
+        subdir = self.tmp / "loose"
+        subdir.mkdir()
+        path = subdir / "policy.yaml"
+        path.write_text("deny_providers:\n  - prov-a\n", encoding="utf-8")
+        path.chmod(0o600)
+        subdir.chmod(0o777)  # group- and other-writable
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        self.assertIn("group- or other-writable", str(ctx.exception))
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_foreign_owned_parent_refused(self):
+        """A parent owned by a different uid is refused (mocks os.getuid rather
+        than chown, which needs root — same technique as the file check)."""
+        path = self._write("deny_providers:\n  - prov-a\n")
+        with patch("os.getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(PolicyError) as ctx:
+                load_policy(path)
+        self.assertIn("not owned by you", str(ctx.exception))
+
+    def test_safe_owner_only_parent_present_file_loads(self):
+        """The common case: an owner-only parent (mkdtemp is 0o700) with a
+        present 0o600 file loads normally — the parent check is transparent."""
+        path = self._write("deny_providers:\n  - prov-a\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "file")
+        self.assertIn("prov-a", pol.deny_providers)
+
+    def test_nonexistent_parent_default_falls_through_to_permissive(self):
+        """A nonexistent parent is NOT itself unsafe (no dir to unlink into) —
+        for the DEFAULT path it falls through to the absent opt-out, permissive,
+        so a fresh host with no ~/.cadre dir does not fail closed."""
+        absent = self.tmp / "missing-subdir" / "policy.yaml"  # parent absent
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True), patch(
+            "cadre.policy.resolve_policy_path", return_value=absent
+        ):
+            pol = load_policy(None)
+        self.assertEqual(pol.source, "absent")
+
+    def test_nonexistent_parent_explicit_override_fails_closed(self):
+        """Same nonexistent parent, reached via an EXPLICIT path -> fail closed
+        on the absence (the file is named yet missing), not a parent error —
+        the parent check steps aside and the absence rule decides."""
+        absent = self.tmp / "missing-subdir" / "policy.yaml"
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(absent)
+        self.assertIn("does not exist", str(ctx.exception))
+
+
+class TestPolicyOverrideSource(unittest.TestCase):
+    """``_policy_override_source`` classifies where the policy path came from —
+    pure env inspection, no filesystem — driving the absence split."""
+
+    def test_explicit_param_is_param_source(self):
+        self.assertEqual(policy_mod._policy_override_source("/some/path.yaml"), "param")
+        self.assertEqual(policy_mod._policy_override_source(Path("/some/path.yaml")), "param")
+
+    def test_env_set_no_param_is_env_source(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": "/env/path.yaml"}):
+            self.assertEqual(policy_mod._policy_override_source(None), "env")
+
+    def test_no_param_no_env_is_default_source_none(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True):
+            self.assertIsNone(policy_mod._policy_override_source(None))
+
+    def test_empty_env_is_default_source_none(self):
+        """Empty CADRE_POLICY is treated as unset (matches default_policy_path's
+        ``or`` fallthrough) -> the default source, None."""
+        with patch.dict(os.environ, {"CADRE_POLICY": ""}):
+            self.assertIsNone(policy_mod._policy_override_source(None))
+
+
+# ---------------------------------------------------------------------------
+# Rule matching: deny_providers
+# ---------------------------------------------------------------------------
+
+
+class TestPolicyCheckDenyProviders(unittest.TestCase):
+    def test_denied_provider_blocked_regardless_of_model(self):
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        v = pol.check("prov-a", "model-x")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.provider, "prov-a")
+        self.assertEqual(v.model, "model-x")
+
+    def test_non_denied_provider_unaffected(self):
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        self.assertIsNone(pol.check("prov-b", "model-x"))
+
+    def test_violation_rule_text_names_deny_rule(self):
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        v = pol.check("prov-a", "model-x")
+        self.assertEqual(v.rule, "deny_providers: prov-a")
+
+    def test_provider_slug_comparison_is_case_insensitive(self):
+        """#78 fold: a case-mismatched rule must BLOCK, not silently no-op —
+        the harmful direction for a money-safety file."""
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        self.assertIsNotNone(pol.check("Prov-A", "model-x"))
+
+    def test_violation_text_quotes_configured_casing_not_input_casing(self):
+        """An operator reading the violation greps policy.yaml for the rule
+        text — it must quote the CONFIGURED entry as written on disk, not
+        whatever casing the caller happened to pass in."""
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        v = pol.check("Prov-A", "model-x")
+        self.assertEqual(v.rule, "deny_providers: prov-a")
+
+
+# ---------------------------------------------------------------------------
+# Rule matching: restrict_models
+# ---------------------------------------------------------------------------
+
+
+class TestPolicyCheckRestrictModels(unittest.TestCase):
+    def _policy(self, match="example-family-*", allowed=("prov-b",)):
+        return Policy(
+            restrict_models=(
+                policy_mod._RestrictRule(match=match, allowed_providers=tuple(allowed)),
+            )
+        )
+
+    def test_allowed_provider_for_matching_model_passes(self):
+        pol = self._policy()
+        self.assertIsNone(pol.check("prov-b", "example-family-large"))
+
+    def test_disallowed_provider_for_matching_model_blocked(self):
+        pol = self._policy()
+        v = pol.check("prov-a", "example-family-large")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.provider, "prov-a")
+        self.assertEqual(v.model, "example-family-large")
+
+    def test_violation_rule_text_names_restrict_rule_and_allowed_list(self):
+        pol = self._policy(match="example-family-*", allowed=("prov-b",))
+        v = pol.check("prov-a", "example-family-large")
+        self.assertEqual(v.rule, "restrict_models: 'example-family-*' allows [prov-b]")
+
+    def test_non_matching_model_unaffected(self):
+        """A model that matches no restrict_models rule is untouched by it."""
+        pol = self._policy(match="example-family-*", allowed=("prov-b",))
+        self.assertIsNone(pol.check("prov-a", "totally-different-model"))
+
+    def test_exact_name_pattern_matches_only_exact_name(self):
+        pol = self._policy(match="exact-model-name", allowed=("prov-b",))
+        self.assertIsNone(pol.check("prov-b", "exact-model-name"))
+        self.assertIsNone(pol.check("prov-a", "exact-model-name-but-longer"))
+
+    def test_glob_star_suffix_matches_family(self):
+        pol = self._policy(match="fam-*", allowed=("prov-b",))
+        self.assertIsNone(pol.check("prov-b", "fam-large"))
+        self.assertIsNone(pol.check("prov-b", "fam-small"))
+        v = pol.check("prov-a", "fam-large")
+        self.assertIsNotNone(v)
+
+    def test_model_id_comparison_is_case_insensitive(self):
+        """#78 fold: "Fam-*" now matches "fam-large" case-insensitively — a
+        blocked violation (prov-a is not in the rule's allowed_providers),
+        not a silent no-op."""
+        pol = self._policy(match="Fam-*", allowed=("prov-b",))
+        self.assertIsNotNone(pol.check("prov-a", "fam-large"))
+        self.assertIsNone(pol.check("prov-b", "fam-large"))  # allowed provider still passes
+
+    def test_restrict_violation_text_quotes_configured_casing(self):
+        """The rule text names the CONFIGURED match glob and allowed-provider
+        list as written in policy.yaml, unaffected by the input model's own
+        casing — same operator-facing legibility guarantee as deny_providers."""
+        pol = self._policy(match="Fam-*", allowed=("Prov-B",))
+        v = pol.check("prov-a", "fam-large")
+        self.assertEqual(v.rule, "restrict_models: 'Fam-*' allows [Prov-B]")
+
+    def test_multiple_allowed_providers(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a", "prov-b"))
+        self.assertIsNone(pol.check("prov-a", "fam-x"))
+        self.assertIsNone(pol.check("prov-b", "fam-x"))
+        self.assertIsNotNone(pol.check("prov-c", "fam-x"))
+
+    def test_single_matching_rule_violation_text_byte_identical(self):
+        """A model caught by exactly ONE restrict_models rule produces the
+        same violation text as before the intersection fold — the composition
+        of a single rule is that rule alone."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        v = pol.check("prov-b", "fam-x")
+        self.assertEqual(v.rule, "restrict_models: 'fam-*' allows [prov-a]")
+
+
+class TestPolicyCheckRestrictModelsIntersection(unittest.TestCase):
+    """#85 cross-model fold: overlapping restrict_models rules compose by
+    INTERSECTION, not first-match-wins. A model caught by multiple rules may
+    run only through a provider EVERY matching rule allows. This can only
+    WIDEN blocking (a broad rule can no longer shadow a stricter later one) —
+    the safe direction for a money-safety gate. Rule order does not matter."""
+
+    def _two_rules(self, first, second):
+        return Policy(restrict_models=(first, second))
+
+    @staticmethod
+    def _rule(match, allowed):
+        return policy_mod._RestrictRule(match=match, allowed_providers=tuple(allowed))
+
+    def test_broad_then_specific_blocks_the_broad_route(self):
+        """Broad rule (fam-* -> prov-a) written FIRST, specific rule
+        (fam-premium -> prov-b) second. The specific model matches both; the
+        broad route prov-a, which the broad rule alone would allow, is now
+        BLOCKED because the specific rule excludes it (intersection empty)."""
+        pol = self._two_rules(
+            self._rule("fam-*", ("prov-a",)), self._rule("fam-premium", ("prov-b",))
+        )
+        self.assertIsNotNone(pol.check("prov-a", "fam-premium"))
+        self.assertIsNotNone(pol.check("prov-b", "fam-premium"))
+        # A model matching only the broad rule is unaffected — prov-a still passes.
+        self.assertIsNone(pol.check("prov-a", "fam-basic"))
+
+    def test_specific_then_broad_same_result_order_independent(self):
+        """Same two rules, written in the OPPOSITE order. Under first-match-wins
+        the outcome would flip; under intersection it is identical — order no
+        longer matters."""
+        pol = self._two_rules(
+            self._rule("fam-premium", ("prov-b",)), self._rule("fam-*", ("prov-a",))
+        )
+        self.assertIsNotNone(pol.check("prov-a", "fam-premium"))
+        self.assertIsNotNone(pol.check("prov-b", "fam-premium"))
+        self.assertIsNone(pol.check("prov-a", "fam-basic"))
+
+    def test_provider_in_every_matching_rule_passes_intersection_not_union(self):
+        """Only a provider in the intersection of ALL matching rules passes —
+        a provider in just ONE of them (the union but not the intersection) is
+        blocked."""
+        pol = self._two_rules(
+            self._rule("fam-*", ("prov-a", "prov-b")),
+            self._rule("fam-premium", ("prov-b", "prov-c")),
+        )
+        # prov-b is in BOTH rules' allowed lists -> passes.
+        self.assertIsNone(pol.check("prov-b", "fam-premium"))
+        # prov-a is in the broad rule only (union, not intersection) -> blocked.
+        self.assertIsNotNone(pol.check("prov-a", "fam-premium"))
+        # prov-c is in the specific rule only -> blocked.
+        self.assertIsNotNone(pol.check("prov-c", "fam-premium"))
+
+    def test_violation_names_every_matching_rule_configured_casing(self):
+        """The blocked violation names EVERY matching rule, "; "-joined, each in
+        its CONFIGURED casing and file order — the full composition the
+        operator must see to understand the empty intersection."""
+        pol = self._two_rules(
+            self._rule("Fam-*", ("Prov-A",)), self._rule("Fam-Premium", ("Prov-B",))
+        )
+        v = pol.check("prov-a", "fam-premium")
+        self.assertEqual(
+            v.rule,
+            "restrict_models: 'Fam-*' allows [Prov-A]; 'Fam-Premium' allows [Prov-B]",
+        )
+
+    def test_intersection_composes_across_vendor_prefixed_segment_match(self):
+        """Segment matching feeds the intersection per-rule: a vendor-prefixed
+        slug whose bare segment matches both rules composes the same as its
+        bare-id sibling — a false-allow here would be the wrong-billing-route
+        spend the gate exists to stop."""
+        pol = self._two_rules(
+            self._rule("fam-*", ("prov-a",)), self._rule("fam-premium", ("prov-b",))
+        )
+        self.assertIsNotNone(pol.check("prov-a", "vendor/fam-premium"))
+        v = pol.check("prov-a", "vendor/fam-premium")
+        self.assertEqual(
+            v.rule,
+            "restrict_models: 'fam-*' allows [prov-a]; 'fam-premium' allows [prov-b]",
+        )
+
+
+class TestPolicyCheckRestrictModelsSlugSegment(unittest.TestCase):
+    """#78 fold (money-relevant): a ``restrict_models`` glob must match a
+    vendor-prefixed slug (some providers report a "vendor/model" id), not
+    just a bare model id — the exact wrong-billing-route spend this feature
+    exists to stop. ``match`` is tested against the full model string AND
+    its post-last-"/" segment; matching only WIDENS versus the full-string-only
+    check (a false-block just refuses loudly; a false-allow is the bug)."""
+
+    def _policy(self, match="fam-*", allowed=("prov-a",)):
+        return Policy(
+            restrict_models=(
+                policy_mod._RestrictRule(match=match, allowed_providers=tuple(allowed)),
+            )
+        )
+
+    def test_bare_model_id_allowed_provider_passes(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-a", "fam-x"))
+
+    def test_bare_model_id_disallowed_provider_blocked(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNotNone(pol.check("prov-b", "fam-x"))
+
+    def test_vendor_prefixed_slug_disallowed_provider_blocked(self):
+        """The regression case: a "vendor/fam-x" slug must be caught by a
+        "fam-*" rule exactly as its bare-id sibling is — a rule that only
+        checked the full string would silently miss this and let the run
+        proceed on the wrong (disallowed) billing route."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNotNone(pol.check("prov-b", "vendor/fam-x"))
+
+    def test_vendor_prefixed_slug_allowed_provider_passes(self):
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-a", "vendor/fam-x"))
+
+    def test_unrelated_model_unaffected_by_segment_matching(self):
+        """Segment matching only widens what a rule catches — it must not
+        make an unrelated model start matching."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        self.assertIsNone(pol.check("prov-b", "other-y"))
+        self.assertIsNone(pol.check("prov-b", "vendor/other-y"))
+
+    def test_violation_rule_text_for_vendor_prefixed_slug(self):
+        """The violation still names the rule and allowed list normally —
+        segment matching changes WHETHER a rule fires, not what it reports."""
+        pol = self._policy(match="fam-*", allowed=("prov-a",))
+        v = pol.check("prov-b", "vendor/fam-x")
+        self.assertEqual(v.rule, "restrict_models: 'fam-*' allows [prov-a]")
+        self.assertEqual(v.model, "vendor/fam-x")
+
+
+class TestPolicyCheckDenyBeatsRestrict(unittest.TestCase):
+    def test_deny_wins_even_if_restrict_would_allow(self):
+        """deny_providers is an absolute veto, checked before restrict_models."""
+        pol = Policy(
+            deny_providers=frozenset({"prov-a"}),
+            restrict_models=(
+                policy_mod._RestrictRule(match="fam-*", allowed_providers=("prov-a",)),
+            ),
+        )
+        v = pol.check("prov-a", "fam-x")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.rule, "deny_providers: prov-a")
+
+
+# ---------------------------------------------------------------------------
+# filter_pairs — pure, order-preserving
+# ---------------------------------------------------------------------------
+
+
+class TestFilterPairs(unittest.TestCase):
+    def test_splits_allowed_and_violations(self):
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        allowed, violations = filter_pairs(
+            [("prov-a", "model-x"), ("prov-b", "model-y")], pol
+        )
+        self.assertEqual(allowed, [("prov-b", "model-y")])
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].provider, "prov-a")
+
+    def test_order_preserved(self):
+        pol = Policy.permissive()
+        pairs = [("prov-c", "m1"), ("prov-a", "m2"), ("prov-b", "m3")]
+        allowed, violations = filter_pairs(pairs, pol)
+        self.assertEqual(allowed, pairs)
+        self.assertEqual(violations, [])
+
+    def test_empty_input_returns_empty(self):
+        allowed, violations = filter_pairs([], Policy.permissive())
+        self.assertEqual(allowed, [])
+        self.assertEqual(violations, [])
+
+    def test_all_violations_returns_empty_allowed(self):
+        pol = Policy(deny_providers=frozenset({"prov-a", "prov-b"}))
+        allowed, violations = filter_pairs(
+            [("prov-a", "m1"), ("prov-b", "m2")], pol
+        )
+        self.assertEqual(allowed, [])
+        self.assertEqual(len(violations), 2)
+
+
+# ---------------------------------------------------------------------------
+# Violation dataclass shape
+# ---------------------------------------------------------------------------
+
+
+class TestViolationShape(unittest.TestCase):
+    def test_fields(self):
+        v = Violation(provider="prov-a", model="model-x", rule="deny_providers: prov-a")
+        self.assertEqual(v.provider, "prov-a")
+        self.assertEqual(v.model, "model-x")
+        self.assertEqual(v.rule, "deny_providers: prov-a")
+
+
+# ---------------------------------------------------------------------------
+# File posture: symlink refusal, ownership, permissions
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyFilePosture(_PolicyTestBase):
+    def test_symlinked_policy_file_refused(self):
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("deny_providers: [prov-a]\n", encoding="utf-8")
+        link = self.tmp / "policy.yaml"
+        link.symlink_to(sentinel)
+        with self.assertRaises(PolicyError):
+            load_policy(link)
+
+    def test_symlinked_policy_file_error_names_remedy(self):
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("deny_providers: [prov-a]\n", encoding="utf-8")
+        link = self.tmp / "policy.yaml"
+        link.symlink_to(sentinel)
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(link)
+        self.assertIn("fix or remove", str(ctx.exception).lower())
+
+    def test_0600_owner_posture_round_trips(self):
+        """A file written under this repo's canonical owner-only posture
+        (0600, owned by the current process) loads successfully — the
+        expected posture is honored on read, not just accepted incidentally."""
+        path = self._write("deny_providers:\n  - prov-a\n")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        self.assertEqual(mode, 0o600)
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "file")
+        self.assertIn("prov-a", pol.deny_providers)
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_group_writable_file_refused(self):
+        path = self._write("deny_providers:\n  - prov-a\n")
+        path.chmod(0o660)  # group-readable AND group-writable
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_other_writable_file_refused(self):
+        path = self._write("deny_providers:\n  - prov-a\n")
+        path.chmod(0o606)
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_group_readable_only_is_fine(self):
+        """Group/other READ (no write bit) is not the guarded condition —
+        only group/other WRITE is refused (mirrors approval._parent_is_safe's
+        0o022 mask)."""
+        path = self._write("deny_providers:\n  - prov-a\n")
+        path.chmod(0o644)
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "file")
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only ownership check")
+    def test_foreign_owned_file_refused(self):
+        """A file owned by a different uid is refused even with safe mode
+        bits. Mocks os.getuid (rather than chown, which needs root) to
+        simulate a foreign owner on a file this test process actually owns —
+        mirrors tests/test_install_skill.py's identical technique."""
+        path = self._write("deny_providers:\n  - prov-a\n")
+        with patch("os.getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(PolicyError) as ctx:
+                load_policy(path)
+        self.assertIn("not owned by you", str(ctx.exception))
+
+    def test_unreadable_file_raises_policy_error_not_traceback(self):
+        if hasattr(os, "getuid") and os.getuid() == 0:
+            self.skipTest("root can read 0o000 files")
+        path = self._write("deny_providers:\n  - prov-a\n")
+        path.chmod(0o000)
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+    def test_directory_at_policy_path_raises_policy_error(self):
+        d = self.tmp / "policy.yaml"
+        d.mkdir()
+        with self.assertRaises(PolicyError):
+            load_policy(d)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX-only FIFO support")
+    def test_fifo_at_policy_path_refused_not_hung(self):
+        """A FIFO at the policy path must be refused (fail closed) rather
+        than hanging os.open() forever waiting for a writer that will never
+        come — the fold-in O_NONBLOCK + same-fd stat.S_ISREG guard
+        (mirroring cadre.file_input._read_doc's identical FIFO check). If
+        the guard regressed to plain O_RDONLY, this test would hang instead
+        of failing."""
+        path = self.tmp / "policy.yaml"
+        os.mkfifo(path, 0o600)
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
+
+# ---------------------------------------------------------------------------
+# default_policy_path — CADRE_POLICY env override
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultPolicyPath(unittest.TestCase):
+    def test_no_env_returns_default(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True):
+            self.assertEqual(default_policy_path(), DEFAULT_POLICY_PATH)
+
+    def test_env_override_returned(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": "/custom/policy.yaml"}):
+            self.assertEqual(default_policy_path(), "/custom/policy.yaml")
+
+    def test_empty_env_falls_through_to_default(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": ""}):
+            self.assertEqual(default_policy_path(), DEFAULT_POLICY_PATH)
+
+
+# ---------------------------------------------------------------------------
+# resolve_policy_path — path -> CADRE_POLICY env -> default -> expanduser;
+# raises PolicyError (never returns None, unlike resolve_palette_path) on an
+# unresolvable path, so every existing PolicyError handler at each chokepoint
+# fail-closes on it with no new branch.
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePolicyPath(_PolicyTestBase):
+    def test_explicit_path_param_used(self):
+        result = resolve_policy_path(self.tmp / "policy.yaml")
+        self.assertEqual(result, (self.tmp / "policy.yaml").expanduser())
+
+    def test_cadre_policy_env_override(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": str(self.tmp / "env-policy.yaml")}):
+            result = resolve_policy_path(None)
+        self.assertEqual(result, self.tmp / "env-policy.yaml")
+
+    def test_explicit_param_takes_priority_over_env(self):
+        with patch.dict(os.environ, {"CADRE_POLICY": str(self.tmp / "env-policy.yaml")}):
+            result = resolve_policy_path(self.tmp / "param-policy.yaml")
+        self.assertEqual(result, self.tmp / "param-policy.yaml")
+
+    def test_no_env_no_param_uses_default_path(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "CADRE_POLICY"}
+        with patch.dict(os.environ, env_without, clear=True):
+            result = resolve_policy_path(None)
+        self.assertEqual(result, Path(DEFAULT_POLICY_PATH).expanduser())
+
+    def test_expanduser_runtimeerror_raises_policy_error(self):
+        """Path.expanduser() raises RuntimeError when a path starts with ~
+        and HOME is unresolvable (a container case) — resolve_policy_path
+        must degrade to a PolicyError, not crash (mirrors
+        test_preview_lint.py's identical resolve_palette_path pin, but this
+        function RAISES rather than returning None — see its docstring)."""
+        with patch.object(Path, "expanduser", side_effect=RuntimeError("home unresolvable")):
+            with self.assertRaises(PolicyError):
+                resolve_policy_path("~/.cadre/policy.yaml")
+
+    def test_nul_byte_path_raises_policy_error(self):
+        """A NUL byte survives Path()/expanduser() but raises at every
+        filesystem op that would follow — reject it here so load_policy and
+        every chokepoint's resolution treat it uniformly as untrustworthy."""
+        with self.assertRaises(PolicyError):
+            resolve_policy_path("/tmp/\x00bad-policy.yaml")
+
+    def test_policy_error_names_the_attempted_path(self):
+        with self.assertRaises(PolicyError) as ctx:
+            resolve_policy_path("/tmp/\x00bad-policy.yaml")
+        self.assertIn("bad-policy.yaml", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Policy.source tri-state boundary: "absent" covers a missing file AND a
+# present file whose YAML parses to None; anything else that parses (even an
+# explicitly-empty mapping) is "file" — see the Policy.source field comment.
+# ---------------------------------------------------------------------------
+
+
+class TestPolicySourceTriState(_PolicyTestBase):
+    def test_missing_explicit_file_fails_closed_not_absent(self):
+        """#85: an explicit missing path no longer degrades to a permissive
+        ``source="absent"`` — it fails closed (a misconfiguration)."""
+        with self.assertRaises(PolicyError):
+            load_policy(self.tmp / "does-not-exist.yaml")
+
+    def test_fully_commented_file_is_source_absent(self):
+        path = self._write("# nothing active here\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "absent")
+
+    def test_empty_mapping_file_is_source_file_not_absent(self):
+        """Pins the exact boundary the clarified `source` docstring
+        describes: a file present on disk that parses to an (explicitly
+        empty) MAPPING — as opposed to parsing to None — is still `source
+        == "file"`, even though it carries zero active rules like the
+        fully-commented case above. `source` alone cannot tell these two
+        "blocks nothing" cases apart by design (KTD2); a future `policy
+        show` verb must stat the path itself."""
+        path = self._write("{}\n")
+        pol = load_policy(path)
+        self.assertEqual(pol.source, "file")
+        self.assertEqual(pol.deny_providers, frozenset())
+        self.assertEqual(pol.restrict_models, ())
+
+
+# ---------------------------------------------------------------------------
+# SEED_TEMPLATE — the generic commented default cadre/provision.py seeds
+# ---------------------------------------------------------------------------
+
+
+class TestSeedTemplate(unittest.TestCase):
+    def test_seed_template_parses_as_permissive(self):
+        pol = policy_mod.Policy.permissive()
+        # Round-trip through the real loader via a temp file, so this proves
+        # the ACTUAL seeded bytes parse permissively, not just by inspection.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = tmp / "policy.yaml"
+        path.write_text(policy_mod.SEED_TEMPLATE, encoding="utf-8")
+        path.chmod(0o600)
+        loaded = load_policy(path)
+        self.assertEqual(loaded.source, "absent")
+        self.assertEqual(loaded.deny_providers, pol.deny_providers)
+        self.assertEqual(loaded.restrict_models, pol.restrict_models)
+
+    def test_seed_template_contains_no_real_provider_or_model_strings(self):
+        """No anthropic/*, no real provider or model slug — generic examples only."""
+        lowered = policy_mod.SEED_TEMPLATE.lower()
+        for banned in ("anthropic", "claude", "openai", "xai", "grok", "openrouter", "copilot"):
+            self.assertNotIn(banned, lowered)
+
+    def test_seed_template_is_fully_commented(self):
+        """Every non-blank line starts with '#' — a stray uncommented line
+        would silently activate a rule for the operator."""
+        for line in policy_mod.SEED_TEMPLATE.splitlines():
+            if line.strip():
+                self.assertTrue(line.startswith("#"), f"non-comment line: {line!r}")
+
+
+if __name__ == "__main__":
+    unittest.main()
