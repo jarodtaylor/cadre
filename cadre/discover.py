@@ -457,7 +457,13 @@ def main() -> int:
     degrades the same way. A malformed policy file (``PolicyError``) ALSO
     degrades to exit 1, checked BEFORE the (free, but still worth skipping on
     a broken safety file) discovery fetch — a broken safety file must never
-    silently mean no safety. No new ``ExitCode``/``FailureReason`` member for
+    silently mean no safety. If every discovered candidate is excluded by an
+    otherwise-valid policy (zero survive ``_apply_policy``), ``main`` also
+    degrades to exit 1 — refusing before ``write_candidates`` is ever called,
+    so a previously-curated or discovery-owned candidates file already on
+    disk is never clobbered with an empty result (mirrors
+    ``verify_palette.main()``'s identical all-excluded guard). No new
+    ``ExitCode``/``FailureReason`` member for
     discovery's own outcomes: returns the same integer values as
     ``cadre.exit_codes.ExitCode.SUCCESS`` (0) / ``.ERROR`` (1) as bare ints —
     mirroring ``verify_palette.main()``'s established convention of not
@@ -506,6 +512,13 @@ def main() -> int:
         )
     if violations:
         print(f"[cadre] policy: {len(violations)} pair(s) excluded", file=sys.stderr)
+
+    if violations and not result.providers:
+        print(
+            f"All {len(violations)} candidate(s) excluded by policy "
+            f"({_sanitize(str(policy_path))}) — candidates file NOT written."
+        )
+        return 1
 
     path = _DEFAULT_CANDIDATES_PATH.expanduser()
     try:

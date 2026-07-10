@@ -24,9 +24,10 @@ Tri-state load (KTD2): the file is ABSENT on a fresh or opted-out host —
 ``load_policy`` returns ``Policy.permissive()`` (blocks nothing), so existing
 users see zero behavior change until they opt in. The file is PRESENT and
 valid — ``load_policy`` returns the parsed ``Policy``. The file is PRESENT
-but cannot be trusted (a symlink, foreign-owned, group/other-writable,
-unreadable, not UTF-8, not valid YAML, wrong-shaped, or carrying an
-unrecognized key) — ``load_policy`` raises ``PolicyError``. Every chokepoint
+but cannot be trusted (a symlink, not a regular file (a directory, FIFO, or
+device), foreign-owned, group/other-writable, unreadable, not UTF-8, not
+valid YAML, wrong-shaped, or carrying an unrecognized key) — ``load_policy``
+raises ``PolicyError``. Every chokepoint
 that calls it must treat that raise as FAIL CLOSED (refuse the operation
 loudly), never as "no policy" — a broken safety file must never silently
 mean no safety.
@@ -55,6 +56,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -283,6 +285,15 @@ def load_policy(path: str | Path) -> Policy:
     enforces the mode bits, matching ``approval._parent_is_safe``'s same
     fallback.
 
+    It also opens with ``O_NONBLOCK`` and refuses (``stat.S_ISREG``, on that
+    same fd — no second open/stat, so no new TOCTOU window) anything that
+    isn't a regular file — mirroring ``cadre.file_input._read_doc``'s
+    identical FIFO guard: without ``O_NONBLOCK``, opening a FIFO for read
+    blocks forever waiting for a writer that will never come (fail HUNG, not
+    fail closed); with it, the open returns immediately and the type check
+    refuses the FIFO outright. ``O_NONBLOCK`` has no effect on a regular
+    file's subsequent read (a regular file is always ready).
+
     No import-time I/O (KTD1): this is the only function in the module that
     touches the filesystem.
 
@@ -303,14 +314,14 @@ def load_policy(path: str | Path) -> Policy:
 
     Raises:
         PolicyError: ``path`` cannot even be resolved (see
-            ``resolve_policy_path``), or exists but is a symlink,
-            foreign-owned, group/other-writable, unreadable, not UTF-8, not
-            valid YAML, a non-mapping top level, carries an unrecognized
-            top-level or ``restrict_models`` entry key, or a rule is
-            wrong-shaped.
+            ``resolve_policy_path``), or exists but is a symlink, not a
+            regular file (a directory, FIFO, or device), foreign-owned,
+            group/other-writable, unreadable, not UTF-8, not valid YAML, a
+            non-mapping top level, carries an unrecognized top-level or
+            ``restrict_models`` entry key, or a rule is wrong-shaped.
     """
     resolved = resolve_policy_path(path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(str(resolved), flags)
     except FileNotFoundError:
@@ -328,6 +339,12 @@ def load_policy(path: str | Path) -> Policy:
     # so a raise in that block must close it itself.
     try:
         st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PolicyError(
+                f"{resolved} is not a regular file — refusing to trust a "
+                f"safety-relevant policy file that is a directory, FIFO, "
+                f"or device. Fix or remove {resolved}."
+            )
         getuid = getattr(os, "getuid", None)
         if getuid is not None and st.st_uid != getuid():
             raise PolicyError(

@@ -952,6 +952,43 @@ class TestDiscoverMainMalformedPolicyRefuses(_DiscoverPolicyTestBase):
         self.assertIn("Fix or remove", out)
 
 
+class TestDiscoverMainAllBannedGuard(_DiscoverPolicyTestBase):
+    """Every discovered candidate excluded by an otherwise-VALID policy ->
+    refuse loudly, exit 1, no write at all (never an empty candidates file)
+    — mirrors verify_palette.main()'s identical all-excluded guard. A
+    previously-curated or discovery-owned file already at candidates_path
+    must survive untouched (non-destructive-defaults)."""
+
+    def test_all_banned_exits_nonzero(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n  - prov-b\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 1)
+
+    def test_all_banned_writes_no_candidates_file(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n  - prov-b\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main(_two_provider_result())
+        self.assertFalse(self.candidates_path.exists())
+
+    def test_all_banned_does_not_clobber_existing_candidates_file(self):
+        self.candidates_path.write_text("SENTINEL: hand-curated content\n", encoding="utf-8")
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n  - prov-b\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main(_two_provider_result())
+        self.assertEqual(
+            self.candidates_path.read_text(encoding="utf-8"), "SENTINEL: hand-curated content\n"
+        )
+
+    def test_all_banned_message_names_policy_path_and_count(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n  - prov-b\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, out, _err = self._run_main(_two_provider_result())
+        self.assertIn(str(policy_path), out)
+        self.assertIn("All 2 candidate(s)", out)
+        self.assertIn("NOT written", out)
+
+
 class TestDiscoverMainPolicyPathResolutionFailure(_DiscoverPolicyTestBase):
     """An unresolvable policy path (HOME unset, an embedded NUL byte) is now
     a ``PolicyError`` like any other untrustworthy policy file

@@ -500,6 +500,19 @@ class TestLoadPolicyFilePosture(_PolicyTestBase):
         with self.assertRaises(PolicyError):
             load_policy(d)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX-only FIFO support")
+    def test_fifo_at_policy_path_refused_not_hung(self):
+        """A FIFO at the policy path must be refused (fail closed) rather
+        than hanging os.open() forever waiting for a writer that will never
+        come — the fold-in O_NONBLOCK + same-fd stat.S_ISREG guard
+        (mirroring cadre.file_input._read_doc's identical FIFO check). If
+        the guard regressed to plain O_RDONLY, this test would hang instead
+        of failing."""
+        path = self.tmp / "policy.yaml"
+        os.mkfifo(path, 0o600)
+        with self.assertRaises(PolicyError):
+            load_policy(path)
+
 
 # ---------------------------------------------------------------------------
 # default_policy_path — CADRE_POLICY env override
