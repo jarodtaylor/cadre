@@ -811,5 +811,145 @@ class TestFetchInventorySuccessPath(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# #78 policy chokepoint: main() excludes policy-banned pairs from the
+# candidates file, discloses each exclusion + a count on stderr, and refuses
+# loudly (no write) on a malformed policy file.
+#
+# Fixtures use neutral, non-real strings (prov-a, prov-b, model-x, ...) —
+# never a real provider/model name.
+# ---------------------------------------------------------------------------
+
+
+def _two_provider_result() -> discover.DiscoveryResult:
+    """A neutral two-provider DiscoveryResult (prov-a/model-x, prov-b/model-y)."""
+    return discover.DiscoveryResult(
+        providers=[
+            discover.DiscoveredProvider(provider="prov-a", models=["model-x"]),
+            discover.DiscoveredProvider(provider="prov-b", models=["model-y"]),
+        ],
+        hermes_home="/tmp/profile",
+    )
+
+
+class _DiscoverPolicyTestBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.candidates_path = self.tmp / "palette-candidates.yaml"
+
+    def _write_policy(self, content: str) -> Path:
+        path = self.tmp / "policy.yaml"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+    def _run_main(self, result: discover.DiscoveryResult) -> tuple[int, str, str]:
+        """Run discover.main() with an injected DiscoveryResult; returns (code, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(discover, "discover_candidates", return_value=result), \
+             patch.object(discover, "_DEFAULT_CANDIDATES_PATH", self.candidates_path), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = discover.main()
+        return code, out.getvalue(), err.getvalue()
+
+
+class TestDiscoverMainPolicyExcludesBannedPairs(_DiscoverPolicyTestBase):
+    def test_banned_pair_excluded_from_candidates_file(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 0)
+        loaded = yaml.safe_load(self.candidates_path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["candidates"], [{"provider": "prov-b", "model": "model-y"}])
+
+    def test_banned_pair_disclosed_on_stderr_names_pair_and_rule(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, _out, err = self._run_main(_two_provider_result())
+        self.assertIn("prov-a/model-x", err)
+        self.assertIn("deny_providers: prov-a", err)
+
+    def test_exclusion_count_line_printed(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, _out, err = self._run_main(_two_provider_result())
+        self.assertIn("1 pair(s) excluded", err)
+
+    def test_fully_denied_provider_dropped_from_summary_count(self):
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, out, _err = self._run_main(_two_provider_result())
+        self.assertIn("Discovered 1 candidate(s) across 1 provider(s) (prov-b)", out)
+
+    def test_restrict_models_excludes_disallowed_provider_only(self):
+        policy_path = self._write_policy(
+            'restrict_models:\n  - match: "model-*"\n    allowed_providers: [prov-b]\n'
+        )
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 0)
+        loaded = yaml.safe_load(self.candidates_path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["candidates"], [{"provider": "prov-b", "model": "model-y"}])
+        self.assertIn("restrict_models: 'model-*' allows [prov-b]", err)
+
+
+class TestDiscoverMainPolicyAbsentRegression(_DiscoverPolicyTestBase):
+    """No policy file at all -> zero exclusions, zero extra noise, identical
+    to pre-#78 output (CADRE_POLICY is forced absent by tests/__init__.py,
+    matching the CADRE_PALETTE hermeticity pattern)."""
+
+    def test_zero_exclusions_zero_policy_noise(self):
+        code, _out, err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 0)
+        self.assertNotIn("policy:", err)
+
+    def test_all_candidates_written_unfiltered(self):
+        code, _out, _err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 0)
+        loaded = yaml.safe_load(self.candidates_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            loaded["candidates"],
+            [{"provider": "prov-a", "model": "model-x"}, {"provider": "prov-b", "model": "model-y"}],
+        )
+
+    def test_summary_line_unaffected(self):
+        _code, out, _err = self._run_main(_two_provider_result())
+        self.assertIn("Discovered 2 candidate(s) across 2 provider(s)", out)
+
+
+class TestDiscoverMainMalformedPolicyRefuses(_DiscoverPolicyTestBase):
+    """A present-but-malformed policy file refuses loudly — no candidates
+    write at all — naming the file + remedy (KTD2 fail-closed)."""
+
+    def test_malformed_policy_exits_nonzero(self):
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err = self._run_main(_two_provider_result())
+        self.assertEqual(code, 1)
+
+    def test_malformed_policy_writes_no_candidates_file(self):
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main(_two_provider_result())
+        self.assertFalse(self.candidates_path.exists())
+
+    def test_malformed_policy_does_not_clobber_existing_candidates_file(self):
+        self.candidates_path.write_text("SENTINEL: hand-edited content\n", encoding="utf-8")
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main(_two_provider_result())
+        self.assertEqual(
+            self.candidates_path.read_text(encoding="utf-8"), "SENTINEL: hand-edited content\n"
+        )
+
+    def test_malformed_policy_message_names_file_and_remedy(self):
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, out, _err = self._run_main(_two_provider_result())
+        self.assertIn(str(policy_path), out)
+        self.assertIn("Fix or remove", out)
+
+
 if __name__ == "__main__":
     unittest.main()

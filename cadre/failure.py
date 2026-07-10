@@ -2,9 +2,18 @@
 
 A single ``FailureReason(str, Enum)`` spans two producers:
 
-- ``OFF_PALETTE`` — the #62 preflight gate's refusal reason. It never lands on an
-  ``AgentResult``: a preflight refusal happens before any lane is constructed, so
-  this member names a pre-run refusal, not a lane outcome.
+- ``OFF_PALETTE`` / ``POLICY_BLOCKED`` — pre-run preflight refusal reasons (#62,
+  #78). Neither ever lands on an ``AgentResult``: a preflight refusal happens
+  before any lane is constructed, so these members name a pre-run refusal, not a
+  lane outcome. ``POLICY_BLOCKED`` is the local allow/deny policy gate
+  (``~/.cadre/policy.yaml``, ``cadre.policy``) refusing a fleet that references a
+  banned (provider, model) pair — distinct from ``OFF_PALETTE`` because the pair
+  may already be admitted to the palette and still be policy-blocked (the policy
+  gate is a separate, independently-tightenable control, not palette
+  membership). Like ``OFF_PALETTE``, ``cadre.preflight.preflight_refusal``
+  returns a plain ``str`` message (never a ``FailureReason`` instance) for this
+  case too — this member's ``.value`` appears as a text token inside that
+  refusal string so it stays greppable without a signature change.
 - ``TIMEOUT`` / ``SKIPPED`` / ``EMPTY_OUTPUT`` / ``MODEL_ERROR`` — the four ways a
   runtime model call can fail. Each is set at its failure's construction site,
   never inferred later by parsing ``notes`` / ``error`` text — see
@@ -32,25 +41,31 @@ from enum import Enum
 class FailureReason(str, Enum):
     """Why a lane failed, or why a fleet was refused before any lane ran.
 
-    OFF_PALETTE  — preflight refusal only (#62): a specialist/synthesizer/judge
-                   model is absent from the resolved palette. Never set on an
-                   AgentResult — the refusal happens before a lane exists.
-    TIMEOUT      — the engine's outer wall-clock backstop fired on a wedged call.
-    SKIPPED      — a sequential-chain lane the engine never ran because an
-                   upstream lane failed.
-    EMPTY_OUTPUT — the model call returned None/empty/whitespace text. Cadre's
-                   contract: no usable output is a failure. In practice this is
-                   the PRIMARY runtime failure reason, because AIAgent was
-                   observed (U1 live spike, 2026-06-17) to return None rather
-                   than raise on a dead, unauthorized, or unresolvable model —
-                   so most real failures land here, not on MODEL_ERROR. (If a
-                   future AIAgent version raised instead, they'd surface as
-                   MODEL_ERROR; the taxonomy holds, only the distribution shifts.)
-    MODEL_ERROR  — the model call raised an exception; the raw exception text
-                   still lives in AgentResult.error alongside this reason.
+    OFF_PALETTE    — preflight refusal only (#62): a specialist/synthesizer/judge
+                     model is absent from the resolved palette. Never set on an
+                     AgentResult — the refusal happens before a lane exists.
+    POLICY_BLOCKED — preflight refusal only (#78): a specialist/synthesizer/judge
+                     (provider, model) pair is blocked by the local policy gate
+                     (~/.cadre/policy.yaml), independent of palette membership.
+                     Never set on an AgentResult — same pre-run timing as
+                     OFF_PALETTE.
+    TIMEOUT        — the engine's outer wall-clock backstop fired on a wedged call.
+    SKIPPED        — a sequential-chain lane the engine never ran because an
+                     upstream lane failed.
+    EMPTY_OUTPUT   — the model call returned None/empty/whitespace text. Cadre's
+                     contract: no usable output is a failure. In practice this is
+                     the PRIMARY runtime failure reason, because AIAgent was
+                     observed (U1 live spike, 2026-06-17) to return None rather
+                     than raise on a dead, unauthorized, or unresolvable model —
+                     so most real failures land here, not on MODEL_ERROR. (If a
+                     future AIAgent version raised instead, they'd surface as
+                     MODEL_ERROR; the taxonomy holds, only the distribution shifts.)
+    MODEL_ERROR    — the model call raised an exception; the raw exception text
+                     still lives in AgentResult.error alongside this reason.
     """
 
     OFF_PALETTE = "off_palette"
+    POLICY_BLOCKED = "policy_blocked"
     TIMEOUT = "timeout"
     SKIPPED = "skipped"
     EMPTY_OUTPUT = "empty_output"

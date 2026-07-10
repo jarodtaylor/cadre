@@ -71,6 +71,7 @@ from cadre.approval import _parent_is_safe
 from cadre.config import SAFE_TOOLSETS
 from cadre.discover import _DEFAULT_CANDIDATES_PATH
 from cadre.palette_fleet import write_palette_fleet
+from cadre.policy import PolicyError, default_policy_path, filter_pairs, load_policy
 from cadre.text_safety import sanitize as _sanitize
 
 # Default palette output path.
@@ -493,17 +494,37 @@ def main(all_candidates: bool = False) -> int:
     (``verify_candidates``, below) — the spend commitment is disclosed up
     front, never discovered call-by-call or after the fact.
 
+    The #78 policy gate runs before any of that: a malformed policy file
+    refuses outright (fail closed, no candidates even loaded for display —
+    KTD2), and every policy-banned candidate is filtered out of the working
+    candidate list BEFORE the cap/always-keep logic ever sees it — so a
+    banned pair is refused admission before any (paid) call AND, if it was
+    already on the existing palette, PRUNED from the rewritten one: it can
+    never land in ``always_keep`` (that set only matters for pairs that
+    remain in the candidate list) and so cannot survive the cap it would
+    otherwise be exempt from. This deliberately overrides the always-keep /
+    cap-exempt invariant for exactly this case (KTD4) — a tightened policy
+    must be able to evict a pair the operator previously trusted.
+
     Args:
         all_candidates: Verify every discovered candidate, bypassing the
             per-provider cap. Defaults to False (the capped subset).
 
     Returns:
         0 on a successful write (at least one candidate verified ok); 1 if
-        there are no candidates to verify, or the palette write itself failed
+        the policy file is malformed, there are no candidates to verify (or
+        none survive policy filtering), or the palette write itself failed
         (a clean message is printed either way — never a raw traceback).
     """
     candidates_path = _DEFAULT_CANDIDATES_PATH.expanduser()
     palette_path = _DEFAULT_PALETTE_PATH.expanduser()
+    policy_path = Path(default_policy_path()).expanduser()
+
+    try:
+        policy = load_policy(policy_path)
+    except PolicyError as exc:
+        print(_sanitize(str(exc)))
+        return 1
 
     candidates, declared_toolsets = _load_candidates(candidates_path)
 
@@ -514,6 +535,24 @@ def main(all_candidates: bool = False) -> int:
             "`cadre setup` to seed it from the installed package, or\n"
             "  • Edit PROVIDERS in this file (a dev/source-checkout shortcut; "
             "not durable across a package reinstall/upgrade)"
+        )
+        return 1
+
+    # #78: banned candidates are refused BEFORE any paid call — filtered out
+    # of the working list here, before the cap/always-keep logic below ever
+    # runs, so verify_candidates() is never even invoked for them.
+    candidates, policy_violations = filter_pairs(candidates, policy)
+    for v in policy_violations:
+        print(
+            f"[cadre] policy: excluded {_sanitize(v.provider)}/{_sanitize(v.model)} "
+            f"({_sanitize(v.rule)}) — not sent for verification",
+            file=sys.stderr,
+        )
+
+    if not candidates:
+        print(
+            f"All {len(policy_violations)} candidate(s) are excluded by policy "
+            f"({policy_path}) — nothing to verify."
         )
         return 1
 
@@ -532,8 +571,14 @@ def main(all_candidates: bool = False) -> int:
     # Pre-spend disclosure #2: pairs on the existing palette that are no
     # longer in the candidates file at all cannot be re-verified and WILL
     # drop when the palette is rewritten. Warn loudly BEFORE the first paid
-    # call so the operator can abort and re-add them.
-    dropping = sorted(existing - set(to_verify))
+    # call so the operator can abort and re-add them. Policy-banned pairs are
+    # excluded from this set — they already got their own, correctly-attributed
+    # disclosure above; without this exclusion a pruned pair would ALSO trigger
+    # this generic "no longer in the candidates file" warning, which is both
+    # factually wrong (it IS still in the file — policy excluded it) and a
+    # confusing double warning for the same pair.
+    policy_banned_pairs = {(v.provider, v.model) for v in policy_violations}
+    dropping = sorted(existing - set(to_verify) - policy_banned_pairs)
     if dropping:
         shown = ", ".join(f"{_sanitize(p)}/{_sanitize(m)}" for p, m in dropping)
         print(

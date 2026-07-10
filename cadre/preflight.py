@@ -1,5 +1,5 @@
-"""#62 preflight-refuse: block an off-palette (or palette-less) fleet before
-any model call.
+"""#62/#78 preflight-refuse: block an off-palette, policy-blocked, or
+palette-less fleet before any model call.
 
 Caller-layer only: imported by ``cadre/cli.py`` and ``cadre/data/skill/run.py``.
 NEVER imported by ``engine.py`` or ``model_client.py`` (R7) — the engine stays
@@ -24,6 +24,18 @@ Hermes's CLI is importable, else the manual ``palette-candidates.yaml``
 hand-edit — see ``_hermes_cli_available``) rather than silently running every
 model ungated. A PRESENT-but-unreadable/malformed palette was already a
 refusal before this flip and is unchanged by it.
+
+#78 policy gate: BEFORE the palette check, every model-bearing pair (every
+specialist, plus the synthesizer/judge when convergence makes them
+model-bearing — the exact same set ``off_palette_model_pairs`` already
+enumerates, reused here against an empty ``Palette()`` sentinel so both
+checks can never drift on "which roles carry a model") is checked against the
+local policy gate (``cadre.policy``, ``~/.cadre/policy.yaml``). A banned pair
+refuses even when it IS on the palette — the policy gate is a separate,
+independently-tightenable control, not palette membership (defense in
+depth). Checked first because it is the harder veto: a palette fix cannot
+un-block a policy-banned pair, but a policy fix can never widen what the
+palette already restricts.
 """
 
 from __future__ import annotations
@@ -33,7 +45,9 @@ from pathlib import Path
 
 from cadre.config import FleetConfig
 from cadre.discover import default_candidates_path
-from cadre.preview_lint import load_palette, off_palette_model_pairs, resolve_palette_path
+from cadre.failure import FailureReason
+from cadre.policy import PolicyError, default_policy_path, load_policy
+from cadre.preview_lint import Palette, load_palette, off_palette_model_pairs, resolve_palette_path
 from cadre.text_safety import sanitize as _sanitize
 
 
@@ -85,39 +99,109 @@ def _candidates_file_exists() -> bool:
         return False
 
 
-def preflight_refusal(cfg: FleetConfig, *, palette_path: str | Path | None = None) -> str | None:
-    """Return a refusal message when ``cfg`` has an off-palette model, else ``None``.
+def _all_model_pairs(cfg: FleetConfig) -> list[tuple[str, str, str]]:
+    """Every ``(role_label, provider, model)`` triple in ``cfg``, unconditionally.
 
-    Loads the palette via ``preview_lint.load_palette`` — ``palette_path`` →
-    the ``CADRE_PALETTE`` env var → the default ``~/.cadre/palette.yaml``
-    (``palette_path`` is an explicit-injection seam for tests/callers; both
-    runners call this with no argument, matching the plan's single-``cfg``
-    signature and getting the env/default resolution).
-
-    Refuses — never degrades open — when the palette is genuinely ABSENT
-    (#61/#62 flip, KTD7): a host with nothing to check against now gets a
-    legible refusal instead of silently running every model ungated. The
-    remedy it names depends on whether Hermes's CLI is importable on this
-    host (``_hermes_cli_available``): ``cadre discover`` when it is, else the
-    manual ``~/.cadre/palette-candidates.yaml`` hand-edit. A palette that is
-    PRESENT yet unreadable or malformed (``load_palette`` returns ``None``
-    while the resolved file exists) ALSO fails CLOSED with a refusal, as
-    before this flip — a broken palette must not silently disable the #62
-    spend-gate either (correctness DevEx: fail loud on a bad or missing
-    config, do not spend ungated). Returns ``None`` only when a palette IS
-    present and valid and every specialist, synthesizer, and judge model is
-    on it.
-
-    Otherwise returns a clear, multi-line refusal naming each offending role
-    + ``(provider, model)`` — every field ``_sanitize``d, since the fleet
-    YAML is a possibly-tampered trust surface (the same rule the rest of
-    ``preview_lint`` follows) — plus a fix hint. This is the run-time #62
-    gate: it frames the ``FailureReason.OFF_PALETTE`` condition, but (per
-    KTD3) a preflight refusal writes no manifest, so the caller's distinct
-    ``ExitCode.PREFLIGHT_REFUSE`` exit code — not this string's content — is
-    the structured signal an agent operator branches on. Off-palette
-    *toolsets* are never refused here (R4) — this checks models only.
+    Reuses ``off_palette_model_pairs`` against an empty ``Palette()``
+    sentinel: nothing is ever a member of an empty set, so every
+    model-bearing role registers as "off" that empty palette — i.e. this
+    returns literally every specialist/synthesizer/judge model-bearing pair,
+    regardless of any real palette. Reusing it (rather than re-deriving the
+    specialist/synthesizer/judge convergence-mode gating a second time) means
+    the policy check below can never drift from the palette check on "which
+    roles carry a model" (the same DRY argument ``off_palette_model_pairs``
+    already makes for ``check_palette`` vs. this module).
     """
+    return off_palette_model_pairs(cfg, Palette())
+
+
+def preflight_refusal(
+    cfg: FleetConfig,
+    *,
+    palette_path: str | Path | None = None,
+    policy_path: str | Path | None = None,
+) -> str | None:
+    """Return a refusal message when ``cfg`` is policy-blocked or has an
+    off-palette model, else ``None``.
+
+    Two independent gates, checked in order — either can refuse on its own:
+
+    1. **Policy (#78).** Loads the policy via ``cadre.policy.load_policy`` —
+       ``policy_path`` -> the ``CADRE_POLICY`` env var -> the default
+       ``~/.cadre/policy.yaml`` (``policy_path`` is an explicit-injection seam
+       for tests/callers, mirroring ``palette_path`` below; both runners call
+       this with no keyword arguments and get the env/default resolution). A
+       malformed policy file (``PolicyError``) fails CLOSED with its own
+       refusal — a broken safety file must never silently mean no safety.
+       Every model-bearing pair (``_all_model_pairs``) is checked against the
+       loaded policy; a banned pair refuses even when it IS on the palette
+       (the policy gate is independent of, and checked before, palette
+       membership — defense in depth).
+    2. **Palette (#62/#61).** Loads the palette via ``preview_lint.load_palette``
+       — ``palette_path`` -> the ``CADRE_PALETTE`` env var -> the default
+       ``~/.cadre/palette.yaml``. Refuses — never degrades open — when the
+       palette is genuinely ABSENT (#61/#62 flip, KTD7): a host with nothing
+       to check against now gets a legible refusal instead of silently
+       running every model ungated. The remedy it names depends on whether
+       Hermes's CLI is importable on this host (``_hermes_cli_available``):
+       ``cadre discover`` when it is, else the manual
+       ``~/.cadre/palette-candidates.yaml`` hand-edit. A palette that is
+       PRESENT yet unreadable or malformed (``load_palette`` returns ``None``
+       while the resolved file exists) ALSO fails CLOSED with a refusal, as
+       before this flip.
+
+    Returns ``None`` only when the policy gate blocks nothing AND a palette
+    IS present and valid AND every specialist, synthesizer, and judge model
+    is on it.
+
+    Every refusal names the offending role + ``(provider, model)`` —
+    every field ``_sanitize``d, since the fleet YAML is a possibly-tampered
+    trust surface (the same rule the rest of ``preview_lint`` follows) — plus
+    a fix hint. This is a run-time gate: it frames the
+    ``FailureReason.POLICY_BLOCKED`` / ``FailureReason.OFF_PALETTE``
+    conditions (each refusal embeds the matching reason's ``.value`` as a
+    text token), but (per KTD3) a preflight refusal writes no manifest, so
+    the caller's distinct ``ExitCode.PREFLIGHT_REFUSE`` exit code — not this
+    string's content — is the structured signal an agent operator branches
+    on. Off-palette *toolsets* are never refused here (R4) — this checks
+    models only.
+    """
+    resolved_policy_path = (
+        Path(policy_path).expanduser()
+        if policy_path is not None
+        else Path(default_policy_path()).expanduser()
+    )
+    try:
+        policy = load_policy(resolved_policy_path)
+    except PolicyError as exc:
+        return (
+            f"Refused ({FailureReason.POLICY_BLOCKED.value}) — no spend has "
+            f"occurred. The policy file could not be trusted: {_sanitize(str(exc))}\n"
+            f"Fix: repair or remove {_sanitize(str(resolved_policy_path))}."
+        )
+
+    policy_violations = []
+    for role_label, provider, model in _all_model_pairs(cfg):
+        violation = policy.check(provider, model)
+        if violation is not None:
+            policy_violations.append((role_label, violation))
+    if policy_violations:
+        lines = [
+            f"Refused ({FailureReason.POLICY_BLOCKED.value}) — no spend has "
+            "occurred. The following model(s) are blocked by policy "
+            f"({_sanitize(str(resolved_policy_path))}):",
+        ]
+        for role_label, v in policy_violations:
+            lines.append(
+                f"  - {_sanitize(role_label)}: ({_sanitize(v.provider)}, "
+                f"{_sanitize(v.model)}) — {_sanitize(v.rule)}"
+            )
+        lines.append(
+            f"Fix: edit {_sanitize(str(resolved_policy_path))}, or swap each "
+            "offending pair for one the policy allows."
+        )
+        return "\n".join(lines)
+
     palette = load_palette(palette_path)
     if palette is None:
         # Both branches below now refuse -- but for two different reasons, so

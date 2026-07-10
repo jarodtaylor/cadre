@@ -983,5 +983,231 @@ class TestVerifyPaletteMainCapsByDefault(unittest.TestCase):
         self.assertIn("grok", captured)  # the surrounding text still renders
 
 
+# ---------------------------------------------------------------------------
+# #78 policy chokepoint: main() refuses banned candidates BEFORE any (fake)
+# verify call, prunes an in-palette pair a tightened policy now bans
+# (overriding always-keep), and fails closed on a malformed policy file.
+#
+# Fixtures use neutral, non-real strings (prov-a, prov-b, model-x, ...) —
+# never a real provider/model name.
+# ---------------------------------------------------------------------------
+
+
+class _VerifyPalettePolicyTestBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.candidates_path = self.tmp / "palette-candidates.yaml"
+        self.palette_path = self.tmp / "palette.yaml"
+
+    def _write_candidates(self, pairs, toolsets=None):
+        data = {
+            "candidates": [{"provider": p, "model": m} for p, m in pairs],
+            "toolsets": toolsets if toolsets is not None else ["web"],
+        }
+        self.candidates_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    def _write_policy(self, content: str) -> Path:
+        path = self.tmp / "policy.yaml"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+    def _run_main(self, *, all_candidates=False):
+        """Run main() with verify_candidates faked (no live calls); returns
+        (exit_code, stdout, stderr, [args each verify_candidates call received]).
+        Mirrors TestVerifyPaletteMainCapsByDefault._run_main's exact pattern."""
+        calls = []
+
+        def fake_verify(candidates):
+            calls.append(list(candidates))
+            return [
+                verify_palette.VerifyRecord(provider=p, model=m, ok=True) for p, m in candidates
+            ]
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(verify_palette, "_DEFAULT_CANDIDATES_PATH", self.candidates_path), \
+             patch.object(verify_palette, "_DEFAULT_PALETTE_PATH", self.palette_path), \
+             patch.object(verify_palette, "verify_candidates", side_effect=fake_verify), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = verify_palette.main(all_candidates=all_candidates)
+        return code, out.getvalue(), err.getvalue(), calls
+
+
+class TestVerifyPaletteMainPolicyRefusesBeforeCall(_VerifyPalettePolicyTestBase):
+    """A policy-banned candidate is refused admission BEFORE any (fake)
+    model call — the fake factory is never invoked for it."""
+
+    def test_banned_candidate_never_reaches_verify_candidates(self):
+        self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1, "verify_candidates must be called exactly once")
+        self.assertNotIn(("prov-a", "model-x"), calls[0])
+        self.assertIn(("prov-b", "model-y"), calls[0])
+
+    def test_banned_candidate_disclosed_on_stderr_before_verification(self):
+        self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, _out, err, _calls = self._run_main()
+        self.assertIn("prov-a/model-x", err)
+        self.assertIn("deny_providers: prov-a", err)
+
+    def test_banned_pair_absent_from_written_palette(self):
+        self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main()
+        loaded = yaml.safe_load(self.palette_path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["models"], [{"provider": "prov-b", "model": "model-y"}])
+
+    def test_all_candidates_banned_exits_nonzero_no_verify_call(self):
+        self._write_candidates([("prov-a", "model-x")])
+        policy_path = self._write_policy("deny_providers:\n  - prov-a\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, out, _err, calls = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("excluded by policy", out)
+
+
+class TestVerifyPaletteMainPolicyPrunesInPaletteViolation(_VerifyPalettePolicyTestBase):
+    """A pair already on the existing palette that a TIGHTENED policy now
+    bans is PRUNED from the rewritten palette — overriding the always-keep /
+    cap-exempt invariant for exactly this case (KTD4). Isolated from the
+    ordinary cap/always-keep mechanics by banning ONLY the always-keep pair
+    (via an exact-match restrict_models rule) — its sibling candidates for
+    the SAME provider are untouched by policy, so this proves the override
+    is scoped to the banned pair, not a blanket provider exclusion."""
+
+    def _restrict_model_old_policy(self) -> Path:
+        return self._write_policy(
+            'restrict_models:\n  - match: "model-old"\n    allowed_providers: [prov-other]\n'
+        )
+
+    def test_pruned_pair_never_reaches_verify_candidates_siblings_unaffected(self):
+        self._write_candidates(
+            [("prov-a", "model-old"), ("prov-a", "model-new-1"), ("prov-a", "model-new-2")]
+        )
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {"models": [{"provider": "prov-a", "model": "model-old"}], "toolsets": ["web"]}
+            ),
+            encoding="utf-8",
+        )
+        policy_path = self._restrict_model_old_policy()
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, err, calls = self._run_main()
+        self.assertEqual(code, 0)
+        # model-old is pruned (never reaches verify_candidates); the two NEW
+        # candidates still verify normally under the per-provider cap (both
+        # fit within cap=2, so neither is trimmed).
+        self.assertEqual(
+            sorted(calls[0]), sorted([("prov-a", "model-new-1"), ("prov-a", "model-new-2")])
+        )
+        self.assertIn("prov-a/model-old", err)
+        self.assertIn("restrict_models: 'model-old' allows [prov-other]", err)
+        # It must NOT ALSO trigger the generic "no longer in candidates file /
+        # will DROP" warning — it's still in the file; policy is why it's gone.
+        self.assertNotIn("will DROP", err)
+
+    def test_written_palette_no_longer_contains_pruned_pair(self):
+        """The write-side proof: the rewritten palette.yaml does not contain
+        the pruned pair, even though it WAS on the palette before this run."""
+        self._write_candidates([("prov-a", "model-old"), ("prov-a", "model-new-1")])
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {"models": [{"provider": "prov-a", "model": "model-old"}], "toolsets": ["web"]}
+            ),
+            encoding="utf-8",
+        )
+        policy_path = self._restrict_model_old_policy()
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main()
+        loaded = yaml.safe_load(self.palette_path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["models"], [{"provider": "prov-a", "model": "model-new-1"}])
+
+    def test_untouched_default_path_always_keep_still_works_without_policy(self):
+        """Regression pin: the pre-#78 always-keep behavior is UNCHANGED with
+        no policy file at all — model-old rides always_keep beyond the
+        2-per-provider cap exactly as before this feature existed."""
+        self._write_candidates(
+            [("prov-a", "model-old"), ("prov-a", "model-new-1"), ("prov-a", "model-new-2")]
+        )
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {"models": [{"provider": "prov-a", "model": "model-old"}], "toolsets": ["web"]}
+            ),
+            encoding="utf-8",
+        )
+        code, _out, err, calls = self._run_main()  # no policy patched at all
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(calls[0]),
+            sorted([("prov-a", "model-old"), ("prov-a", "model-new-1"), ("prov-a", "model-new-2")]),
+        )
+        self.assertNotIn("will DROP", err)
+        self.assertNotIn("policy:", err)
+
+
+class TestVerifyPaletteMainPolicyNonBannedUnaffected(_VerifyPalettePolicyTestBase):
+    """Non-banned pairs keep today's behavior byte-for-byte — a present
+    policy that blocks nothing relevant must not perturb unrelated pairs."""
+
+    def test_non_banned_pairs_unaffected_by_unrelated_deny_rule(self):
+        self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
+        policy_path = self._write_policy("deny_providers:\n  - prov-c\n")  # matches neither
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(calls[0]), sorted([("prov-a", "model-x"), ("prov-b", "model-y")]))
+
+    def test_absent_policy_identical_to_today(self):
+        """Regression: no policy file at all -> zero policy noise, exact
+        same candidates reach verify_candidates as before #78."""
+        self._write_candidates([("prov-a", "model-x"), ("prov-b", "model-y")])
+        code, _out, err, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertNotIn("policy:", err)
+        self.assertEqual(sorted(calls[0]), sorted([("prov-a", "model-x"), ("prov-b", "model-y")]))
+
+
+class TestVerifyPaletteMainMalformedPolicyRefuses(_VerifyPalettePolicyTestBase):
+    """A present-but-malformed policy file refuses BEFORE any call — not even
+    the candidates file's contents reach verify_candidates (KTD2 fail-closed)."""
+
+    def test_malformed_policy_exits_nonzero_before_any_call(self):
+        self._write_candidates([("prov-a", "model-x")])
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            code, _out, _err, calls = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+
+    def test_malformed_policy_message_names_file(self):
+        self._write_candidates([("prov-a", "model-x")])
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            _code, out, _err, _calls = self._run_main()
+        self.assertIn(str(policy_path), out)
+
+    def test_malformed_policy_does_not_touch_existing_palette(self):
+        self._write_candidates([("prov-a", "model-x")])
+        self.palette_path.write_text(
+            yaml.safe_dump(
+                {"models": [{"provider": "prov-a", "model": "model-x"}], "toolsets": ["web"]}
+            ),
+            encoding="utf-8",
+        )
+        original = self.palette_path.read_text(encoding="utf-8")
+        policy_path = self._write_policy("deny_providers: not-a-list\n")
+        with patch.dict(os.environ, {"CADRE_POLICY": str(policy_path)}):
+            self._run_main()
+        self.assertEqual(self.palette_path.read_text(encoding="utf-8"), original)
+
+
 if __name__ == "__main__":
     unittest.main()
