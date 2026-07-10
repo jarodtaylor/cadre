@@ -9,6 +9,7 @@ installed. The real AIAgent import is lazy — only when a live agent is built.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -106,6 +107,19 @@ def _default_agent_factory(provider: str, model: str, toolset: list[str]) -> Any
 # (messages, api_calls, ...) is deliberately NOT copied.
 _USAGE_COST_NUMBER_KEYS = frozenset({"estimated_cost_usd"})
 _USAGE_COST_STR_KEYS = frozenset({"cost_status", "cost_source"})
+# Sanity ceiling for a token counter (folded review finding): a real count
+# never approaches this; it only guards against a pathological upstream value.
+_MAX_USAGE_INT = 10**15
+
+
+def _is_safe_usage_number(value: int | float) -> bool:
+    # A float must be JSON-finite (NaN/Inf are not valid JSON per RFC 8259);
+    # an int must stay under a sane magnitude so a pathological upstream value
+    # can't later blow past CPython's int-to-str conversion cap when the
+    # manifest is serialized.
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return abs(value) < _MAX_USAGE_INT
 
 
 def _usage_receipt(result: dict) -> dict | None:
@@ -113,7 +127,9 @@ def _usage_receipt(result: dict) -> dict | None:
 
     Pure capture (#76): the receipt never influences classification. Zero values
     survive as 0 — dropping them would make a quota-billed lane's honest "0 cost
-    accounted" indistinguishable from "no receipt at all".
+    accounted" indistinguishable from "no receipt at all". A value that fails
+    the serialization sanity check (see _is_safe_usage_number) is dropped, not
+    substituted — a missing receipt entry is capture-don't-gate honest.
     """
     usage: dict = {}
     for key, value in result.items():
@@ -121,9 +137,9 @@ def _usage_receipt(result: dict) -> dict | None:
             continue
         if isinstance(value, bool):
             continue  # bool is an int subclass; a flag is never a counter
-        if key.endswith("_tokens") and isinstance(value, int):
+        if key.endswith("_tokens") and isinstance(value, int) and _is_safe_usage_number(value):
             usage[key] = value
-        elif key in _USAGE_COST_NUMBER_KEYS and isinstance(value, (int, float)):
+        elif key in _USAGE_COST_NUMBER_KEYS and isinstance(value, (int, float)) and _is_safe_usage_number(value):
             usage[key] = value
         elif key in _USAGE_COST_STR_KEYS and isinstance(value, str):
             usage[key] = value
@@ -208,9 +224,17 @@ class ModelClient:
 
         # Receipt extracted once, stamped on EVERY dict-shaped outcome below —
         # success, flagged failure, and empty output all may have burned tokens.
-        usage = _usage_receipt(result)
+        try:
+            usage = _usage_receipt(result)
+        except Exception:  # noqa: BLE001
+            # Resilience boundary: a pathological result shape must degrade the receipt, not raise out of .run() (verify_palette._verify_one would abort its whole loop).
+            usage = None
 
-        failure = _flagged_failure_detail(result)
+        try:
+            failure = _flagged_failure_detail(result)
+        except Exception:  # noqa: BLE001
+            # Same boundary; a crash here implies the dict already looked failure-shaped, so this keeps ok/reason classification unchanged — only the detail text degrades.
+            failure = "structured failure flags present (detail unavailable)"
         if failure is not None:
             # Structured flags take precedence over everything, including a
             # non-empty final_response: on this path the text is AIAgent's own

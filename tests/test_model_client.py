@@ -5,15 +5,7 @@ from pathlib import Path
 
 from cadre.failure import FailureReason
 from cadre.model_client import AgentResult, ModelClient
-
-
-def success_result(text, **extra):
-    """The banked run_conversation success shape (#76 KTD5): completed, not
-    failed, text present. ``extra`` lets a test add usage keys or override flags.
-    """
-    result = {"final_response": text, "completed": True, "failed": False}
-    result.update(extra)
-    return result
+from tests.palette_fixtures import run_conversation_ok
 
 
 class FakeAgent:
@@ -52,7 +44,7 @@ def run_with(result=None, raises=None, **run_kwargs):
 
 class TestSuccess(unittest.TestCase):
     def test_returns_labeled_text(self):
-        client = ModelClient(agent_factory=factory_returning(FakeAgent(result=success_result("findings"))))
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(result=run_conversation_ok("findings"))))
         r = client.run(role="web", provider="openrouter", model="google/gemini-3-flash",
                        prompt="go", toolset=["web"])
         self.assertTrue(r.ok)
@@ -63,12 +55,12 @@ class TestSuccess(unittest.TestCase):
     def test_successful_call_has_no_reason(self):
         # The case the __post_init__ not-None guard protects: a successful lane's
         # reason stays at its None default, and construction must not raise.
-        r = run_with(result=success_result("findings"))
+        r = run_with(result=run_conversation_ok("findings"))
         self.assertIsNone(r.reason)
 
     def test_factory_receives_provider_model_toolset(self):
         captured = []
-        client = ModelClient(agent_factory=factory_returning(FakeAgent(result=success_result("ok")), captured))
+        client = ModelClient(agent_factory=factory_returning(FakeAgent(result=run_conversation_ok("ok")), captured))
         client.run(role="social", provider="xai", model="grok-4.3", prompt="go", toolset=["x_search"])
         self.assertEqual(captured[0], {"provider": "xai", "model": "grok-4.3", "toolset": ["x_search"]})
 
@@ -92,7 +84,7 @@ class TestFailure(unittest.TestCase):
 
     def test_empty_final_response_is_failure(self):
         for reply in ("", "   ", None):
-            r = run_with(result=success_result(reply))
+            r = run_with(result=run_conversation_ok(reply))
             self.assertFalse(r.ok, f"final_response={reply!r} should be a failure")
             self.assertIn("empty", r.error)
             self.assertIs(r.reason, FailureReason.EMPTY_OUTPUT, f"final_response={reply!r}")
@@ -128,7 +120,7 @@ class TestStructuredFlagClassification(unittest.TestCase):
         # MANDATORY anti-content-sniff regression: a response QUOTING an error
         # message, with clean structured flags, is a legitimate answer.
         quoted = 'The log line you asked about reads: "I apologize, but I encountered repeated errors: quota exceeded"'
-        r = run_with(result=success_result(quoted))
+        r = run_with(result=run_conversation_ok(quoted))
         self.assertTrue(r.ok)
         self.assertEqual(r.text, quoted)
         self.assertIsNone(r.error)
@@ -152,7 +144,7 @@ class TestStructuredFlagClassification(unittest.TestCase):
     def test_empty_error_key_is_not_a_failure_marker(self):
         # error present-but-empty must not trip the classifier (KTD3: "present
         # and non-empty").
-        r = run_with(result=success_result("fine", error=""))
+        r = run_with(result=run_conversation_ok("fine", error=""))
         self.assertTrue(r.ok)
         self.assertEqual(r.text, "fine")
 
@@ -176,7 +168,7 @@ class TestStructuredFlagClassification(unittest.TestCase):
     def test_turn_exit_reason_alone_is_not_a_failure_marker(self):
         # Successful turns carry an exit reason too — it is detail on a flagged
         # failure, never a trigger by itself.
-        r = run_with(result=success_result("done", turn_exit_reason="completed"))
+        r = run_with(result=run_conversation_ok("done", turn_exit_reason="completed"))
         self.assertTrue(r.ok)
 
     def test_non_dict_result_is_empty_output(self):
@@ -214,7 +206,7 @@ class TestUsageReceipt(unittest.TestCase):
     }
 
     def test_usage_holds_exactly_the_whitelist_subset(self):
-        r = run_with(result=success_result(
+        r = run_with(result=run_conversation_ok(
             "hi",
             session_id="abc",          # not usage — must not be copied
             api_calls=3,               # not usage — must not be copied
@@ -225,14 +217,14 @@ class TestUsageReceipt(unittest.TestCase):
         self.assertEqual(r.usage, self._FULL)
 
     def test_no_usage_keys_yields_none(self):
-        r = run_with(result=success_result("hi"))
+        r = run_with(result=run_conversation_ok("hi"))
         self.assertTrue(r.ok)
         self.assertIsNone(r.usage)
 
     def test_zero_values_preserved_not_dropped(self):
         # OAuth/quota-billed rows may honestly report 0 — 0 is a receipt, not
         # an absence.
-        r = run_with(result=success_result(
+        r = run_with(result=run_conversation_ok(
             "hi", input_tokens=0, output_tokens=0, estimated_cost_usd=0,
         ))
         self.assertEqual(
@@ -263,7 +255,7 @@ class TestUsageReceipt(unittest.TestCase):
     def test_values_are_type_gated(self):
         # A drifted upstream can't smuggle arbitrary payloads under known keys:
         # counters must be non-bool ints, cost_usd a number, status/source strings.
-        r = run_with(result=success_result(
+        r = run_with(result=run_conversation_ok(
             "hi",
             input_tokens="100",         # str counter — dropped
             cache_tokens=True,          # bool is not a counter — dropped
@@ -272,6 +264,87 @@ class TestUsageReceipt(unittest.TestCase):
             output_tokens=20,           # valid — kept
         ))
         self.assertEqual(r.usage, {"output_tokens": 20})
+
+
+class TestUsageReceiptNumberSanity(unittest.TestCase):
+    """Folded review finding: a usage/cost number must be safe to serialize.
+    NaN/Inf floats are not valid JSON (RFC 8259); a pathological int magnitude
+    risks CPython's int-to-str conversion cap. A value that fails the check is
+    dropped, not substituted — capture-don't-gate: a missing receipt entry is
+    honest, a manifest write that later blows up is not.
+    """
+
+    def test_nan_cost_dropped(self):
+        r = run_with(result=run_conversation_ok("hi", estimated_cost_usd=float("nan")))
+        self.assertTrue(r.ok)
+        self.assertIsNone(r.usage)
+
+    def test_positive_inf_cost_dropped(self):
+        r = run_with(result=run_conversation_ok("hi", estimated_cost_usd=float("inf")))
+        self.assertIsNone(r.usage)
+
+    def test_negative_inf_cost_dropped(self):
+        r = run_with(result=run_conversation_ok("hi", estimated_cost_usd=float("-inf")))
+        self.assertIsNone(r.usage)
+
+    def test_huge_input_tokens_dropped(self):
+        r = run_with(result=run_conversation_ok("hi", input_tokens=10**16))
+        self.assertIsNone(r.usage)
+
+    def test_normal_values_kept(self):
+        # The sanity guard must not regress ordinary, well-formed receipts.
+        r = run_with(result=run_conversation_ok(
+            "hi", input_tokens=100, output_tokens=20, estimated_cost_usd=0.0042,
+        ))
+        self.assertEqual(
+            r.usage,
+            {"input_tokens": 100, "output_tokens": 20, "estimated_cost_usd": 0.0042},
+        )
+
+    def test_zero_values_still_kept(self):
+        # Nor the existing zero-value contract (OAuth/quota-billed rows
+        # honestly report 0, and 0 is well within the sane-magnitude ceiling).
+        r = run_with(result=run_conversation_ok("hi", input_tokens=0, estimated_cost_usd=0))
+        self.assertEqual(r.usage, {"input_tokens": 0, "estimated_cost_usd": 0})
+
+
+class TestClassificationExtractorResilience(unittest.TestCase):
+    """Adversarial F2: _usage_receipt / _flagged_failure_detail run OUTSIDE
+    ModelClient.run's own try/except, so a pathological result shape must not
+    propagate out of .run() — verify_palette._verify_one would abort its
+    whole verify loop on any raise. Each extractor is wrapped independently;
+    ok/reason classification must come out identical to the non-crashing path.
+    """
+
+    def test_items_explosion_drops_usage_but_classification_still_normal(self):
+        # A dict SUBCLASS whose .items() raises: _usage_receipt (which
+        # iterates .items()) falls back to usage=None, while
+        # _flagged_failure_detail (which uses only .get()) is unaffected, so
+        # the failure classification below is the ordinary, non-fallback path.
+        class ExplodingItemsDict(dict):
+            def items(self):
+                raise RuntimeError("items boom")
+
+        result = ExplodingItemsDict({"failed": True, "error": "boom"})
+        r = run_with(result=result)
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+        self.assertIn("boom", r.error)
+        self.assertIsNone(r.usage)
+
+    def test_broken_error_str_falls_back_to_generic_detail(self):
+        # error is not None is already established by the time str(error)
+        # would run, so a crash here always occurs on what would have been a
+        # flagged failure — the generic-detail fallback matches that outcome.
+        class BrokenStr:
+            def __str__(self):
+                raise RuntimeError("str boom")
+
+        r = run_with(result={"error": BrokenStr()})
+        self.assertFalse(r.ok)
+        self.assertIs(r.reason, FailureReason.MODEL_ERROR)
+        self.assertEqual(r.error, "structured failure flags present (detail unavailable)")
+        self.assertIsNone(r.usage)
 
 
 class TestAgentResultReasonCoercion(unittest.TestCase):
@@ -318,16 +391,16 @@ class TestAgentResultCaptureFieldDefaults(unittest.TestCase):
     """
 
     def test_run_does_not_set_elapsed_s(self):
-        r = run_with(result=success_result("text"), toolset=["web"])
+        r = run_with(result=run_conversation_ok("text"), toolset=["web"])
         self.assertIsNone(r.elapsed_s)
 
     def test_run_does_not_set_toolset_from_argument(self):
         # toolset defaults to [] and run() must leave it there, even when a toolset is passed
-        r = run_with(result=success_result("text"), toolset=["web"])
+        r = run_with(result=run_conversation_ok("text"), toolset=["web"])
         self.assertEqual(r.toolset, [])
 
     def test_run_does_not_set_timed_out(self):
-        r = run_with(result=success_result("text"))
+        r = run_with(result=run_conversation_ok("text"))
         self.assertFalse(r.timed_out)
 
     def test_error_path_also_leaves_capture_fields_at_defaults(self):
@@ -356,7 +429,7 @@ class TestDefaultFactoryToolsetIsFailClosed(unittest.TestCase):
                 captured.append(kwargs)
 
             def run_conversation(self, prompt):
-                return success_result("ok")
+                return run_conversation_ok("ok")
 
         module = types.ModuleType("run_agent")
         module.AIAgent = _StubAIAgent
@@ -405,7 +478,7 @@ class TestNoChatFakesRemain(unittest.TestCase):
         import cadre
         package_dir = Path(cadre.__file__).resolve().parent
         offenders = sorted(
-            p.name for p in package_dir.glob("*.py")
+            p.name for p in package_dir.rglob("*.py")
             if self._CALL_NEEDLE in p.read_text(encoding="utf-8")
         )
         self.assertEqual(offenders, [])

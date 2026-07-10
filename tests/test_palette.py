@@ -24,18 +24,12 @@ from unittest.mock import patch
 import yaml
 
 import cadre.verify_palette as verify_palette
+from tests.palette_fixtures import run_conversation_ok
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-def _rc_ok(text="ok"):
-    """run_conversation success shape (#76): clean flags + text. Verify fakes
-    return this dict — the adapter classifies on the structured flags, so a
-    bare string reply is no longer a valid fake shape."""
-    return {"final_response": text, "completed": True, "failed": False}
-
 
 def make_records(*, ok_pairs=None, fail_pairs=None):
     """Build a list of VerifyRecord instances for test input.
@@ -425,7 +419,7 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         import unittest.mock as mock
         # Patch _agent so no live AIAgent import is attempted
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = _rc_ok()
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok()
             result = verify_palette.verify_candidates([])
         self.assertIsInstance(result, list)
 
@@ -433,7 +427,7 @@ class TestVerifyCandidatesSignature(unittest.TestCase):
         """With one candidate, returns a list with one VerifyRecord."""
         import unittest.mock as mock
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = _rc_ok()
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok()
             result = verify_palette.verify_candidates([("xai", "grok-4.3")])
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], verify_palette.VerifyRecord)
@@ -597,7 +591,7 @@ class TestVerifyCandidatesBlankResponse(unittest.TestCase):
         import unittest.mock as mock
 
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
-            fake_agent.return_value.run_conversation.return_value = _rc_ok("")
+            fake_agent.return_value.run_conversation.return_value = run_conversation_ok("")
             result = verify_palette.verify_candidates([("xai", "grok-4.3")])
 
         self.assertEqual(len(result), 1)
@@ -643,7 +637,7 @@ class TestVerifyStructuredFlagClassification(unittest.TestCase):
     def test_clean_flags_quoting_error_text_is_verified(self):
         # Anti-content-sniff at the verify layer: quoting an error message with
         # clean flags is a legitimate answer and must still verify.
-        records = self._verify_single(_rc_ok(
+        records = self._verify_single(run_conversation_ok(
             'I apologize, but I encountered repeated errors: "quota" — quoting your log verbatim'
         ))
         self.assertTrue(records[0].ok)
@@ -691,7 +685,7 @@ class TestVerifyOneVerboseModeSanitizes(unittest.TestCase):
     def test_verbose_provider_output_is_sanitized_not_raw(self):
         def noisy_ok(*_a, **_k):
             print("provider says\x1b[31m RED")
-            return _rc_ok()
+            return run_conversation_ok()
 
         out = io.StringIO()
         with patch.object(verify_palette, "_agent") as fake_agent, \
@@ -736,7 +730,7 @@ class TestVerifyCandidatesOutputSuppression(unittest.TestCase):
         def noisy_ok(*_a, **_k):
             print("SCARY PROVIDER STACK DUMP")
             print("❌ Non-retryable error — Aborting", file=_sys.stderr)
-            return _rc_ok()
+            return run_conversation_ok()
 
         with mock.patch.object(verify_palette, "_agent") as fake_agent:
             fake_agent.return_value.run_conversation.side_effect = noisy_ok

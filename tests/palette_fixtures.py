@@ -64,6 +64,16 @@ def fake_discovery_result(provider="xai-oauth", models=("grok-4.3",), hermes_hom
     )
 
 
+def run_conversation_ok(text="ok", **extra):
+    """The banked run_conversation success shape (#76 KTD5): completed, not
+    failed, text present. ``extra`` lets a test add usage keys or override
+    flags. Shared by test_model_client.py and test_palette.py (identical
+    twins before consolidation)."""
+    result = {"final_response": text, "completed": True, "failed": False}
+    result.update(extra)
+    return result
+
+
 def _toolsets_for_config(cfg: FleetConfig) -> set[str]:
     toolsets: set[str] = set()
     for s in cfg.specialists:
