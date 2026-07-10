@@ -219,6 +219,89 @@ class TestCheckInventoryShapeDrift(unittest.TestCase):
         self.assertIn("mapping", result.detail)
 
 
+# ---------------------------------------------------------------------------
+# check_inventory_shape -- alignment with discover_candidates(): any payload
+# shape that would make discover_candidates() raise DiscoveryError on an
+# authenticated row must FAIL here too (Copilot review, PR #83) -- an empty
+# slug, an empty models list, and an empty-string/empty-id model entry were
+# all previously accepted as "shape-valid" even though discover_candidates()
+# rejects each of them once a row is authenticated. Unauthenticated rows are
+# deliberately left un-tightened (regression tests below), since
+# discover_candidates() never reads their slug/models content at all.
+# ---------------------------------------------------------------------------
+
+
+class TestCheckInventoryShapeDiscoverAlignment(unittest.TestCase):
+    def test_authenticated_empty_slug_fails(self):
+        payload = _payload(_row("", models=["grok-4.3"]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertFalse(result.ok)
+        self.assertIn("empty slug", result.detail)
+
+    def test_authenticated_empty_models_list_fails(self):
+        payload = _payload(_row("xai-oauth", models=[]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertFalse(result.ok)
+        self.assertIn("xai-oauth", result.detail)
+        self.assertIn("empty models list", result.detail)
+
+    def test_authenticated_empty_string_model_entry_fails(self):
+        payload = _payload(_row("xai-oauth", models=[""]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertFalse(result.ok)
+        self.assertIn("xai-oauth", result.detail)
+        self.assertIn("empty-string model entry", result.detail)
+
+    def test_authenticated_empty_id_dict_model_entry_fails(self):
+        payload = _payload(_row("openrouter", models=[{"id": ""}]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertFalse(result.ok)
+        self.assertIn("openrouter", result.detail)
+        self.assertIn("empty-string model entry", result.detail)
+
+    def test_whitespace_only_slug_on_authenticated_row_still_passes(self):
+        """discover_candidates()'s own emptiness check is `not slug`, which a
+        whitespace-only string does not trip (it's truthy) -- smoke must
+        reject EXACTLY what discover rejects, not invent extra strictness via
+        e.g. a .strip() discover itself never applies."""
+        payload = _payload(_row("  ", models=["grok-4.3"]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+    def test_whitespace_only_model_entry_on_authenticated_row_still_passes(self):
+        payload = _payload(_row("xai-oauth", models=["  "]))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+
+class TestCheckInventoryShapeDiscoverAlignmentUnauthenticatedRegression(unittest.TestCase):
+    """discover_candidates() skips an unauthenticated row entirely (`if not
+    row.get("authenticated"): continue`) before it ever reads that row's
+    slug/models -- so an unauthenticated row with the exact same empty
+    content that fails an authenticated row must keep PASSING smoke's
+    pure-shape check, unchanged by the #83 tightening above."""
+
+    def test_unauthenticated_empty_slug_still_passes(self):
+        payload = _payload(_row("", models=["x"], authenticated=False))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+    def test_unauthenticated_empty_models_list_still_passes(self):
+        payload = _payload(_row("openrouter", models=[], authenticated=False))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+    def test_unauthenticated_empty_string_model_entry_still_passes(self):
+        payload = _payload(_row("openrouter", models=[""], authenticated=False))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+    def test_unauthenticated_empty_id_dict_model_entry_still_passes(self):
+        payload = _payload(_row("openrouter", models=[{"id": ""}], authenticated=False))
+        result = smoke.check_inventory_shape(payload=payload)
+        self.assertTrue(result.ok, result.detail)
+
+
 class TestCheckInventoryShapeHermesNotImportable(unittest.TestCase):
     """No payload injected -> a real fetch is attempted -> fails gracefully on
     a machine without hermes_cli. Forced deterministically via sys.modules

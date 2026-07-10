@@ -19,7 +19,15 @@ anything to ``~/.cadre`` or anywhere else:
    carries ``{authenticated, is_current, is_user_defined, models, name, slug,
    source, total_models}`` with sane types (``auth_type`` is deliberately
    NOT in that set — a normal row never carries it); each ``models`` entry is
-   a bare string or an ``{"id": ...}`` dict. Hermes's own aggregator row
+   a bare string or an ``{"id": ...}`` dict. For an authenticated, non-virtual
+   row, the check additionally rejects an empty slug, an empty ``models``
+   list, or a model entry whose string value/``id`` is empty — exactly the
+   shapes ``discover_candidates()`` itself rejects on that row — so this gate
+   can never PASS a payload ``cadre discover`` would then FAIL on. An
+   unauthenticated row is left at the pure-shape assertion only:
+   ``discover_candidates()`` skips unauthenticated rows before ever reading
+   their slug/models content, so smoke does not manufacture strictness
+   discover itself never applies there. Hermes's own aggregator row
    (``auth_type: "virtual"``) is exempted from the row-shape check the same
    way ``discover_candidates`` skips it. This NEVER calls
    ``discover.write_candidates`` — smoke reads the payload and stops; the
@@ -131,11 +139,21 @@ def check_inventory_shape(payload: dict | None = None) -> SmokeCheck:
     ``discover.write_candidates``, so nothing is written regardless of
     outcome.
 
+    For an authenticated, non-virtual row, this also rejects exactly what
+    ``discover.discover_candidates()`` itself would reject on that same row:
+    an empty slug, an empty ``models`` list, or a model entry whose string
+    value/``id`` is empty. An unauthenticated row keeps the pure-shape
+    assertion only — ``discover_candidates()`` skips unauthenticated rows
+    before ever reading their slug/models content, so a payload shape it
+    would never inspect there is not smoke's business to reject either.
+
     Returns:
         A ``SmokeCheck`` — ``ok=True`` when every non-aggregator row has all
-        8 required keys with sane types and every ``models`` entry is a
-        recognized shape; ``ok=False`` naming exactly what drifted (a missing
-        key, a wrong type, an unrecognized model entry, a non-list
+        8 required keys with sane types, every ``models`` entry is a
+        recognized shape, and — for authenticated rows only — the slug, the
+        models list, and each model entry are non-empty; ``ok=False`` naming
+        exactly what drifted (a missing key, a wrong type, an unrecognized or
+        empty model entry, an empty slug, an empty models list, a non-list
         ``providers``, or Hermes simply not being importable on this host).
         Extra/unknown keys — top-level or per-row — are NOT a failure (benign
         growth, not drift): a stderr note lists them and the check still
@@ -196,14 +214,50 @@ def check_inventory_shape(payload: dict | None = None) -> SmokeCheck:
             detail = ", ".join(f"{k} (got {type(row[k]).__name__})" for k in wrong_type)
             return SmokeCheck(name, False, f"provider {label!r} has wrong-typed key(s): {detail}")
 
+        # discover_candidates() only reads a row's slug/models once it has
+        # confirmed `authenticated` is truthy (cadre/discover.py's own
+        # `if not row.get("authenticated"): continue`) -- an unauthenticated
+        # row's slug/models content is never inspected there, however empty,
+        # so this gate leaves unauthenticated rows at the pure-shape
+        # assertions already above and below (see
+        # test_unauthenticated_row_still_shape_checked_and_passes). For an
+        # authenticated row, though, an empty slug or empty models list is
+        # exactly what makes discover_candidates() raise DiscoveryError, so
+        # smoke must FAIL here too -- otherwise this gate could PASS a
+        # payload `cadre discover` then fails on.
+        authenticated = row["authenticated"]
+
+        if authenticated and not row["slug"]:
+            return SmokeCheck(
+                name,
+                False,
+                f"provider {label!r} has an empty slug "
+                "(discover_candidates() rejects an empty slug on an authenticated row)",
+            )
+        if authenticated and not row["models"]:
+            return SmokeCheck(
+                name,
+                False,
+                f"provider {label!r} has an empty models list "
+                "(discover_candidates() rejects an empty models list on an authenticated row)",
+            )
+
         for entry in row["models"]:
             if isinstance(entry, str):
-                continue
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str):
-                continue
-            return SmokeCheck(
-                name, False, f"provider {label!r} has an unrecognized model entry: {entry!r}"
-            )
+                model_id = entry
+            elif isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                model_id = entry.get("id")
+            else:
+                return SmokeCheck(
+                    name, False, f"provider {label!r} has an unrecognized model entry: {entry!r}"
+                )
+            if authenticated and not model_id:
+                return SmokeCheck(
+                    name,
+                    False,
+                    f"provider {label!r} has an empty-string model entry {entry!r} "
+                    "(discover_candidates() rejects an empty model id on an authenticated row)",
+                )
 
         extra_keys |= set(row) - set(_REQUIRED_ROW_KEYS)
 
