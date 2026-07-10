@@ -502,9 +502,11 @@ def main() -> int:
 
     result, violations = _apply_policy(result, policy)
     for v in violations:
-        # Violation fields are policy-file-derived, not untrusted host input,
-        # but sanitized anyway (KTD9 discipline — every discovered/policy
-        # string reaching a terminal goes through the same chokepoint).
+        # v.provider/v.model come from the untrusted Hermes discovery payload
+        # (KTD9 display input, same as elsewhere in this module); only
+        # v.rule is derived from the local policy file. All three go through
+        # the same sanitize() chokepoint regardless — one auditable call per
+        # sink, not a source-dependent branch.
         print(
             f"[cadre] policy: excluded {_sanitize(v.provider)}/{_sanitize(v.model)} "
             f"({_sanitize(v.rule)})",

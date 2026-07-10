@@ -227,6 +227,14 @@ class TestPolicyCheckDenyProviders(unittest.TestCase):
         pol = Policy(deny_providers=frozenset({"prov-a"}))
         self.assertIsNotNone(pol.check("Prov-A", "model-x"))
 
+    def test_violation_text_quotes_configured_casing_not_input_casing(self):
+        """An operator reading the violation greps policy.yaml for the rule
+        text — it must quote the CONFIGURED entry as written on disk, not
+        whatever casing the caller happened to pass in."""
+        pol = Policy(deny_providers=frozenset({"prov-a"}))
+        v = pol.check("Prov-A", "model-x")
+        self.assertEqual(v.rule, "deny_providers: prov-a")
+
 
 # ---------------------------------------------------------------------------
 # Rule matching: restrict_models
@@ -281,6 +289,14 @@ class TestPolicyCheckRestrictModels(unittest.TestCase):
         pol = self._policy(match="Fam-*", allowed=("prov-b",))
         self.assertIsNotNone(pol.check("prov-a", "fam-large"))
         self.assertIsNone(pol.check("prov-b", "fam-large"))  # allowed provider still passes
+
+    def test_restrict_violation_text_quotes_configured_casing(self):
+        """The rule text names the CONFIGURED match glob and allowed-provider
+        list as written in policy.yaml, unaffected by the input model's own
+        casing — same operator-facing legibility guarantee as deny_providers."""
+        pol = self._policy(match="Fam-*", allowed=("Prov-B",))
+        v = pol.check("prov-a", "fam-large")
+        self.assertEqual(v.rule, "restrict_models: 'Fam-*' allows [Prov-B]")
 
     def test_multiple_allowed_providers(self):
         pol = self._policy(match="fam-*", allowed=("prov-a", "prov-b"))

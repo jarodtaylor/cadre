@@ -150,10 +150,28 @@ class Violation:
 
 @dataclass(frozen=True)
 class _RestrictRule:
-    """One parsed ``restrict_models`` entry."""
+    """One parsed ``restrict_models`` entry.
+
+    ``_match_cf``/``_allowed_cf`` are casefolded views precomputed once here,
+    at construction, instead of being rebuilt on every ``Policy.check`` call:
+    ``_match_cf`` is ``match.casefold()`` for the glob comparison, and
+    ``_allowed_cf`` maps casefold(provider) -> the CONFIGURED provider string
+    as written in policy.yaml. ``match``/``allowed_providers`` stay the
+    source of truth; these two are a derived cache (``init=False``, excluded
+    from equality/repr so two rules built from the same match/allowed_providers
+    still compare equal).
+    """
 
     match: str
     allowed_providers: tuple[str, ...]
+    _match_cf: str = field(default="", init=False, repr=False, compare=False)
+    _allowed_cf: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_match_cf", self.match.casefold())
+        object.__setattr__(
+            self, "_allowed_cf", {p.casefold(): p for p in self.allowed_providers}
+        )
 
 
 @dataclass(frozen=True)
@@ -176,6 +194,13 @@ class Policy:
     # itself; `source` alone cannot distinguish them.
     # "file": loaded from disk with a parsed (possibly all-empty) mapping.
     source: str = "absent"
+    # casefold(provider) -> the CONFIGURED provider string as written in
+    # policy.yaml, precomputed once here rather than rebuilt on every `check`
+    # call. Also lets `check` report a deny_providers violation in the
+    # operator's own casing (what they'd grep for in policy.yaml), not the
+    # caller's possibly differently-cased input. Derived from deny_providers
+    # (init=False, excluded from equality/repr — not independent state).
+    _deny_cf: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def permissive(cls) -> "Policy":
@@ -186,6 +211,11 @@ class Policy:
         classmethod itself is source-agnostic and always yields "absent".
         """
         return cls()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "_deny_cf", {p.casefold(): p for p in self.deny_providers}
+        )
 
     def check(self, provider: str, model: str) -> "Violation | None":
         """Return a ``Violation`` if ``(provider, model)`` is blocked, else ``None``.
@@ -218,17 +248,27 @@ class Policy:
         case-insensitivity explicitly rather than incidentally). This can
         only WIDEN blocking too: a case-mismatched rule (the policy author
         wrote one casing, the host reports another) would otherwise be a
-        SILENT NO-OP — the harmful direction for a money-safety file.
+        SILENT NO-OP — the harmful direction for a money-safety file. The
+        casefolded views (``_deny_cf`` / each rule's ``_match_cf``/
+        ``_allowed_cf``) are precomputed at construction, not rebuilt here.
+
+        A returned ``Violation.rule`` always quotes the CONFIGURED (policy
+        file) casing, never the caller's input casing — an operator reading
+        the violation text greps policy.yaml for it, so a case-mismatched
+        report (e.g. input ``Prov-A`` blocked by a configured ``prov-a``
+        rule) must read ``prov-a``, matching what's actually on disk.
         """
         provider_cf = provider.casefold()
-        if provider_cf in {p.casefold() for p in self.deny_providers}:
-            return Violation(provider, model, f"deny_providers: {provider}")
+        configured_provider = self._deny_cf.get(provider_cf)
+        if configured_provider is not None:
+            return Violation(provider, model, f"deny_providers: {configured_provider}")
         model_cf = model.casefold()
         segment_cf = model.rsplit("/", 1)[-1].casefold()
         for rule in self.restrict_models:
-            match_cf = rule.match.casefold()
-            if fnmatch.fnmatchcase(model_cf, match_cf) or fnmatch.fnmatchcase(segment_cf, match_cf):
-                if provider_cf in {p.casefold() for p in rule.allowed_providers}:
+            if fnmatch.fnmatchcase(model_cf, rule._match_cf) or fnmatch.fnmatchcase(
+                segment_cf, rule._match_cf
+            ):
+                if provider_cf in rule._allowed_cf:
                     return None
                 allowed = ", ".join(rule.allowed_providers)
                 return Violation(
